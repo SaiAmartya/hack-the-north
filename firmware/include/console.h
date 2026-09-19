@@ -9,6 +9,12 @@ struct Settings {
   int8_t axis_sign[3];
 };
 
+constexpr uint8_t kDefaultDisplayRotation = 3;
+
+constexpr Settings default_settings() {
+  return {kDefaultDisplayRotation, true, {0, 1, 2}, {1, 1, 1}};
+}
+
 namespace console {
 void load_settings();
 void save_settings();
