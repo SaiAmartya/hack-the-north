@@ -63,6 +63,13 @@ void publish_health(uint32_t now, bool force) {
   ble::notify_status(rec, g_session_gen);
 }
 
+// Encode current health as the STATUS read value. Call with g_lock held.
+void store_health(uint32_t now) {
+  uint8_t rec[proto::REC];
+  proto::encode_status(g_session.health(now, wand::stats().lost, health_bits()), rec);
+  ble::set_health(rec);
+}
+
 void update_stream() {
   g_streaming = ble::connected() && g_session.is_open() && ble::motion_subscribed();
   wand::set_streaming(g_streaming ? g_session_gen : 0);
@@ -76,9 +83,7 @@ void on_link(uint32_t generation) {
   }
   update_stream();
   g_health_dirty = true;
-  uint8_t rec[proto::REC];
-  proto::encode_status(g_session.health(millis(), wand::stats().lost, health_bits()), rec);
-  ble::set_health(rec);
+  store_health(millis());
 }
 
 // Runs on the NimBLE host task the moment a CONTROL write lands, so a command result never waits
@@ -98,9 +103,7 @@ void on_control(const uint8_t *raw, size_t len, uint32_t received_ms, uint32_t g
     }
     update_stream();
     if (stale_before != g_session.state_stale()) g_health_dirty = true;
-    uint8_t health[proto::REC];
-    proto::encode_status(g_session.health(millis(), wand::stats().lost, health_bits()), health);
-    ble::set_health(health);
+    store_health(millis());
   }
 }
 

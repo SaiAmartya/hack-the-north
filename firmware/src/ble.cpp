@@ -2,7 +2,6 @@
 #include "config.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
-#include <esp_mac.h>
 #include <string.h>
 #include <atomic>
 #include <freertos/semphr.h>
@@ -127,7 +126,7 @@ void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t
   g_server->start();  // registers the service table; NimBLEService::start() is a no-op in 2.x
 
   // 128-bit service UUID fills the advertising packet; the name and preferred connection interval
-  // go in the scan response. Fast advertising keeps the chooser snappy and reconnects quick.
+  // go in the scan response. Intervals come from config.h (moderate, battery-friendly).
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
   adv->setMinInterval(ADV_INTERVAL_MIN);
   adv->setMaxInterval(ADV_INTERVAL_MAX);
@@ -161,7 +160,6 @@ void ensure_advertising() {
 }
 bool motion_subscribed() { return g_motion_sub; }
 bool status_subscribed() { return g_status_sub; }
-uint32_t generation() { return g_gen; }
 uint32_t connections() { return g_connections; }
 uint32_t advertising_restarts() { return g_adv_restarts; }
 uint32_t conn_interval_us() { return g_conn_interval_units.load() * 1250u; }

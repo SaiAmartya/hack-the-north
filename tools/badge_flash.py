@@ -507,19 +507,6 @@ def enter_download_mode(port: str) -> None:
         print("no wand firmware answered on the console (stock firmware, or already in download mode)", flush=True)
 
 
-def boot_app(port: str) -> bool:
-    """After flashing, make sure the application is running: the RTS-emulated hard reset over native
-    USB does not leave the bootloader on this badge, but a watchdog reset from the stub does."""
-    print("waiting for the application ...", flush=True)
-    time.sleep(2.5)
-    if app_is_up(port):
-        return True
-    print("application not answering, forcing a watchdog reset out of the bootloader", flush=True)
-    subprocess.run([tool("esptool"), "--chip", "esp32c3", "--port", port, "--before", "no-reset", "--after", "watchdog-reset", "chip-id"], capture_output=True, text=True)
-    time.sleep(3.0)
-    return app_is_up(pick_port(None) if port else port)
-
-
 APP_OFFSET = 0x10000
 APP_PARTITION_SIZE = 0x2A0000
 BOOT_REGION_SIZE = 0x9000  # bootloader + partition table: must stay byte-identical to the stock backup

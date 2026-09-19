@@ -37,16 +37,10 @@ export type MotionRecognizerState = {
 
 export type MotionRejectionReason =
   | "keep-still" | "invalid-gravity" | "motion-gap" | "invalid-sample"
-  | "return-neutral" | "too-short" | "too-long" | "unclear-direction"
-  | "too-small" | "missing-stop" | "inconsistent-direction" | "guard-tilt"
-  | "no-match" | "ambiguous";
+  | "return-neutral" | "too-long" | "unclear-direction" | "too-small"
+  | "inconsistent-direction" | "guard-tilt" | "no-match" | "ambiguous";
 
-/**
- * Recognizer revision. The diagnostics record below keeps the version-2 wire shape that the
- * deployed phone service validates; `reason` strings carry the v3 outcome.
- */
-export const MOTION_RECOGNIZER_VERSION = 3 as const;
-
+/** Diagnostics keep the version-2 wire shape the deployed phone service validates. */
 export type MotionStopEvidence = "opposite" | "release" | "none";
 
 export type MotionDiagnostics = {
@@ -161,6 +155,7 @@ function median(values: readonly number[]): number {
   return sorted[Math.floor(sorted.length / 2)];
 }
 function clamp01(value: number): number { return Math.max(0, Math.min(1, value)); }
+function stopEvidence(how: "early" | "quiet"): MotionStopEvidence { return how === "early" ? "opposite" : "release"; }
 function spellCounts(): Record<SpellName, number> { return { stupefy: 0, protego: 0, expelliarmus: 0 }; }
 
 export class MotionRecognizer {
@@ -190,20 +185,8 @@ export class MotionRecognizer {
   constructor(private readonly onGesture: (evidence: GestureEvidence) => void) {}
 
   beginCalibration(): void {
+    this.reset("Hold your wand still");
     this.phase = "stillness";
-    this.generation = undefined;
-    this.neutral = undefined;
-    this.noiseRms = 0;
-    this.calibratingSpell = undefined;
-    this.examples.clear();
-    this.templates.clear();
-    this.enabledSpells = new Set(CORE_SPELLS);
-    this.evidenceSequence = 0;
-    this.lastIssue = "Hold your wand still";
-    this.reason = undefined;
-    this.lastCandidate = undefined;
-    this.clearSegmenter();
-    this.rest = undefined;
     this.setProgress("hold-still", 0, STILLNESS_MS);
   }
 
@@ -584,7 +567,7 @@ export class MotionRecognizer {
       return how === "quiet";  // the hand drifted; not a movement anyone meant
     }
     if (this.calibratingSpell) {
-      this.recordCandidate(features, how === "early" ? "opposite" : "release", "candidate");
+      this.recordCandidate(features, stopEvidence(how), "candidate");
       this.acceptCalibrationExample(this.calibratingSpell, features, how);
       return true;
     }
@@ -603,7 +586,7 @@ export class MotionRecognizer {
     }
     this.lastIssue = "";
     this.reason = undefined;
-    this.recordCandidate(features, how === "early" ? "opposite" : "release", "accepted");
+    this.recordCandidate(features, stopEvidence(how), "accepted");
     this.setProgress("ready", ARM_MS, ARM_MS);
     this.onGesture({
       id: `${this.generation}:gesture:${++this.evidenceSequence}`,
@@ -625,7 +608,7 @@ export class MotionRecognizer {
     if (issue) {
       this.lastIssue = issue.message;
       this.reason = issue.reason;
-      this.recordCandidate(features, how === "early" ? "opposite" : "release", issue.reason);
+      this.recordCandidate(features, stopEvidence(how), issue.reason);
       this.setProgress("armed", 0, ARM_MS);
       if (spell === "protego" && features.tiltDeg >= ONSET_TILT_DEG)
         this.rejectedGuardReturn = scale(features.tiltDirection, -1);
@@ -636,7 +619,7 @@ export class MotionRecognizer {
     examples.push(features);
     this.examples.set(spell, examples);
     this.reason = undefined;
-    this.recordCandidate(features, how === "early" ? "opposite" : "release", "accepted");
+    this.recordCandidate(features, stopEvidence(how), "accepted");
     this.setProgress("ready", ARM_MS, ARM_MS);
     if (examples.length < EXAMPLES_PER_SPELL) {
       this.lastIssue = `${examples.length} of ${EXAMPLES_PER_SPELL}. ${spell === "protego" ? "Lower, then raise again." : "Again."}`;

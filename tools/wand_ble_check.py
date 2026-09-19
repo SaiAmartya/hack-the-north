@@ -29,7 +29,6 @@ INFO = "7f510001-1b15-4f0d-8f3c-8db47a812000"
 MOTION = "7f510002-1b15-4f0d-8f3c-8db47a812000"
 CONTROL = "7f510003-1b15-4f0d-8f3c-8db47a812000"
 STATUS = "7f510004-1b15-4f0d-8f3c-8db47a812000"
-RESULT_NAMES = ["ok", "malformed", "wrong session", "invalid arg", "expired", "unsupported", "stale seq"]
 
 failures: list[str] = []
 

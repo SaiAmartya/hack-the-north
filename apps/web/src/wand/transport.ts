@@ -46,6 +46,7 @@ export interface WandTransport {
 }
 
 const deviceOwners = new Map<string, symbol>();
+const bytesOf = (view: DataView) => new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
 
 const RECOVERY_ATTEMPTS = 4;
 const RECOVERY_DELAYS_MS = [0, 500, 1000, 2000];
@@ -169,11 +170,7 @@ export class BleWandTransport implements WandTransport {
       this.assertGeneration(generation);
       const value = await characteristic.readValue();
       this.assertGeneration(generation);
-      return new Uint8Array(
-        value.buffer,
-        value.byteOffset,
-        value.byteLength,
-      ).slice();
+      return bytesOf(value);
     });
   }
 
@@ -183,14 +180,7 @@ export class BleWandTransport implements WandTransport {
       this.assertGeneration(generation);
       const changed = () => {
         if (generation !== this.generation || !characteristic.value) return;
-        const value = characteristic.value;
-        listener(
-          new Uint8Array(
-            value.buffer,
-            value.byteOffset,
-            value.byteLength,
-          ).slice(),
-        );
+        listener(bytesOf(characteristic.value));
       };
       characteristic.addEventListener("characteristicvaluechanged", changed);
       this.cleanup.push(() =>

@@ -52,7 +52,6 @@ bool decode_motion(const uint8_t *in, size_t len, Motion &v);  // strict: versio
 bool decode_control(const uint8_t *in, size_t len, Control &v);  // false only when the frame cannot be identified (bad length)
 void encode_control(const Control &v, uint8_t out[REC]);
 void encode_status(const Status &v, uint8_t out[REC]);
-bool decode_status(const uint8_t *in, size_t len, Status &v);
 
 struct DisplayState {
   bool valid;
@@ -87,7 +86,7 @@ class Session {
 
  private:
   void clear_cues();
-  uint32_t apply(const Control &c, const uint8_t *raw, uint32_t now_ms);
+  uint32_t apply(const Control &c, uint32_t now_ms);
   bool open_;
   uint32_t nonce_;
   uint16_t last_seq_;

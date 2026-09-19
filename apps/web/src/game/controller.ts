@@ -13,7 +13,7 @@ import { CastFusion } from "../input/fusion";
 import { SpeechClient } from "../speech/client";
 import { GameClient } from "./client";
 import { VideoLink } from "./video";
-import { CueEffect, PresentationPhase, SpellCode } from "../wand/protocol";
+import { CueEffect, PresentationPhase, SpellCode, StateStatusFlag, formatDeviceId } from "../wand/protocol";
 import type { Source } from "./contracts";
 
 export class DuelController {
@@ -157,16 +157,14 @@ export class DuelController {
       this.fusion.reset(this.generation);
       this.wand?.suspend();
       this.speech.stop();
-      this.game.send({
-        type: "heartbeat",
-        clientMs: performance.now(),
-        inputGeneration: this.generation,
-        healthy: false,
-      });
+      this.sendUnhealthyHeartbeat();
       this.issue = "Paused. Reconnect your wand to continue.";
       this.onChange();
     }
   };
+  private sendUnhealthyHeartbeat() {
+    this.game.send({ type: "heartbeat", clientMs: performance.now(), inputGeneration: this.generation, healthy: false });
+  }
   healthy() {
     const mic = this.speech.getSnapshot().phase;
     return (
@@ -411,7 +409,7 @@ export class DuelController {
       this.fusion.reset(this.generation);
       this.motion.clearPending();
       this.speech.setRecognitionEnabled(false);
-      this.game.send({ type: "heartbeat", clientMs: performance.now(), inputGeneration: this.generation, healthy: false });
+      this.sendUnhealthyHeartbeat();
     }
     this.wasStreaming = streaming;
   }
@@ -466,19 +464,19 @@ export class DuelController {
         },
       }));
       if (this.dead || attempt !== this.cameraAttempt) {
-        stream.getTracks().forEach((t) => t.stop());
+        stopTracks(stream);
         return;
       }
       await this.peer.setLocalStream(stream);
       if (this.dead || attempt !== this.cameraAttempt) {
-        stream.getTracks().forEach((t) => t.stop());
+        stopTracks(stream);
         return;
       }
-      this.localVideo?.getTracks().forEach((t) => t.stop());
+      stopTracks(this.localVideo);
       this.localVideo = stream;
       this.syncGame();
     } catch {
-      acquired?.getTracks().forEach((t) => t.stop());
+      stopTracks(acquired);
       if (!this.dead && attempt === this.cameraAttempt)
         this.cameraIssue = "Camera unavailable";
     }
@@ -499,9 +497,7 @@ export class DuelController {
       ready: true,
       inputGeneration: this.generation,
       healthy: true,
-      deviceId: info.deviceId
-        .map((n) => n.toString(16).padStart(2, "0"))
-        .join(""),
+      deviceId: formatDeviceId(info.deviceId),
       bootId: info.bootId,
     });
   }
@@ -558,8 +554,8 @@ export class DuelController {
         hp: own.hp,
         maxHp: own.maxHp,
         statusFlags:
-          (own.shieldUntilMs > this.game.now() ? 1 : 0) |
-          (own.offenseLockedUntilMs > this.game.now() ? 2 : 0),
+          (own.shieldUntilMs > this.game.now() ? StateStatusFlag.ShieldActive : 0) |
+          (own.offenseLockedUntilMs > this.game.now() ? StateStatusFlag.OffenseLocked : 0),
         presentationEpoch: this.presentationEpoch,
       };
       const key = JSON.stringify(feedback);
@@ -613,7 +609,7 @@ export class DuelController {
     this.speech.stop();
     this.peer.stop();
     this.game.disconnect();
-    this.localVideo?.getTracks().forEach((t) => t.stop());
+    stopTracks(this.localVideo);
     for (const off of this.unsubscribers) off();
     this.unsubscribers = [];
   }
@@ -631,14 +627,14 @@ async function brokerIssue(response: Response, fallback: string): Promise<string
   return fallback;
 }
 
-async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
-  const response = await fetch("/api/phone/config", {
-    cache: "no-store",
-    method: "POST",
-    signal,
-  });
+async function brokerPost(path: string, signal: AbortSignal): Promise<unknown> {
+  const response = await fetch(path, { cache: "no-store", method: "POST", signal });
   if (!response.ok) throw new Error(await brokerIssue(response, "Phone pairing is unavailable."));
-  const value: unknown = await response.json();
+  return response.json();
+}
+
+async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
+  const value = await brokerPost("/api/phone/config", signal);
   if (
     !value ||
     typeof value !== "object" ||
@@ -651,10 +647,9 @@ async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
 }
 
 async function createHostedPair(signal: AbortSignal): Promise<HostedPair> {
-  const response = await fetch("/api/phone/pair", { method: "POST", signal });
-  if (!response.ok) throw new Error(await brokerIssue(response, "Phone pairing is unavailable."));
-  return parseHostedPair(await response.json());
+  return parseHostedPair(await brokerPost("/api/phone/pair", signal));
 }
+const stopTracks = (stream?: MediaStream) => stream?.getTracks().forEach((track) => track.stop());
 export const nameOf = (spell: SpellName) =>
   spell[0].toUpperCase() + spell.slice(1);
 const codeOf = (spell: SpellName) =>

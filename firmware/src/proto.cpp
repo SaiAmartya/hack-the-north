@@ -96,17 +96,6 @@ void encode_status(const Status &v, uint8_t out[REC]) {
   put32(out + 16, v.detail1);
 }
 
-bool decode_status(const uint8_t *in, size_t len, Status &v) {
-  if (len != REC || in[0] != VERSION) return false;
-  v.kind = in[1];
-  v.seq = get16(in + 2);
-  v.nonce = get32(in + 4);
-  v.device_ms = get32(in + 8);
-  v.detail0 = get32(in + 12);
-  v.detail1 = get32(in + 16);
-  return true;
-}
-
 // ---------------------------------------------------------------------------------------------
 // Session
 
@@ -183,15 +172,14 @@ bool Session::handle_control(const uint8_t *in, size_t len, uint32_t now_ms, Sta
     return true;
   }
   last_seq_ = c.seq;  // a well-formed in-order command consumes its sequence even when rejected
-  result.detail1 = apply(c, in, now_ms);
+  result.detail1 = apply(c, now_ms);
   memcpy(last_cmd_, in, REC);
   last_result_ = result;
   have_last_ = true;
   return true;
 }
 
-uint32_t Session::apply(const Control &c, const uint8_t *raw, uint32_t now_ms) {
-  (void)raw;
+uint32_t Session::apply(const Control &c, uint32_t now_ms) {
   switch (c.opcode) {
     case OP_OPEN:
       return RC_WRONG_SESSION;  // only the first OPEN establishes the session

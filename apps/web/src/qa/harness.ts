@@ -13,7 +13,7 @@ import type {
   ByteListener,
   NotificationKind,
 } from "../wand/transport";
-import { MotionFlag, type InfoRecord, type MotionRecord } from "../wand/protocol";
+import { MotionFlag, formatDeviceId, type InfoRecord, type MotionRecord } from "../wand/protocol";
 
 export type GameQaReport = {
   stage: "idle" | "running" | "complete" | "failed";
@@ -211,9 +211,7 @@ class QaPlayer {
       ready: true,
       inputGeneration: this.generation,
       healthy: true,
-      deviceId: info.deviceId
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join(""),
+      deviceId: formatDeviceId(info.deviceId),
       bootId: info.bootId,
     });
   }

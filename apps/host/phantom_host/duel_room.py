@@ -40,7 +40,6 @@ from phantom_host.duel_models import (
     wire_dict,
 )
 
-ROOM_ID = "main"
 RELIABLE_QUEUE_LIMIT = 32
 ATTEMPT_CACHE_LIMIT = 128
 SESSION_LEASE_MS = 5_000

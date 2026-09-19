@@ -257,11 +257,10 @@ export function isSupportedDuelProfile(info: InfoRecord): boolean {
   );
 }
 
+/** Twelve lowercase hex digits in byte order; the referee compares this exact string. */
 export function formatDeviceId(deviceId: DeviceId): string {
   assertDeviceId(deviceId);
-  return Array.from(deviceId, (byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-    .toUpperCase();
+  return Array.from(deviceId, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export function encodeInfo(record: InfoRecord): Uint8Array {

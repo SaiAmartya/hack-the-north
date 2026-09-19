@@ -306,7 +306,7 @@ export class WandClient {
   private fail(reason: string, recoverable = true, code = "input_interrupted"): void {
     if (this.snapshot.phase === "fault" && this.snapshot.issue) return;
     if (recoverable && this.canRecover() && !this.recovering &&
-        ["streaming", "validating"].includes(this.snapshot.phase)) {
+        this.live()) {
       // Bounded automatic recovery: a link that keeps dropping needs the player, not a loop.
       const now = this.now();
       this.recoveryTimes = this.recoveryTimes.filter((at) => now - at < RECOVERY_WINDOW_MS);
@@ -365,6 +365,11 @@ export class WandClient {
 
   private assertGeneration(generation: number): void {
     if (generation !== this.generation) throw new Error("Session superseded");
+  }
+
+  /** The link carries motion: streaming, or validating the first second after a handshake. */
+  private live(): boolean {
+    return this.snapshot.phase === "streaming" || this.snapshot.phase === "validating";
   }
 
   private async command(
@@ -481,7 +486,7 @@ export class WandClient {
         ? ""
         : "Device presentation unhealthy";
     const inputFault = this.inputFault(record.healthFlags);
-    if (["streaming", "validating"].includes(this.snapshot.phase) && inputFault)
+    if (this.live() && inputFault)
       this.fail(inputFault);
   }
 
@@ -499,7 +504,7 @@ export class WandClient {
   }
 
   private motion(bytes: Uint8Array): void {
-    if (!this.sync || !["streaming", "validating"].includes(this.snapshot.phase)) return;
+    if (!this.sync || !this.live()) return;
     if (!this.checkTiming(this.now())) return;
     let record: MotionRecord;
     try {
@@ -621,7 +626,7 @@ export class WandClient {
   }
 
   private async pump(): Promise<void> {
-    if (this.pumping || this.pending || !["streaming", "validating"].includes(this.snapshot.phase))
+    if (this.pumping || this.pending || !this.live())
       return;
     const generation = this.generation;
     const syncing = this.now() >= this.syncDue;
