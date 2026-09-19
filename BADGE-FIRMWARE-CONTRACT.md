@@ -1,10 +1,10 @@
 # Badge firmware ↔ game platform contract
 
-**Status:** proposed v1 team handoff, September 19, 2026. Not yet accepted by the firmware team or validated on custom firmware. Companion: [MVP-OUTLINE.md](MVP-OUTLINE.md).
+**Status:** proposed v1 team handoff, HAL-grounded revision, September 19, 2026. Not yet accepted by the firmware team or validated on custom firmware. Packet layouts, UUIDs and golden vectors are unchanged; both teams must acknowledge this revised draft before freezing it. Companion: [MVP-OUTLINE.md](MVP-OUTLINE.md).
 
 **In plain English:** deliver a battery-powered wand that connects directly to Chrome, streams trustworthy motion, reports when something is wrong, and displays small feedback messages from the game. We will build all spell recognition, speech handling, multiplayer, combat, camera/video and Three.js graphics.
 
-This specifies **observable behavior and the shared interface**, not how to implement firmware. The two firmware teammates own language/SDK, board support, drivers, scheduling, memory and flashing. They may choose any implementation that passes this contract. The UUIDs/bytes below are proposed project constants, not existing badge APIs; agree changes here before either side forks its implementation.
+This specifies **observable behavior and the shared interface**, not a firmware implementation. The firmware owner (currently the two firmware teammates) owns language/SDK, board support, drivers, scheduling, memory and flashing. The same handoff applies if our team later takes that role. They may choose any implementation that passes this contract and its hardware constraints. The UUIDs/bytes below are proposed project constants, not existing badge APIs; agree changes here before either side forks its implementation.
 
 ## 1. Deliverables and ownership
 
@@ -18,20 +18,40 @@ This specifies **observable behavior and the shared interface**, not how to impl
 
 **Required for the completed MVP:** one untethered badge per player; no combat buttons; motion + speech required; no device-side combat authority. Two other badges are spares for development/recovery. No receiver badge, serial gameplay bridge, badge Wi-Fi, onboard speech, camera processing, extra peripherals, over-the-air updates or raw image/audio downloads in v1.
 
-**Early integration image:** prioritize identity → BLE connect → fresh motion → OPEN/SYNC/status. Simple text and LED pulses are sufficient. Device Lab can inspect an incomplete image; real-duel Ready requires the complete mandatory capabilities. Do not wait for polished artwork to hand us a stream.
+**Early integration image:** prioritize the H0–H4 gates in Section 8: safe recovery, sensor truth, connected GATT and loaded stability before artwork. Simple text and dim LED pulses are sufficient. Device Lab can inspect an incomplete image; real-duel Ready requires the complete mandatory capabilities and qualified target profile. Diagnostic access is not permission to cast.
 
 ## 2. Hardware facts versus requested behavior
 
-- **Board evidence:** the prior stock-image boot log identifies ESP32-C3, 4 MB flash and SC7A20H over I²C. It does not validate this new firmware. [Hardware report](docs/hardware-verification.md)
-- **Chip capability:** ESP32-C3 supports Bluetooth LE and Wi-Fi, with 400 KB total internal RAM; free heap depends on the complete image. Old Lua heap/tick/44-byte-radio limits do not define this interface. [Espressif](https://www.espressif.com/en/products/socs/esp32-c3)
-- **Sensor capability:** the SC7A20H provides three-axis, 12-bit acceleration and selectable ±2/4/8/16 g ranges. We request a 50 Hz stream, initially ±8 g, to be validated for noise/clipping. This is not six-axis tracking: no gyro/yaw/position reconstruction is required. [Silan manufacturer specification](https://www.silan.com.cn/en/index.php/product/details/3235.html)
-- **Presentation/power:** use the existing 320×240 screen, six RGB LEDs and supported two-AA battery power. No assumed vibration motor, microphone or speaker. The team must confirm board revision, pin mapping, actual drivers and safe power/USB behavior with the creators. [Badge site](https://badge.hackthenorth.com/), [manual](https://badge.hackthenorth.com/manual)
+| Evidence category | Meaning in this contract |
+| --- | --- |
+| Creator-documented | Board wiring, component identities, example initialization and cautions supplied by the badge creators; not measurements by our team |
+| Manufacturer-documented | Chip/SDK capabilities supported by primary documentation; not proof of this complete badge application |
+| Project requirement | Requested behavior or acceptance target, including 50 Hz/±8 g output and connected GATT |
+| Hardware-verified | A recorded result tied to an actual image, board, computer and test procedure; none of this revision's custom-firmware gates has been measured |
 
-Keep streaming responsive while the screen and LEDs update. Firmware may reduce decorative refresh/brightness to preserve memory, timing and battery. We require measured behavior, not a particular RTOS, task layout, graphics library or CPU clock.
+**Creator source provenance:** Sai confirmed on September 19, 2026 that `custom-firmware-hal.md` came directly from the badge creators. [The repository reference copy](docs/hardware/custom-firmware-hal.md) is byte-for-byte unchanged from the supplied file; its SHA-256 is `c7c88fc8e1ad9da9d775997b7a1c19da6528e14cb65ed1c407f5715dd0909db9`. The file has no internal revision/date identifier; the date here records receipt/provenance, not authorship. Preserve that copy unchanged and put qualifications in this contract. Its setup commands and generic HAL checklist are source material, not authorization to install, flash, add buttons or enable NFC.
+
+- **Board evidence:** the creator guide identifies ESP32-C3-MINI-1-N4, 4 MB flash, ST7789 display and SC7A20HTR accelerometer. The earlier stock-image boot log independently identified ESP32-C3 and SC7A20H over I²C, but does not validate custom firmware. [Hardware report](docs/hardware-verification.md)
+- **Chip capability:** ESP32-C3 supports Bluetooth LE and Wi-Fi, with 400 KB total internal RAM; free heap depends on the complete image. Old Lua heap/tick/44-byte-radio limits do not define this interface. [Espressif](https://www.espressif.com/en/products/socs/esp32-c3)
+- **Sensor capability versus profile:** the manufacturer lists three-axis, 12-bit output and selectable ±2/4/8/16 g ranges. The creator recipe is **100 Hz/±2 g**; our requested **50 Hz output/±8 g** configuration, scale and performance remain unverified. No gyro/yaw/position reconstruction is required. Appendix A defines the profile-validation gate; do not infer an ±8 g register recipe or sensitivity from the ±2 g example. [Silan manufacturer specification](https://www.silan.com.cn/en/index.php/product/details/3235.html)
+- **Presentation/power:** creator guidance specifies a 320×240 RGB565 SPI display, six WS2812 LEDs and AA power. No assumed vibration motor, microphone or speaker. Use its pin table, then confirm the actual board revision and safe flashing-power state, including whether AA batteries must be removed for USB. [Creator HAL](docs/hardware/custom-firmware-hal.md#2-pin-map), [badge manual](https://badge.hackthenorth.com/manual)
+
+Keep streaming responsive while the screen and LEDs update; Appendix A captures the resource, SDK and recovery constraints. We require measured behavior, not a particular RTOS, task layout, graphics library or CPU clock. Mac bring-up is useful early evidence; it cannot satisfy Windows Chrome qualification.
 
 ## 3. Wireless connection and GATT surface
 
 **Selected path:** badge BLE peripheral ↔ laptop Bluetooth adapter ↔ Chrome Web Bluetooth. No specialized IDE or local native bridge during gameplay. Chrome supports GATT reads, writes and notifications on Windows; discovery requires a user click and secure context. Qualify the exact Windows/Chrome/adapter combination. [Chrome documentation](https://developer.chrome.com/docs/capabilities/bluetooth)
+
+**Feasibility status: SDK-supported, badge-unvalidated.** The creator HAL reports a proven extended-advertising/passive-scan pattern and warns about NimBLE heap exhaustion. That is not evidence for our connected GATT workload. Espressif's ESP32-C3-compatible peripheral example establishes SDK support for the required operations, not our board's memory, timing or battery performance. [ESP-IDF v5.5.3 peripheral example](https://github.com/espressif/esp-idf/blob/v5.5.3/examples/bluetooth/nimble/bleprph/README.md)
+
+**Recommended minimal feasibility build:**
+
+- Retain peripheral, broadcaster and GATT-server functionality with ordinary legacy connectable advertising on 1M PHY and one central. No central/observer/GATT-client role, scanning, Wi-Fi, extended or periodic advertising is needed.
+- Support the baseline ATT MTU and both MOTION/STATUS subscriptions, plus any enabled standard-service subscription requirements. Do not copy an example with capacity for only one notification subscription.
+- Initialize NimBLE once per boot; disconnect resets the link/protocol state and resumes advertising without normal stack teardown/reinitialization.
+- Measure buffers instead of copying the HAL's **connectionless** pool sizes. Record free-heap low-water mark, largest free block, task-stack headroom and allocation/notification failures after initialization, connection, both subscriptions, streaming and concurrent feedback. Record actual negotiated connection parameters; a requested interval is not a measured Windows result.
+
+Pass H2–H4 before treating connected BLE as qualified or prioritizing firmware artwork. If safe unused-feature trimming cannot make the minimal build pass, return measurements and revise the decision jointly. Do not silently replace it with advertising-only packets, a receiver badge, USB bridge or reduced-rate profile; platform work can continue on labelled virtual/iPhone input.
 
 Use one custom service and four characteristics. Each value below is **exactly 20 bytes**, fitting the baseline ATT MTU of 23 without application fragmentation. No JSON, text parsing, bulk transfer, negotiated large-MTU requirement or per-sample application ACK. Motion uses notifications, not confirmed indications. The stack may handle link-layer retransmissions; the application must not replay old motion. [ESP32-C3 GATT model](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-guides/ble/get-started/ble-data-exchange.html)
 
@@ -188,13 +208,28 @@ Simulation can verify bytes, lifecycle logic, fusion, combat and rendering; it *
 
 All numbers are **requested acceptance targets**, not claimed measurements. If a target is infeasible, bring the measurement to both teams before changing the contract; do not quietly lower the rate or replace raw data with gesture labels.
 
+### Early hardware gates — before firmware artwork
+
+| Gate | Required work and evidence |
+| --- | --- |
+| **H0 — Safe recovery** | Confirm board revision, exact partition/flash artifacts, preservation and recovery plan/image, and creator-confirmed power instructions before any separately approved device flash |
+| **H1 — Sensor truth** | Identify sensor; validate signed conversion and six faces; record actual configuration, fresh-read cadence, timestamp semantics and clipping. The creator's 100 Hz/±2 g baseline is diagnostic only; the requested 50 Hz/±8 g profile needs its own evidence |
+| **H2 — Connected GATT** | On one badge, discover/read INFO, subscribe to MOTION/STATUS, complete OPEN/SYNC and exchange actual motion plus commands. Incomplete capabilities/profile remain diagnostic-only; do not claim the target stream passed from a synthetic source |
+| **H3 — Loaded stability** | Run 10 minutes with the target stream, state refreshes, SYNC, cues, simple display and dim LEDs together. Meet the full-acceptance cadence/loss/latency limits below; record memory/stack headroom, allocation/notification errors, longest gaps and any reset/backlog |
+| **H4 — Reconnect and battery** | Run 20 disconnect/reconnect cycles: advertising resumes, old link/evidence/feedback is cleared, second central cannot take the link, no OOM/reset or downward resource trend. Repeat the 10-minute loaded run on battery only if H3 used USB; demonstrate approved known-good recovery and Start/GPIO9 fallback |
+| **H5 — Full acceptance** | Complete the two-badge soak, actual display/LED feedback, recovery, 30-minute endurance and MVP voice/gesture/gameplay gates; earlier diagnostic passes do not replace them |
+
+Record OS/Chrome/adapter with every result. Mac evidence can advance bring-up, but H2–H4 must also pass on the intended Windows setup before Windows qualification is claimed. H0 establishes recovery readiness before flashing; H4 demonstrates the supported procedure after bring-up. These gates do not authorize flashing or block independent simulator/platform work.
+
+### Full acceptance
+
 | Gate | Required evidence |
 | --- | --- |
-| Build/recovery | Exact image/version/hash, board revision, SDK/build instructions, flash command/power precautions and demonstrated recovery to a known image. Approved device-specific flashing only; do not erase user badge data without agreement |
+| Build/recovery | Exact image/version/hash, board revision, SDK/configuration and the partition/flash/preservation manifest in Appendix A; demonstrated known-good recovery. Stock restoration only with an available stock image or approved backup procedure. Approved device-specific flashing only |
 | Discovery/identity | Both intended Windows laptops select the correct on-screen ID; wrong version/capabilities produce explicit setup failure; second central cannot steal an active link |
-| Sensor | Six-face axis/scale check (initial ±100 mg tolerance around the expected 1 g axis/zero others); steady 50 Hz fresh acquisition; real jabs/sweeps checked for clipping; sensor fault does not emit fake valid zeros |
+| Sensor | Configuration readback, native signed-conversion tests and six-face axis/scale check (initial ±100 mg tolerance around the expected 1 g axis/zero others); verified 50 Hz/±8 g target; real jabs/sweeps checked for clipping; sensor fault does not emit fake valid zeros |
 | Protocol | Both teams pass golden valid/invalid/signed/wrap/session vectors; exact 20-byte notifications and commands; duplicate cue executes once; old nonce/epoch and expired command have no effect |
-| Timing | Report effective unique sample rate, capture/arrival jitter, loss, longest gap, sync RTT and uncertainty. Target ≥95% of acquired samples delivered, mapped sample-age upper bound p95 ≤150 ms, command ACK p95 ≤150 ms; no sustained backlog |
+| Timing | Report native sensor ODR, fresh reads/s, output/delivered records/s, acquisition-to-read bound, capture/arrival jitter, loss, longest gap, sync RTT and uncertainty separately. Target ≥95% of acquired samples delivered, mapped sample-age upper bound p95 ≤150 ms, command ACK p95 ≤150 ms; no sustained backlog or unagreed decimation |
 | Two-wand soak | 10 minutes, both battery wands and actual laptops at intended 1–3 m spacing, cameras/video active, simultaneous motion and state/cues. No resets, unplanned disconnects or ≥500 ms fresh-input outages; test measured gaps against gesture gates |
 | Feedback | Local motion cue aims <100 ms; accepted command visibly updates within 150 ms of device receipt; state expiry/disconnect removes stale HP/result; screen/LED activity does not starve acquisition |
 | Recovery | Power cycle, disable laptop Bluetooth, close/suspend page and simulate sensor loss. Browser aborts/flushes; badge becomes neutral; user reconnects and completes a new handshake/Ready within a target 15 seconds, excluding permission troubleshooting |
@@ -204,10 +239,48 @@ For physical latency use a measured method (timestamp logs for capture/ACK, obse
 
 ### Share with us at each firmware drop
 
-1. Image, source/build reference, protocol version, board revision and release notes; no credentials.
-2. Device ID/short name, known capabilities and sensor configuration, axes/sign verification, timestamp semantics.
-3. A short raw-notification capture + decoded expectation, command/result examples and measured timing/drop counters.
-4. How to flash, disconnect, recover and restore; known unsupported behavior and any Windows GATT-cache workaround actually tested.
-5. Which gates passed, on what hardware, and which remain open. Notify us before changing bytes, UUIDs, units, axes, sample profile or feedback enums. Incompatible wire changes require a protocol version bump and updates to both fixtures/adapters.
+1. Image, source/build reference, protocol version, board revision, exact SDK/configuration and release notes, including the SDK mitigation below; no credentials.
+2. Device ID/short name and its preservation strategy; actual capabilities, sensor configuration/readback, axes/sign evidence and timestamp semantics.
+3. A short raw-notification capture + decoded expectation, native conversion vectors, command/result examples, separate sensor/read/output rates and timing/drop/resource measurements under combined load.
+4. Exact partition CSV/summary and generated flash manifest; artifact hashes/offsets, preservation policy, approved power state, backup and known-good recovery instructions. State stock-restore availability separately; include any Windows GATT-cache workaround actually tested.
+5. H0–H5 and full-acceptance results with image/board/OS/browser/adapter and remaining gaps. No custom-firmware result is implied by this document or a creator example.
+6. Acknowledgement by firmware and platform owners before freezing this revision. Notify us before changing bytes, UUIDs, units, axes, sample profile, sequence semantics or feedback enums. Do not silently reinterpret v1 for existing implementations; incompatible interface changes require a protocol version bump and updates to both fixtures/adapters.
 
-**Agreement needed now:** direct GATT; one wand/player; 50 Hz raw acceleration with gravity and canonical axes; the four-characteristic v1 layout; expiring semantic feedback; earliest date/time for a minimal streaming image. Everything behind that interface remains the firmware team's engineering choice.
+**Agreement needed now:** acknowledge the HAL-grounded draft; confirm the selected but unvalidated connected-GATT path and requested 50 Hz/±8 g profile; agree H0–H4 delivery/evidence checkpoints. One wand/player, four-characteristic v1 bytes and expiring semantic feedback remain unchanged. The firmware owner retains implementation responsibility within these constraints.
+
+## Appendix A. Creator HAL constraints and qualifications
+
+### Board reference and sensor bring-up
+
+Use [the unchanged creator pin table and driver guidance](docs/hardware/custom-firmware-hal.md#2-pin-map), checking applicability to the actual board revision. It identifies the ST7789 320×240 RGB565 display on SPI2; SC7A20HTR at I²C `0x19` sharing the bus with MFRC522 at `0x26`; six WS2812B LEDs; Start/GPIO9 download strap; and USB-Serial-JTAG rather than UART0. The generic eight-button driver, button injection and NFC examples are **not** required project features.
+
+The creator's sensor baseline uses `WHO_AM_I` at `0x0F` expecting `0x11`, `CTRL_REG1 = 0x57` (100 Hz), `CTRL_REG4 = 0x80` (BDU, little-endian, ±2 g), data-ready polling and a six-byte burst read. Treat these as creator-documented values, not this project's measurements. Combine little-endian native bytes and sign-extend the 12-bit left-justified value correctly before scaling/remapping:
+
+| Native bytes, little-endian | Signed counts | mg under the creator's ±2 g example |
+| --- | --- | --- |
+| `80 3e` | +1000 | +1000 |
+| `80 c1` | −1000 | −1000 |
+
+These driver vectors supplement, not replace, Section 7's normalized wire vectors. Confirm ±8 g register settings/sensitivity with creator or primary register documentation, then add its ±1 g and rail tests; do not guess from a similar sensor. Before accepting the final profile, require register readback, six-face raw/mg captures, fresh data-ready/read cadence and deliberate-gesture clipping evidence.
+
+**Profile boundary:** INFO must report the actual output rate/range; never label a 100 Hz/±2 g image as 50 Hz/±8 g. Device Lab may inspect its INFO/raw diagnostics with an **unsupported for casting** label. These different-profile values are explicitly nonconforming diagnostic INFO, not an extension of the v1 duel profile. In addition to Section 6's health/freshness checks, v1 duel Ready requires `capabilities == 0x0F`, `sample_hz == 50`, `range_g == 8` and `axis_convention == 1`. Unsupported images cannot enter practice fusion or real-duel Ready. Changing the sensor profile requires a new boot/INFO and fresh calibration as in Section 4.
+
+Prefer a verified native 50 Hz configuration. If 100→50 Hz selection becomes necessary, obtain joint agreement on acquisition/read timestamps, `seq`, intentional decimation, actual drops and the acceptance denominator **before** implementation; this revision does not change those semantics. BDU prevents torn reads, not stale acquisition timestamps. Do not merely poll BDU registers at half the native rate and stamp each read as a newly acquired sample. Any proposed selection path must promptly service fresh native readings, preserve selected-sample timing, bound acquisition-to-read delay and report overruns rather than fabricate timer-aligned history. The phone emulator's selected-observation model is not evidence for a firmware sampling design.
+
+### Combined-load resources and power
+
+- Start with simple text/partial redraws and bounded stripe buffers. Avoid full-frame DMA allocation and blocking full-screen work on the acquisition path. One 320×240 RGB565 framebuffer is **153,600 bytes**; two 320×30 RGB565 stripe buffers total **38,400 bytes**. These calculations explain the creator's recommendation, not a mandatory task/buffer implementation. LVGL is optional, not required for the early image.
+- Limit LED brightness and test the worst shipped cues on AA power; the creator warns that six full-white LEDs can brown out the board. Do not invent a universal safe brightness or battery percentage.
+- Do **not initialize or scan NFC** in v1. Its chip remains physically attached to the shared bus: bounded I²C timeouts and bounded recovery are still required. On acquisition failure, report sensor unhealthy, record the gap/discontinuity and never fabricate valid zeros. Do not suspend acquisition for unused NFC work.
+- Keep USB diagnostics small, bounded, low-rate and outside sampling; no per-sample logging during acceptance. USB console writes can stall, so console output is not a harmless timing probe. A stalled acquisition or bus must fail visibly rather than block indefinitely. [Espressif console buffering](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c3/api-guides/usb-serial-jtag-console.html#data-buffering)
+- Qualify sensor + connected BLE + display + LEDs together, including battery-only operation. Reduce decoration first; do not lower stream freshness or hide resets to fit the resource budget.
+
+### SDK and safe recovery manifest
+
+**SDK baseline:** the creators pin ESP-IDF **5.5.3** for bring-up, not an unconditional production guarantee. Espressif documents NimBLE stalls/connection loss in that release when `CONFIG_BT_NIMBLE_HS_FLOW_CTRL` is enabled; it is disabled by default on ESP32-C3. For that baseline, explicitly retain `CONFIG_BT_NIMBLE_HS_FLOW_CTRL=n` and record the configuration. Espressif reports the fix in **5.5.4**; adopting a patched SDK is a deliberate firmware-owner change followed by the same regression gates, not an implicit upgrade. [Issue and published resolution](https://github.com/espressif/esp-idf/issues/18323)
+
+Every flash/recovery handoff must include the exact SDK/build reference and relevant configuration; board/flash size/mode/frequency; partition CSV with names/types/subtypes/offsets/sizes/flags; generated partition summary; every flashed artifact's hash and offset; erase/preservation policy; and how stable device identity survives the supported update/recovery operations. The HAL's `0x10000 (0x2A0000)` and storage `(0x140000)` shorthand is **not** a flash manifest: do not infer that `0x140000` is an offset or generate commands from that prose. [ESP-IDF partition definitions](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c3/api-guides/partition-tables.html)
+
+Confirm the safe USB/AA power state with the creators, establish an approved backup/preservation procedure and obtain a known-good recovery image before flashing. Keep private backups outside the repository and uploads. Recovery to our known-good image and restoration of the stock event firmware are different claims; promise stock restoration only when the stock artifact or approved backup procedure exists. Do not copy sample blanket NVS erasure, erase all flash, alter eFuses or flash automatically. Each device operation needs separate explicit approval.
+
+Preserve Start/GPIO9 as the documented download/recovery path, never a combat input, and keep USB-Serial-JTAG available for bounded diagnostics. The creator's blanket “no auto-reset” sentence is board guidance to qualify, not a chip-wide fact: Espressif documents automatic USB-Serial-JTAG download entry and manual GPIO9-low recovery when necessary. Demonstrate and record the actual badge procedure for normal flashing, fallback entry and known-good recovery; a blank screen in download mode alone is not evidence of a failed board. [Espressif USB behavior](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c3/api-guides/usb-serial-jtag-console.html)
