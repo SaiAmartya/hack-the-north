@@ -40,10 +40,29 @@ from phantom_host.protocol import parse_radio_line  # noqa: E402
 FIRMWARE_CUTOFF = "2026-09-16"
 VERSION_LINE = re.compile(r"fw=(\S+)")
 DATE_IN_VERSION = re.compile(r"(\d{4}-\d{2}-\d{2})")
+# The badge's own boot log carries the build date, which the semver-ish version
+# string does not: "I (473) app_init: Compile time:     Sep 17 2026 17:39:16"
+COMPILE_TIME = re.compile(r"Compile time:\s+(\w{3})\s+(\d{1,2})\s+(\d{4})")
+MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+# Firmware-level radio failures. These are not our Lua app erroring; they mean
+# the BLE stack could not start, almost always because it ran out of RAM.
+RADIO_FAILURE_MARKERS = (
+    "host sync timeout",
+    "ble_hs_init",
+    "assert failed",
+)
 
 INTERESTING = (
     "PA1|",
     "fw=",
+    "hal_radio",
+    "BLE_INIT",
+    "Compile time",
+    "esp32",
     "radio_ok",
     "radio_enable_failed",
     "phantom_",
@@ -97,7 +116,10 @@ def main() -> int:
     duplicates = 0
     unparsed_with_prefix = 0
     firmware: str | None = None
+    build_date: str | None = None
     radio_state: str | None = None
+    radio_failure: str | None = None
+    low_heap: int | None = None
     senders: Counter[str] = Counter()
     kinds: Counter[str] = Counter()
     macs: dict[str, str] = {}
@@ -120,6 +142,23 @@ def main() -> int:
             match = VERSION_LINE.search(line)
             if match and firmware is None:
                 firmware = match.group(1)
+            stamp = COMPILE_TIME.search(line)
+            if stamp and build_date is None:
+                month = MONTHS.get(stamp.group(1))
+                if month:
+                    build_date = f"{stamp.group(3)}-{month:02d}-{int(stamp.group(2)):02d}"
+
+            heap = re.search(r"free heap (\d+)", line)
+            if heap:
+                value = int(heap.group(1))
+                if low_heap is None or value < low_heap:
+                    low_heap = value
+
+            for marker in RADIO_FAILURE_MARKERS:
+                if marker in line and radio_failure is None:
+                    radio_failure = line
+                    break
+
             if "radio_enable_failed" in line:
                 radio_state = "FAILED"
             elif "radio_ok" in line and radio_state is None:
@@ -184,20 +223,39 @@ def main() -> int:
 
     if firmware:
         print(f"firmware          {firmware}")
-        found = DATE_IN_VERSION.search(firmware)
-        if found and found.group(1) < FIRMWARE_CUTOFF:
-            print(f"  WARNING: older than {FIRMWARE_CUTOFF}.")
-            print("  That firmware allows only 6 ms per tick instead of 250 ms.")
-        elif found:
-            print(f"  OK: {FIRMWARE_CUTOFF} or newer, 250 ms tick budget.")
+        found = DATE_IN_VERSION.search(firmware) or (
+            re.match(r"(\d{4}-\d{2}-\d{2})", build_date or "") if build_date else None
+        )
+        dated = build_date or (found.group(1) if found else None)
+        if dated and dated < FIRMWARE_CUTOFF:
+            print(f"  built {dated}: OLDER than {FIRMWARE_CUTOFF}.")
+            print("  WARNING: only 6 ms per tick instead of 250 ms.")
+        elif dated:
+            print(f"  built {dated}: {FIRMWARE_CUTOFF} or newer, 250 ms tick budget. OK")
         else:
-            print(f"  Could not date this string; compare it against {FIRMWARE_CUTOFF}.")
+            print(f"  Undated. Reboot the badge to capture its 'Compile time' line,")
+            print(f"  then compare against {FIRMWARE_CUTOFF}.")
     else:
         print("firmware          unknown (no 'fw=' line seen)")
         print("  Our apps log it on entry. Open phantom_gateway to capture it.")
 
-    if radio_state == "FAILED":
-        print("radio             ENABLE FAILED - reboot the badge and reopen the app")
+    if low_heap is not None:
+        print(f"lowest free heap  {low_heap} bytes")
+
+    if radio_state == "FAILED" or radio_failure:
+        print("radio             ENABLE FAILED")
+        if radio_failure:
+            print(f"  firmware said: {radio_failure.strip()}")
+        print()
+        print("  This is a RAM failure, not a code error. The BLE stack needs")
+        print("  roughly 47 KB and this badge has about 78 KB free at app start.")
+        print("  Do this, in order:")
+        print("    1. Reboot the badge (power off, on) for the cleanest heap.")
+        print("    2. From the launcher go STRAIGHT into the Phantom app.")
+        print("       Opening other apps first leaves memory fragmented.")
+        print("    3. Re-push the app if you have not since 2026-09-19: the apps")
+        print("       now claim the radio before building any UI, which is what")
+        print("       made this fail.")
         return 1
     if radio_state == "ok":
         print("radio             enabled")

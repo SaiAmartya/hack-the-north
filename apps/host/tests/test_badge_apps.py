@@ -148,6 +148,37 @@ def test_only_calls_documented_badge_apis(path: Path) -> None:
 
 
 @pytest.mark.parametrize("path", badge_apps(), ids=lambda p: p.name)
+def test_the_radio_is_enabled_before_any_widget_is_created(path: Path) -> None:
+    """Hardware-confirmed ordering bug, do not regress.
+
+    On the ESP32-C3 badge the BLE stack needs about 47 KB and only ~78 KB is free
+    when an app opens. Building the UI first consumed 30 KB and enable() then
+    failed with "hal_radio: host sync timeout" at 576 bytes free; an earlier
+    attempt crashed the badge in ble_hs_init. The radio must be claimed before
+    any widget allocation.
+    """
+    _, body = split_app(path.read_text())
+    enter = body.split("function on_enter(", 1)[1].split("\nend\n", 1)[0]
+
+    enable_at = enter.find("badge.radio.enable()")
+    assert enable_at >= 0, "on_enter must claim the radio"
+
+    first_ui = re.search(r"badge\.ui\.\w+|build_\w*_ui\s*\(", enter)
+    if first_ui is not None:
+        assert enable_at < first_ui.start(), (
+            f"{path.name}: radio.enable() must come before {first_ui.group(0)!r}"
+        )
+
+
+@pytest.mark.parametrize("path", badge_apps(), ids=lambda p: p.name)
+def test_widget_count_stays_modest(path: Path) -> None:
+    """Every widget is memory the BLE stack cannot have."""
+    _, body = split_app(path.read_text())
+    widgets = len(re.findall(r"badge\.ui\.\w+\(", strip_comments(body)))
+    assert widgets <= 10, f"{path.name} creates {widgets} widgets"
+
+
+@pytest.mark.parametrize("path", badge_apps(), ids=lambda p: p.name)
 def test_never_maps_the_home_button(path: Path) -> None:
     """HOME's press is swallowed by the launcher intercept and it exits the app."""
     _, body = split_app(path.read_text())

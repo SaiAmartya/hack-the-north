@@ -24,13 +24,72 @@ reliable reference and every badge call in this repo was checked against it.
 | Side persistence | `badge.store.*` | 32 keys, per-app scope. |
 | Timing | `badge.sys.ms()` | Monotonic milliseconds. There is no wall clock and no `sleep`. |
 
-### Board identity
+### Board identity — CONFIRMED ON HARDWARE 2026-09-19
 
-The guide never names the SoC, but the IDE's USB device picker asks for
-**"USB JTAG/serial debug unit (Espressif)"**, which means an ESP32 with a native
-USB-Serial/JTAG peripheral. Combined with BLE, LVGL on a 320x240 panel, littlefs, and
-a 48 KB Lua heap, this is consistent with an ESP32-S3 class part. Nothing in this
-project depends on the exact SoC, so the guide's API surface is sufficient.
+The badge is an **ESP32-C3**, single core, RISC-V. Straight from its boot log:
+
+```
+ESP-ROM:esp32c3-api1-20210207
+boot.esp32c3: SPI Flash Size : 4MB
+cpu_start: Unicore app
+cpu_start: cpu freq: 80000000 Hz
+hal_accel: SC7A20H detected (0x11)
+```
+
+RAM is the binding constraint, and it is tight:
+
+```
+heap_init: At 3FCB6440 len 00009BC0 (38 KiB): RAM
+heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
+```
+
+An app sees roughly **78 KB free** on entry (`app_reg: heap after enter Launcher:
+free=77768`). This matters enormously and is documented below.
+
+Accelerometer is an **SC7A20H** over I2C. Serial device enumerates as
+`/dev/cu.usbmodem1101`, USB VID `0x303A` (Espressif), PID `0x1001`,
+`USB JTAG/serial debug unit` — which `find_serial_port()` selects correctly on the
+first attempt, verified on hardware.
+
+Firmware on the tested badge: `v0.1.2-392-gd3089c4`, `Compile time: Sep 17 2026`.
+That is **newer** than the 2026-09-16 cutoff, so the 250 ms tick budget applies.
+
+### The BLE out-of-memory trap — FOUND ON HARDWARE, FIXED
+
+Enabling the radio is the single most memory-hungry thing an app does, and the
+first hardware test failed on it. Two different symptoms, one cause:
+
+```
+# attempt 1: hard crash and reboot
+assert failed: ble_hs_init ble_hs.c:967 (rc == 0)
+Core 0 register dump: ...  Rebooting...
+
+# attempt 2: clean failure
+app_reg: heap after enter Launcher: free=77768   <- 78 KB free
+hal_radio: init_once: free heap 47756            <- our UI already took 30 KB
+hal_radio: waiting for host sync (free heap 576) <- BLE took nearly all the rest
+E hal_radio: host sync timeout
+lua: [phantom_gateway] phantom_gateway radio_enable_failed
+```
+
+BLE needs roughly **47 KB**. The original apps built their whole UI in `on_enter`
+before calling `badge.radio.enable()`, which consumed 30 KB and left BLE only
+47.7 KB — it scraped in with 576 bytes spare and the host sync then had nothing.
+
+**The fix, now enforced by a test:** claim the radio *before* creating any widget.
+`tests/test_badge_apps.py::test_the_radio_is_enabled_before_any_widget_is_created`
+parses `on_enter` in each app and fails if a `badge.ui.*` call or a `build_*_ui()`
+helper appears before `badge.radio.enable()`. `phantom_player` additionally builds
+its duel screen lazily and deletes the side-select widgets first, so peak use
+never holds both screens.
+
+If the radio still fails to start:
+
+1. Power cycle the badge. A fresh boot gives the least fragmented heap.
+2. From the launcher go **straight** into the Phantom app. Bouncing through other
+   apps first leaves memory fragmented.
+3. `tools/badge_monitor.py` detects `host sync timeout` / `ble_hs_init` and prints
+   this checklist, along with the lowest free-heap value it observed.
 
 ### Constraints that shaped the implementation
 
@@ -68,10 +127,12 @@ project depends on the exact SoC, so the guide's API surface is sufficient.
 
 ## What could NOT be verified, and why
 
-1. **No badge is connected.** `ls /dev/cu.*` lists only Bluetooth and debug consoles,
-   no `usbmodem` device. Radio range, gesture thresholds, real end-to-end latency, and
-   the gateway's serial output format in practice are therefore **unverified on
-   hardware**. Everything else in this repo is verified by automated tests.
+1. **Verified on hardware since 2026-09-19:** serial enumeration and auto-detect,
+   port ownership conflict with the IDE, app push, firmware version reporting,
+   the accelerometer part number, and the BLE memory ceiling.
+   **Still unverified:** radio range, radio round trip between two badges, gesture
+   thresholds, and real end-to-end latency, because only one badge has been
+   attached so far.
 2. **Mitigation:** `tools/fake_gateway.py` replays realistic gateway serial lines over
    a PTY, so the entire host pipeline, web client, and a full 100-to-0 duel can be
    exercised and demoed with no badges present. `tools/replay_duel.py` drives a scripted
@@ -83,10 +144,15 @@ project depends on the exact SoC, so the guide's API surface is sufficient.
 
 ## Pre-flight checklist for demo day
 
-- [ ] On each of the four badges, open an app and read the logged `badge.sys.version()`.
-      Anything older than 2026-09-16 has a 6 ms tick budget.
-- [ ] Confirm `badge.radio.enable()` succeeded on each badge (the apps show this on
-      screen; a successful USB push does not prove radio started).
+- [ ] Power cycle each badge, then go straight into its Phantom app from the
+      launcher. This is the reliable way to get BLE the heap it needs.
+- [ ] On each of the four badges, read the logged `badge.sys.version()`. Anything
+      built before 2026-09-16 has a 6 ms tick budget.
+- [ ] Confirm `badge.radio.enable()` succeeded on each badge. The screen says
+      "Listening for PA1 packets" / "Ready" on success and "Radio unavailable -
+      reboot badge" on failure. A successful USB push does not prove radio started.
+- [ ] Run `python tools/badge_monitor.py` with the IDE disconnected. It reports
+      firmware date, radio state, lowest free heap, and dedup behaviour.
 - [ ] Watch the gateway's dropped counter while standing in the venue crowd.
 - [ ] Run `python tools/check_camera.py` once to trigger and accept the macOS camera
       permission prompt.

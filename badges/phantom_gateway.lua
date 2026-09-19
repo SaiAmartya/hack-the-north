@@ -59,52 +59,60 @@ local function paint_leds()
 end
 
 function on_enter(root)
-  local title = badge.ui.label(root, "Phantom Gateway")
-  title:style({ text_font = 20 })
-  title:align("top_mid", 0, 10)
-
-  status_label = badge.ui.label(root, "Starting radio...")
-  status_label:align("top_mid", 0, 42)
-
-  count_label = badge.ui.label(root, "kept 0   ignored 0")
-  count_label:style({ text_font = 18 })
-  count_label:align("top_mid", 0, 74)
-
-  last_label = badge.ui.label(root, "waiting for a packet")
-  last_label:style({ text_font = 14 })
-  last_label:align("top_mid", 0, 104)
-
-  drop_label = badge.ui.label(root, "dropped 0")
-  drop_label:style({ text_font = 14 })
-  drop_label:align("top_mid", 0, 128)
-
-  local version = badge.ui.label(root, "fw " .. badge.sys.version())
-  version:style({ text_font = 14 })
-  version:align("bottom_mid", 0, -34)
-
-  local hint = badge.ui.label(root, "A reset counters   HOME exit")
-  hint:style({ text_font = 14 })
-  hint:align("bottom_mid", 0, -12)
-
-  -- Log the firmware version: pre-2026-09-16 builds allow only 6 ms per tick
-  -- instead of 250 ms, which changes what every badge app can afford to do.
+  -- Enable the radio BEFORE creating any widgets.
+  --
+  -- Confirmed on an ESP32-C3 badge: BLE needs about 47 KB and only ~78 KB is
+  -- free when an app starts. Building the UI first consumed 30 KB, leaving
+  -- 47.7 KB, and enable() then died with "hal_radio: host sync timeout" at
+  -- 576 bytes free (an earlier attempt crashed the badge outright in
+  -- ble_hs_init). Widgets created after this point come out of what BLE left,
+  -- which is the right way round.
   badge.sys.log("phantom_gateway start fw=" .. badge.sys.version())
   badge.sys.log("phantom_gateway mac=" .. badge.radio.mac())
 
   radio_ok = badge.radio.enable()
+  if radio_ok then
+    badge.sys.log("phantom_gateway radio_ok")
+  else
+    -- A successful USB push does not prove the radio started.
+    badge.sys.log("phantom_gateway radio_enable_failed")
+  end
+
+  local title = badge.ui.label(root, "Phantom Gateway")
+  title:style({ text_font = 20 })
+  title:align("top_mid", 0, 10)
+
+  status_label = badge.ui.label(root, "")
+  status_label:align("top_mid", 0, 44)
+
+  count_label = badge.ui.label(root, "kept 0   ignored 0")
+  count_label:style({ text_font = 18 })
+  count_label:align("top_mid", 0, 78)
+
+  last_label = badge.ui.label(root, "waiting for a packet")
+  last_label:style({ text_font = 14 })
+  last_label:align("top_mid", 0, 108)
+
+  drop_label = badge.ui.label(root, "dropped 0")
+  drop_label:style({ text_font = 14 })
+  drop_label:align("top_mid", 0, 132)
+
+  local footer = badge.ui.label(
+    root,
+    "A reset counters   HOME exit\nfw " .. badge.sys.version()
+  )
+  footer:style({ text_font = 14 })
+  footer:align("bottom_mid", 0, -12)
+
   if not radio_ok then
-    -- A successful USB push does not prove the radio started; Bluetooth needs
-    -- its own RAM and can fail independently.
     status_label:set_text("Radio unavailable - reboot badge")
     status_label:set_color(0xff6666)
-    badge.sys.log("phantom_gateway radio_enable_failed")
     paint_leds()
     return
   end
 
   status_label:set_text("Listening for PA1 packets")
   status_label:set_color(0x66ff99)
-  badge.sys.log("phantom_gateway radio_ok")
 
   -- Keep this handler short: it runs inside the shared tick budget, and a slow
   -- receive handler delays drawing and input for the whole app.

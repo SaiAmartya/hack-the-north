@@ -91,6 +91,7 @@ local next_ui = 0
 local next_led = 0
 local last_tick_ms = 0
 
+local ui_root
 local select_label, select_hint
 local side_label, mana_label, spell_label, status_label, accel_label
 
@@ -233,8 +234,10 @@ local function cast(spell_key)
   end
 
   if not radio_ok then
-    status_label:set_text("Radio unavailable")
-    status_label:set_color(0xff6666)
+    if status_label then
+      status_label:set_text("Radio unavailable")
+      status_label:set_color(0xff6666)
+    end
     return
   end
 
@@ -330,7 +333,7 @@ local function sample_accel()
       gesture_locked_until = now + GESTURE_LOCKOUT_MS
       if mana >= SPELLS.U.cost then
         cast("U")
-      else
+      elseif status_label then
         status_label:set_text("Not enough mana for Ultimate")
         status_label:set_color(0xffcc55)
       end
@@ -430,33 +433,33 @@ end
 
 function on_enter(root)
   last_tick_ms = badge.sys.ms()
+  ui_root = root
+
+  -- Radio first, widgets second.
+  --
+  -- On this ESP32-C3 the BLE stack needs about 47 KB and only ~78 KB is free
+  -- when an app opens. This app used to build the select screen AND the duel
+  -- screen before enabling the radio, which left BLE short and made enable()
+  -- fail with "hal_radio: host sync timeout". The duel screen is now built on
+  -- demand in enter_duel() so nothing is allocated before it is needed.
+  badge.sys.log("phantom_player start fw=" .. badge.sys.version())
+
+  radio_ok = badge.radio.enable()
+  if radio_ok then
+    badge.sys.log("phantom_player radio_ok mac=" .. badge.radio.mac())
+  else
+    badge.sys.log("phantom_player radio_enable_failed")
+  end
 
   build_select_ui(root)
-  build_duel_ui(root)
 
   side = badge.store.get_str("side", "P1")
   if side ~= "P1" and side ~= "P2" then
     side = "P1"
   end
 
-  badge.sys.log("phantom_player start fw=" .. badge.sys.version())
-
-  radio_ok = badge.radio.enable()
-  if not radio_ok then
-    badge.sys.log("phantom_player radio_enable_failed")
-  else
-    badge.sys.log("phantom_player radio_ok mac=" .. badge.radio.mac())
-  end
-
   mode = "select"
   refresh_select()
-
-  side_label:hidden(true)
-  mana_label:hidden(true)
-  spell_label:hidden(true)
-  status_label:hidden(true)
-  accel_label:hidden(true)
-
   paint_leds()
 end
 
@@ -464,14 +467,14 @@ local function enter_duel()
   mode = "duel"
   badge.store.set_str("side", side)
 
-  select_label:hidden(true)
-  select_hint:hidden(true)
+  -- Free the select screen before allocating the duel screen, so peak widget
+  -- and heap use stays flat rather than holding both at once.
+  select_label:delete()
+  select_hint:delete()
+  select_label = nil
+  select_hint = nil
 
-  side_label:hidden(false)
-  mana_label:hidden(false)
-  spell_label:hidden(false)
-  status_label:hidden(false)
-  accel_label:hidden(false)
+  build_duel_ui(ui_root)
 
   if side == "P1" then
     side_label:set_text("P1")

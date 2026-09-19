@@ -149,11 +149,22 @@ local function fire(value)
 end
 
 function on_enter(root)
+  -- Radio first, widgets second. BLE needs about 47 KB on this ESP32-C3 and
+  -- only ~78 KB is free at app start; building the UI first starved it and
+  -- enable() failed on real hardware.
+  badge.sys.log("phantom_chaos start fw=" .. badge.sys.version())
+  radio_ok = badge.radio.enable()
+  if radio_ok then
+    badge.sys.log("phantom_chaos radio_ok mac=" .. badge.radio.mac())
+  else
+    badge.sys.log("phantom_chaos radio_enable_failed")
+  end
+
   local title = badge.ui.label(root, "Phantom Chaos")
   title:style({ text_font = 20 })
   title:align("top_mid", 0, 8)
 
-  status_label = badge.ui.label(root, "Starting radio...")
+  status_label = badge.ui.label(root, "")
   status_label:align("top_mid", 0, 36)
 
   local menu = badge.ui.label(
@@ -178,20 +189,14 @@ function on_enter(root)
   hint:style({ text_font = 14 })
   hint:align("bottom_mid", 0, -12)
 
-  badge.sys.log("phantom_chaos start fw=" .. badge.sys.version())
-
-  radio_ok = badge.radio.enable()
-  if not radio_ok then
+  if radio_ok then
+    status_label:set_text("Ready")
+    status_label:set_color(0x66ff99)
+  else
     status_label:set_text("Radio unavailable - reboot badge")
     status_label:set_color(0xff6666)
-    badge.sys.log("phantom_chaos radio_enable_failed")
-    paint_leds()
-    return
   end
 
-  status_label:set_text("Ready")
-  status_label:set_color(0x66ff99)
-  badge.sys.log("phantom_chaos radio_ok mac=" .. badge.radio.mac())
   paint_leds()
 end
 
