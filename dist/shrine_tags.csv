@@ -1,0 +1,101 @@
+sticker,item,qty,payload,hint
+S001,Potion,1,pa:loot:p:1,sponsor booth
+S002,Potion,2,pa:loot:p:2,food line
+S003,Ember Core,2,pa:loot:e:2,lounge
+S004,Phase Cloak,3,pa:loot:k:3,lounge
+S005,Potion,1,pa:loot:p:1,sponsor booth
+S006,Potion,1,pa:loot:p:1,sponsor booth
+S007,Ember Core,1,pa:loot:e:1,lounge
+S008,Phase Cloak,1,pa:loot:k:1,library
+S009,Ember Core,1,pa:loot:e:1,quiet room
+S010,Potion,1,pa:loot:p:1,sponsor booth
+S011,Phase Cloak,1,pa:loot:k:1,sponsor booth
+S012,Ember Core,1,pa:loot:e:1,hardware lab
+S013,Potion,1,pa:loot:p:1,water station
+S014,Phase Cloak,2,pa:loot:k:2,hardware lab
+S015,Potion,2,pa:loot:p:2,quiet room
+S016,Potion,1,pa:loot:p:1,food line
+S017,Potion,1,pa:loot:p:1,lounge
+S018,Potion,1,pa:loot:p:1,lounge
+S019,Ember Core,1,pa:loot:e:1,hardware lab
+S020,Ember Core,2,pa:loot:e:2,lounge
+S021,Ember Core,1,pa:loot:e:1,stairwell
+S022,Ember Core,1,pa:loot:e:1,water station
+S023,Potion,2,pa:loot:p:2,sponsor booth
+S024,Phase Cloak,2,pa:loot:k:2,food line
+S025,Ember Core,1,pa:loot:e:1,lounge
+S026,Potion,1,pa:loot:p:1,lounge
+S027,Phase Cloak,1,pa:loot:k:1,hardware lab
+S028,Ember Core,1,pa:loot:e:1,hardware lab
+S029,Ember Core,2,pa:loot:e:2,lounge
+S030,Ember Core,1,pa:loot:e:1,library
+S031,Potion,1,pa:loot:p:1,stairwell
+S032,Potion,1,pa:loot:p:1,lounge
+S033,Ember Core,1,pa:loot:e:1,quiet room
+S034,Potion,1,pa:loot:p:1,lounge
+S035,Ember Core,1,pa:loot:e:1,lounge
+S036,Ember Core,2,pa:loot:e:2,stairwell
+S037,Potion,1,pa:loot:p:1,lounge
+S038,Potion,1,pa:loot:p:1,hardware lab
+S039,Ember Core,1,pa:loot:e:1,food line
+S040,Phase Cloak,1,pa:loot:k:1,sponsor booth
+S041,Phase Cloak,1,pa:loot:k:1,lounge
+S042,Potion,1,pa:loot:p:1,library
+S043,Phase Cloak,1,pa:loot:k:1,water station
+S044,Ember Core,1,pa:loot:e:1,sponsor booth
+S045,Potion,1,pa:loot:p:1,sponsor booth
+S046,Ember Core,1,pa:loot:e:1,library
+S047,Potion,2,pa:loot:p:2,stairwell
+S048,Phase Cloak,1,pa:loot:k:1,hardware lab
+S049,Phase Cloak,3,pa:loot:k:3,quiet room
+S050,Potion,1,pa:loot:p:1,quiet room
+S051,Phase Cloak,2,pa:loot:k:2,lounge
+S052,Phase Cloak,2,pa:loot:k:2,water station
+S053,Ember Core,1,pa:loot:e:1,lounge
+S054,Ember Core,1,pa:loot:e:1,hardware lab
+S055,Potion,1,pa:loot:p:1,water station
+S056,Potion,2,pa:loot:p:2,hardware lab
+S057,Ember Core,1,pa:loot:e:1,food line
+S058,Potion,1,pa:loot:p:1,library
+S059,Potion,1,pa:loot:p:1,sponsor booth
+S060,Potion,1,pa:loot:p:1,stairwell
+S061,Potion,2,pa:loot:p:2,quiet room
+S062,Phase Cloak,1,pa:loot:k:1,stairwell
+S063,Ember Core,1,pa:loot:e:1,quiet room
+S064,Phase Cloak,1,pa:loot:k:1,lounge
+S065,Potion,1,pa:loot:p:1,lounge
+S066,Ember Core,2,pa:loot:e:2,water station
+S067,Potion,2,pa:loot:p:2,library
+S068,Ember Core,2,pa:loot:e:2,quiet room
+S069,Ember Core,2,pa:loot:e:2,library
+S070,Phase Cloak,2,pa:loot:k:2,sponsor booth
+S071,Ember Core,1,pa:loot:e:1,stairwell
+S072,Potion,2,pa:loot:p:2,water station
+S073,Potion,2,pa:loot:p:2,stairwell
+S074,Ember Core,3,pa:loot:e:3,library
+S075,Ember Core,2,pa:loot:e:2,stairwell
+S076,Potion,2,pa:loot:p:2,library
+S077,Ember Core,1,pa:loot:e:1,water station
+S078,Phase Cloak,1,pa:loot:k:1,food line
+S079,Potion,1,pa:loot:p:1,food line
+S080,Potion,1,pa:loot:p:1,hardware lab
+S081,Potion,1,pa:loot:p:1,water station
+S082,Potion,1,pa:loot:p:1,lounge
+S083,Phase Cloak,1,pa:loot:k:1,hardware lab
+S084,Ember Core,1,pa:loot:e:1,quiet room
+S085,Ember Core,1,pa:loot:e:1,lounge
+S086,Potion,1,pa:loot:p:1,hardware lab
+S087,Potion,1,pa:loot:p:1,library
+S088,Potion,1,pa:loot:p:1,lounge
+S089,Phase Cloak,1,pa:loot:k:1,food line
+S090,Ember Core,2,pa:loot:e:2,water station
+S091,Potion,1,pa:loot:p:1,water station
+S092,Potion,2,pa:loot:p:2,library
+S093,Potion,2,pa:loot:p:2,hardware lab
+S094,Ember Core,3,pa:loot:e:3,library
+S095,Ember Core,1,pa:loot:e:1,hardware lab
+S096,Phase Cloak,2,pa:loot:k:2,water station
+S097,Potion,1,pa:loot:p:1,sponsor booth
+S098,Ember Core,1,pa:loot:e:1,sponsor booth
+S099,Phase Cloak,1,pa:loot:k:1,quiet room
+S100,Phase Cloak,1,pa:loot:k:1,sponsor booth

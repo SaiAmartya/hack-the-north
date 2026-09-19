@@ -1,0 +1,7 @@
+low|heal|30|0|Mercy of the Veil|The Phantom pities the weak: all heal 30%.
+low|dmg|20|15|Blood Frenzy|Wounds sing. Damage doubled for 15 s.
+stale|fog|0|12|Whispering Fog|Fog swallows the arena. Get close to see.
+stale|cd|5|15|Quickening|Time bends. Cooldowns halved for 15 s.
+timer|dmg|15|12|Sharpened Runes|Every spell bites harder: x1.5 for 12 s.
+timer|heal|20|0|Second Wind|A cool wind. Everyone recovers 20%.
+boss|dmg|20|20|Phantom Rage|The Phantom is enraged. Damage doubled.

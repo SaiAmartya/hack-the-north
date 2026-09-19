@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "arena-sim",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--directory", "laptop", "phantom-host", "--sim", "--sim-players", "4", "--no-ai", "--http-port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "arena-serial",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--directory", "laptop", "phantom-host", "--port", "auto", "--http-port", "8000"],
+      "port": 8000
+    }
+  ]
+}

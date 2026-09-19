@@ -1,0 +1,16 @@
+{
+  "name": "phantom-arena-solana",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional: mint Phantom Arena match results as compressed NFTs on Solana devnet",
+  "scripts": {
+    "test": "node --test",
+    "dry": "node mint_match.mjs --winner Ada --mode Duel --kills 3 --loot 2 --badges 6 --dry-run"
+  },
+  "dependencies": {
+    "@metaplex-foundation/mpl-bubblegum": "^4.2.0",
+    "@metaplex-foundation/umi": "^1.0.0",
+    "@metaplex-foundation/umi-bundle-defaults": "^1.0.0"
+  }
+}

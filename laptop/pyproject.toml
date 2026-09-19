@@ -1,0 +1,36 @@
+[project]
+name = "phantom-arena"
+version = "0.1.0"
+description = "Phantom Arena laptop side: base-station serial bridge, arena web view, AI game master, and a Lua badge simulator for testing the badge app."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pyserial>=3.5",
+    "openai>=1.50",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "lupa>=2.2",
+    "pillow>=10",
+]
+
+[project.scripts]
+phantom-host = "phantom_host.cli:main"
+phantom-deck = "phantom_host.deck:main"
+phantom-sim = "badge_sim.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["phantom_host", "badge_sim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

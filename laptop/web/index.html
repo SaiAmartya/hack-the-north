@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phantom Arena</title>
+<style>
+  :root { --bg:#07090f; --panel:#0f1420; --line:#1d2536; --text:#e8eefc; --muted:#7f8ca6; --accent:#ffcc55; --red:#ff4d4d; --blue:#4d8dff; --green:#3ddc84; --gold:#ffcc55; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family: "Segoe UI", system-ui, sans-serif; overflow:hidden; }
+  #top { position:fixed; left:0; right:0; top:0; height:56px; display:flex; align-items:center; gap:18px; padding:0 18px; background:linear-gradient(180deg, rgba(15,20,32,.95), rgba(15,20,32,.6)); border-bottom:1px solid var(--line); z-index:5; }
+  #top h1 { font-size:20px; letter-spacing:.18em; margin:0; color:var(--accent); font-weight:800; }
+  .pill { padding:4px 10px; border:1px solid var(--line); border-radius:999px; font-size:13px; color:var(--muted); background:rgba(0,0,0,.25); }
+  .pill b { color:var(--text); }
+  #dot { width:10px; height:10px; border-radius:50%; background:#555; display:inline-block; margin-right:6px; box-shadow:0 0 8px #000; }
+  #dot.on { background:var(--green); box-shadow:0 0 10px var(--green); }
+  #stage { position:fixed; left:0; top:56px; right:360px; bottom:0; }
+  canvas { width:100%; height:100%; display:block; }
+  #side { position:fixed; right:0; top:56px; width:360px; bottom:0; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }
+  #side h2 { font-size:12px; letter-spacing:.2em; color:var(--muted); margin:14px 16px 6px; text-transform:uppercase; }
+  #log { flex:1; overflow:hidden; padding:0 16px; font-size:14px; line-height:1.45; }
+  #log div { padding:3px 0; border-bottom:1px dashed rgba(255,255,255,.05); color:var(--muted); }
+  #log div.hit, #log div.kill { color:var(--text); }
+  #log div.kill { color:var(--red); font-weight:700; }
+  #log div.decree { color:var(--gold); font-weight:700; }
+  #log div.loot { color:var(--green); }
+  #log div.start, #log div.over { color:var(--accent); font-weight:700; }
+  #say { min-height:120px; padding:12px 16px 16px; border-top:1px solid var(--line); font-size:16px; line-height:1.4; }
+  #say .who { font-size:11px; letter-spacing:.2em; color:var(--muted); text-transform:uppercase; margin-bottom:6px; }
+  #decree { position:fixed; left:50%; top:80px; transform:translateX(-50%); padding:12px 22px; background:rgba(255,204,85,.12); border:1px solid var(--gold); color:var(--gold); border-radius:12px; font-weight:700; letter-spacing:.06em; display:none; z-index:6; box-shadow:0 0 30px rgba(255,204,85,.25); max-width:70%; text-align:center; }
+  #big { position:fixed; inset:0; display:none; align-items:center; justify-content:center; font-size:64px; font-weight:900; letter-spacing:.1em; color:var(--accent); text-shadow:0 0 30px rgba(255,204,85,.6); z-index:7; pointer-events:none; }
+  #sound { position:fixed; left:18px; bottom:18px; z-index:8; padding:10px 14px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--text); cursor:pointer; font-size:13px; }
+  #stats { position:fixed; left:18px; bottom:64px; z-index:5; font-size:13px; color:var(--muted); }
+  #stats b { color:var(--text); font-size:15px; }
+</style>
+</head>
+<body>
+<div id="top">
+  <h1>PHANTOM ARENA</h1>
+  <span class="pill"><span id="dot"></span><span id="gw">no base station</span></span>
+  <span class="pill" id="phase">lobby</span>
+  <span class="pill">host <b id="host">-</b></span>
+  <span class="pill" id="ai">commentary: templates</span>
+</div>
+<div id="stage"><canvas id="c"></canvas></div>
+<div id="side">
+  <h2>Battle log</h2>
+  <div id="log"></div>
+  <div id="say"><div class="who">Arena Director</div><div id="saytext">Waiting for the first duel...</div></div>
+</div>
+<div id="decree"></div>
+<div id="big"></div>
+<div id="stats"><b id="s_badges">0</b> badges &nbsp;·&nbsp; <b id="s_matches">0</b> matches &nbsp;·&nbsp; <b id="s_loot">0</b> loot &nbsp;·&nbsp; <b id="s_casts">0</b> casts</div>
+<button id="sound">🔊 enable sound</button>
+<script>
+(() => {
+  const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+  const TEAM = { '0': '#9aa4b8', '1': '#ff4d4d', '2': '#4d8dff', '3': '#3ddc84', '4': '#ffcc55' };
+  let state = { players: [], phase: 'L', stats: {} };
+  let effects = [];      // {kind, from, to, color, t0, dur}
+  const pos = {};        // id -> {x, y, tx, ty}
+  let soundOn = false;
+  const logEl = document.getElementById('log');
+
+  function resize() {
+    const r = canvas.parentElement.getBoundingClientRect();
+    canvas.width = r.width * devicePixelRatio; canvas.height = r.height * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  function layout() {
+    const w = canvas.width / devicePixelRatio, h = canvas.height / devicePixelRatio;
+    const ps = state.players || [];
+    const n = ps.length || 1;
+    const cx = w / 2, cy = h / 2 + 10, R = Math.min(w, h) * 0.34;
+    const boss = ps.find(p => p.boss);
+    ps.forEach((p, i) => {
+      let tx, ty;
+      if (state.mode === 'T') {           // teams face each other
+        const team = ps.filter(q => q.team === p.team);
+        const k = team.indexOf(p), m = team.length;
+        const side = Object.keys(TEAM).indexOf(p.team) % 2 === 0 ? -1 : 1;
+        tx = cx + side * R; ty = cy + (k - (m - 1) / 2) * 90;
+      } else if (state.mode === 'R' && boss) {  // mages around the Phantom
+        if (p.boss) { tx = cx; ty = cy; }
+        else { const mages = ps.filter(q => !q.boss); const k = mages.indexOf(p); const a = -Math.PI / 2 + k * 2 * Math.PI / mages.length; tx = cx + Math.cos(a) * R; ty = cy + Math.sin(a) * R; }
+      } else {
+        const a = -Math.PI / 2 + i * 2 * Math.PI / n; tx = cx + Math.cos(a) * R; ty = cy + Math.sin(a) * R;
+      }
+      const q = pos[p.id] || (pos[p.id] = { x: tx, y: ty });
+      q.tx = tx; q.ty = ty;
+    });
+    for (const id in pos) if (!ps.find(p => p.id === id)) delete pos[id];
+  }
+
+  function draw(now) {
+    const w = canvas.width / devicePixelRatio, h = canvas.height / devicePixelRatio;
+    ctx.clearRect(0, 0, w, h);
+    // arena floor
+    const g = ctx.createRadialGradient(w / 2, h / 2, 10, w / 2, h / 2, Math.max(w, h) * 0.7);
+    g.addColorStop(0, '#111a2c'); g.addColorStop(1, '#07090f');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,.05)';
+    for (let r = 60; r < Math.max(w, h); r += 60) { ctx.beginPath(); ctx.arc(w / 2, h / 2 + 10, r, 0, Math.PI * 2); ctx.stroke(); }
+    layout();
+    for (const p of state.players || []) {
+      const q = pos[p.id]; q.x += (q.tx - q.x) * 0.08; q.y += (q.ty - q.y) * 0.08;
+    }
+    // effects
+    effects = effects.filter(e => now - e.t0 < e.dur);
+    for (const e of effects) {
+      const k = (now - e.t0) / e.dur;
+      const a = pos[e.from], b = e.to ? pos[e.to] : null;
+      if (!a) continue;
+      if (e.kind === 'bolt' && b) {
+        ctx.strokeStyle = e.color; ctx.lineWidth = 4 * (1 - k) + 1; ctx.shadowColor = e.color; ctx.shadowBlur = 18;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y);
+        const segs = 8;
+        for (let i = 1; i <= segs; i++) { const t = i / segs; const jit = (i === segs) ? 0 : (Math.random() - 0.5) * 22 * (1 - k); ctx.lineTo(a.x + (b.x - a.x) * t + jit, a.y + (b.y - a.y) * t + jit); }
+        ctx.stroke(); ctx.shadowBlur = 0;
+      } else if (e.kind === 'ring') {
+        ctx.strokeStyle = e.color; ctx.globalAlpha = 1 - k; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(a.x, a.y, 30 + k * 90, 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = 1;
+      } else if (e.kind === 'burst') {
+        for (let i = 0; i < 14; i++) { const ang = i * Math.PI * 2 / 14; ctx.fillStyle = e.color; ctx.globalAlpha = 1 - k; ctx.beginPath(); ctx.arc(a.x + Math.cos(ang) * k * 120, a.y + Math.sin(ang) * k * 120, 5 * (1 - k) + 1, 0, Math.PI * 2); ctx.fill(); }
+        ctx.globalAlpha = 1;
+      } else if (e.kind === 'text') {
+        ctx.fillStyle = e.color; ctx.globalAlpha = 1 - k; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center';
+        ctx.fillText(e.text, a.x, a.y - 60 - k * 50); ctx.globalAlpha = 1;
+      }
+    }
+    // players
+    for (const p of state.players || []) {
+      const q = pos[p.id]; const r = p.boss ? 54 : 34; const col = p.boss ? '#b400ff' : (TEAM[p.team] || '#9aa4b8');
+      ctx.save();
+      if (p.hidden) ctx.globalAlpha = 0.28;
+      ctx.shadowColor = col; ctx.shadowBlur = p.dead ? 0 : 30;
+      ctx.fillStyle = p.dead ? '#2a2f3a' : col; ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      if (p.warded) { ctx.strokeStyle = '#00c8ff'; ctx.lineWidth = 4; ctx.setLineDash([8, 6]); ctx.beginPath(); ctx.arc(q.x, q.y, r + 10, now / 300, now / 300 + Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
+      if (p.is_host || p.id === state.host) { ctx.fillStyle = '#ffcc55'; ctx.font = '16px system-ui'; ctx.textAlign = 'center'; ctx.fillText('♛', q.x, q.y - r - 26); }
+      ctx.fillStyle = '#fff'; ctx.font = (p.boss ? 'bold 18px' : 'bold 15px') + ' system-ui'; ctx.textAlign = 'center';
+      ctx.fillText((p.boss ? 'THE PHANTOM ' : '') + p.name, q.x, q.y + r + 20);
+      if (p.dead) { ctx.fillStyle = '#fff'; ctx.font = 'bold 26px system-ui'; ctx.fillText('✕', q.x, q.y + 9); }
+      // hp bar
+      const bw = p.boss ? 120 : 80, bh = 8, bx = q.x - bw / 2, by = q.y + r + 28;
+      ctx.fillStyle = '#1d2536'; ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = p.hp > 50 ? '#3ddc84' : p.hp > 25 ? '#ffcc55' : '#ff4d4d'; ctx.fillRect(bx, by, bw * Math.max(0, Math.min(100, p.hp)) / 100, bh);
+      ctx.fillStyle = '#9aa4b8'; ctx.font = '12px system-ui'; ctx.fillText(p.hp + '%' + (p.kills ? '  ⚔' + p.kills : ''), q.x, by + 22);
+      ctx.restore();
+    }
+    if (!(state.players || []).length) { ctx.fillStyle = '#7f8ca6'; ctx.font = '20px system-ui'; ctx.textAlign = 'center'; ctx.fillText('Waiting for badges... open Phantom Arena on a badge near the base station', w / 2, h / 2); }
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+
+  function addLog(ev) {
+    const d = document.createElement('div'); d.className = ev.kind || 'log'; d.textContent = ev.text;
+    logEl.appendChild(d);
+    while (logEl.children.length > 22) logEl.removeChild(logEl.firstChild);
+  }
+  function big(text, ms) { const b = document.getElementById('big'); b.textContent = text; b.style.display = 'flex'; setTimeout(() => b.style.display = 'none', ms); }
+
+  function onEvent(ev) {
+    const now = performance.now();
+    if (ev.kind === 'cast') {
+      for (const t of ev.targets || []) effects.push({ kind: t === ev.a ? 'ring' : 'bolt', from: ev.a, to: t, color: ev.color || '#fff', t0: now, dur: 450 });
+      if (!(ev.targets || []).length) effects.push({ kind: 'ring', from: ev.a, color: ev.color || '#fff', t0: now, dur: 500 });
+    } else if (ev.kind === 'hit') {
+      effects.push({ kind: 'burst', from: ev.b, color: ev.color || '#fff', t0: now, dur: 600 });
+      effects.push({ kind: 'text', from: ev.b, text: '-' + ev.v, color: '#ff4d4d', t0: now, dur: 900 });
+    } else if (ev.kind === 'kill') {
+      effects.push({ kind: 'burst', from: ev.b, color: '#ff4d4d', t0: now, dur: 1200 });
+      effects.push({ kind: 'text', from: ev.a, text: 'KO!', color: '#ffcc55', t0: now, dur: 1400 });
+    } else if (ev.kind === 'decree') {
+      const d = document.getElementById('decree'); d.textContent = ev.text; d.style.display = 'block';
+      setTimeout(() => d.style.display = 'none', 12000);
+    } else if (ev.kind === 'start') { big('FIGHT!', 1800); }
+    else if (ev.kind === 'over') { big((ev.winner || 'Someone') + ' WINS', 5000); }
+    else if (ev.kind === 'loot') { effects.push({ kind: 'text', from: ev.a, text: '+ ' + ev.item, color: '#3ddc84', t0: now, dur: 1600 }); }
+    else if (ev.kind === 'boss') { big('THE PHANTOM RAGES', 2500); }
+    if (ev.kind !== 'cast') addLog(ev);
+  }
+
+  function onState(s) {
+    state = s;
+    document.getElementById('phase').textContent = s.phase_name + (s.mode_name ? ' · ' + s.mode_name : '');
+    document.getElementById('host').textContent = s.host_name || '-';
+    document.getElementById('dot').className = s.gateway_connected ? 'on' : '';
+    document.getElementById('gw').textContent = s.gateway_connected ? ('base station · ' + s.lines + ' frames') : 'no base station';
+    document.getElementById('s_badges').textContent = s.stats.badges; document.getElementById('s_matches').textContent = s.stats.matches;
+    document.getElementById('s_loot').textContent = s.stats.loot; document.getElementById('s_casts').textContent = s.stats.casts;
+    const d = document.getElementById('decree');
+    if (s.decree_card) { d.textContent = 'DECREE: ' + s.decree_card.title + ' — ' + s.decree_card.text; d.style.display = 'block'; } else if (d.style.display === 'block' && !s.decree) { d.style.display = 'none'; }
+    if (!logEl.children.length) for (const ev of s.events || []) if (ev.kind !== 'cast') addLog(ev);
+  }
+
+  let audioEl = null;
+  function say(msg) {
+    document.getElementById('saytext').textContent = msg.text;
+    if (!soundOn) return;
+    if (msg.audio) { if (audioEl) audioEl.pause(); audioEl = new Audio('data:audio/mpeg;base64,' + msg.audio); audioEl.play().catch(() => {}); }
+    else if ('speechSynthesis' in window) { const u = new SpeechSynthesisUtterance(msg.text); u.rate = 1.05; u.pitch = 0.9; speechSynthesis.cancel(); speechSynthesis.speak(u); }
+  }
+  document.getElementById('sound').addEventListener('click', (e) => {
+    soundOn = !soundOn; e.target.textContent = soundOn ? '🔇 mute' : '🔊 enable sound';
+    if (soundOn && 'speechSynthesis' in window) speechSynthesis.speak(new SpeechSynthesisUtterance('Phantom Arena is live.'));
+  });
+
+  function connect() {
+    const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onmessage = (m) => {
+      const msg = JSON.parse(m.data);
+      if (msg.type === 'state') onState(msg); else if (msg.type === 'event') onEvent(msg.event); else if (msg.type === 'say') say(msg);
+    };
+    ws.onclose = () => setTimeout(connect, 1000);
+  }
+  connect();
+  fetch('/health').then(r => r.json()).then(h => { document.getElementById('ai').textContent = 'commentary: ' + (h.ai ? 'OpenAI' : 'templates') + ' · voice: ' + (h.voice ? 'ElevenLabs' : 'browser'); }).catch(() => {});
+})();
+</script>
+</body>
+</html>
