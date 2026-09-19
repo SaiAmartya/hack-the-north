@@ -33,6 +33,9 @@ void publish_stats() {
 void process(uint32_t capture_ms, int16_t cx, int16_t cy, int16_t cz, bool saturated) {
   g_stats.sensor_ok = true;
   const int16_t chip[3] = {cx, cy, cz};
+  const MappedSample mapped = map_and_clip(chip, g_map, g_sign, RANGE_G * 1000);
+  const int16_t v[3] = {mapped.x, mapped.y, mapped.z};
+  saturated = saturated || mapped.saturated;
   int8_t map[3], sign[3];
   get_axes(map, sign);
   int32_t v[3];
