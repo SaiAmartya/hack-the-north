@@ -21,10 +21,14 @@ assert not any(name in sys.modules for name in (
     subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=10)
 
 
-def test_bootstrap_is_diagnostic_only_and_has_no_legacy_reset():
+def test_bootstrap_exposes_isolated_game_authority_and_no_legacy_reset():
     with TestClient(create_app()) as client:
         assert client.get("/api/game/health").json() == {
-            "version": 1, "stage": "device-lab", "multiplayerReady": False,
+            "version": 1,
+            "stage": "game",
+            "multiplayerReady": True,
+            "devRelayEnabled": False,
+            "allowReplay": False,
         }
         assert client.post("/match/reset").status_code == 404
         rules = client.get("/api/game/rules").json()

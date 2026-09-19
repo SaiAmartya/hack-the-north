@@ -28,7 +28,7 @@ export function replayAxes(
 }
 
 export class VirtualWandTransport implements WandTransport {
-  readonly source = "REPLAY";
+  get source(): WandTransport["source"] { return this.channel?.source ?? "REPLAY"; }
   readonly endpoint: VirtualWandEndpoint;
   private timer?: ReturnType<typeof setInterval>;
   private generation = 0;
@@ -46,6 +46,7 @@ export class VirtualWandTransport implements WandTransport {
   constructor(
     private readonly now = () => performance.now(),
     info?: InfoRecord,
+    private readonly channel?: WandTransport,
   ) {
     this.endpoint = new VirtualWandEndpoint({
       nowMs: now,
@@ -63,6 +64,7 @@ export class VirtualWandTransport implements WandTransport {
   }
 
   async connect(_onDisconnect: () => void): Promise<void> {
+    if (this.channel) return this.channel.connect(_onDisconnect);
     this.disconnect();
     this.connected = true;
     this.pausedUntil = 0;
@@ -96,10 +98,12 @@ export class VirtualWandTransport implements WandTransport {
   }
 
   async readInfo() {
+    if (this.channel) return this.channel.readInfo();
     this.requireConnection();
     return this.endpoint.readInfo();
   }
   async readStatus() {
+    if (this.channel) return this.channel.readStatus();
     this.requireConnection();
     return this.endpoint.readStatus();
   }
@@ -108,6 +112,7 @@ export class VirtualWandTransport implements WandTransport {
     kind: NotificationKind,
     listener: ByteListener,
   ): Promise<void> {
+    if (this.channel) return this.channel.subscribe(kind, listener);
     this.requireConnection();
     const generation = this.generation;
     const deliver = (bytes: Uint8Array) => {
@@ -128,11 +133,13 @@ export class VirtualWandTransport implements WandTransport {
   }
 
   async writeControl(bytes: Uint8Array): Promise<void> {
+    if (this.channel) return this.channel.writeControl(bytes);
     this.requireConnection();
     this.endpoint.writeControl(bytes);
   }
 
   disconnect(): void {
+    if (this.channel) { this.channel.disconnect(); return; }
     this.generation++;
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
