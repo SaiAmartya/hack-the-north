@@ -1,7 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { App } from "./App";
-import "./styles.css";
+import { DeviceLab } from "./duel/DeviceLab";
 
 const root = document.getElementById("root");
 if (!root) {
@@ -10,6 +9,6 @@ if (!root) {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <App />
+    <DeviceLab />
   </React.StrictMode>,
 );

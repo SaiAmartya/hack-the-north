@@ -1,4 +1,78 @@
-# Phantom Arena
+# Wand Duel — iPhone-first build
+
+The current build is **Device Lab, Stages 0–1**: an isolated browser entry point,
+the exact badge protocol, a raw-motion replay endpoint, feedback previews and
+connection/fault diagnostics. It does **not** yet recognize spells, use an iPhone,
+capture audio/video or run multiplayer. Legacy files remain below for reference;
+their gateway, Lua, button and OpenAI instructions do not apply to the new build.
+
+- [Approved implementation plan](IMPLEMENTATION-PLAN.md)
+- [Current checkpoint and your QA card](docs/qa/device-lab-stage-1.md)
+- [MVP](MVP-OUTLINE.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
+- [Design system — Wizarding Workshop](DESIGN_SYSTEMS.md)
+- [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
+
+## Run the current checkpoint
+
+From the repository root, using Node 26.5.0:
+
+```sh
+cd apps/web
+npm ci
+npm run dev
+```
+
+Open **http://127.0.0.1:5173** in desktop Chrome. Replay works without the host,
+badge, microphone, camera, API key or internet. Choose **Virtual wand · raw replay**
+and connect. Do not select a real badge for this QA card.
+
+Optional isolated host, in a separate terminal with Python 3.11:
+
+```sh
+cd apps/host
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m phantom_host.duel_app
+```
+
+The host binds only to `127.0.0.1:8000`; **Check isolated host** verifies it.
+It currently serves diagnostic health and rules, not combat. No legacy workers
+are started. Shut down each server with **Ctrl+C** in its terminal.
+
+Both servers are loopback-only. iPhone HTTPS, certificates, LAN exposure and
+Windows qualification are later approval/testing gates, not setup prerequisites.
+
+## Verify the current checkpoint
+
+```sh
+cd apps/web
+npm run typecheck
+npm test
+npm run build
+npm exec playwright install chromium
+npm run test:e2e
+```
+
+Stop an existing Vite server before the browser test; it owns port 5173 and refuses
+to reuse an unrelated server. First-time dependency/browser installation requires
+internet. Runtime replay does not.
+
+```sh
+cd apps/host
+.venv/bin/python -m pytest -q
+```
+
+The host suite includes legacy regression tests; a pass does not establish a new
+duel or physical hardware result. See the checkpoint for the exact evidence.
+
+---
+
+# Legacy Phantom Arena reference (superseded)
+
+**Historical only:** the following describes the old entry point and architecture.
+The default web entry point now opens Device Lab, so these instructions are not
+a runnable end-to-end workflow for the new game. Preserve for source archaeology;
+follow the implementation plan and current checkpoint above.
 
 A 1v1 mixed-reality spell duel. Two HTN badges are wands, a third badge bridges their
 radio traffic to a laptop over USB serial, and the laptop is the single authority for
