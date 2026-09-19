@@ -34,6 +34,7 @@ from phantom_host.contracts import (
 from phantom_host.dedup import PacketDeduper
 from phantom_host.protocol import parse_radio_line
 from phantom_host.serial_gateway import SerialGateway
+from phantom_host.vision import CameraWorker, MarkerTracker
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class ArenaHost:
         self._lines: queue.SimpleQueue[str] = queue.SimpleQueue()
 
         self.gateway: SerialGateway | None = None
+        self.camera: CameraWorker | None = None
         self.packets_applied = 0
         self.duplicates_dropped = 0
         self.lines_rejected = 0
@@ -155,6 +157,21 @@ class ArenaHost:
     def gateway_connected(self) -> bool:
         return bool(self.gateway and self.gateway.connected)
 
+    @property
+    def camera_available(self) -> bool:
+        return bool(self.camera and self.camera.available)
+
+    def sync_camera(self) -> None:
+        """Copy the camera thread's latest output into the published state.
+
+        The camera runs at its own cadence, so state updates never wait for a
+        frame. A dropped capture already reports ``visible=False``.
+        """
+        if self.camera is None:
+            return
+        self.markers = self.camera.markers
+        self.frame_jpeg_base64 = self.camera.frame_jpeg_base64
+
     def build_envelope(self, drain: bool = True) -> ArenaEnvelope:
         effects = list(self._effects)
         if drain:
@@ -179,6 +196,10 @@ class ArenaHost:
             "phase": self.state.phase,
             "gatewayConnected": self.gateway_connected,
             "gatewayPort": self.gateway.port if self.gateway else None,
+            "cameraAvailable": self.camera_available,
+            "markersVisible": {
+                player_id: pose.visible for player_id, pose in self.markers.items()
+            },
             "uptimeMs": self.uptime_ms(),
             "packetsApplied": self.packets_applied,
             "duplicatesDropped": self.duplicates_dropped,
@@ -197,6 +218,7 @@ def create_app(
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         stop_serial: threading.Event | None = None
+        stop_camera: threading.Event | None = None
 
         if settings.serial_enabled:
             arena.gateway = SerialGateway(
@@ -206,6 +228,16 @@ def create_app(
             )
             _thread, stop_serial = arena.gateway.start()
             logger.info("serial gateway thread started")
+
+        if settings.camera_enabled:
+            arena.camera = CameraWorker(
+                MarkerTracker(settings.marker_ids),
+                camera_index=settings.camera_index,
+                fps=settings.camera_fps,
+                max_width=settings.camera_max_width,
+            )
+            _camera_thread, stop_camera = arena.camera.start()
+            logger.info("camera thread started")
 
         tick_task = asyncio.create_task(_tick_loop(arena, broadcaster, settings))
 
@@ -217,6 +249,8 @@ def create_app(
                 await tick_task
             if stop_serial is not None:
                 stop_serial.set()
+            if stop_camera is not None:
+                stop_camera.set()
 
     app = FastAPI(title="Phantom Arena", lifespan=lifespan)
 
@@ -263,6 +297,7 @@ async def _tick_loop(
     while True:
         try:
             arena.drain_serial_queue()
+            arena.sync_camera()
             arena.tick()
             await broadcaster.publish(arena.envelope_payload())
         except asyncio.CancelledError:
