@@ -188,8 +188,13 @@ class QaPlayer {
     this.requireCalibrationExample("stupefy", 3);
     this.motion.beginGestureCalibration("protego");
     await this.transport.playTrace(this.traces.guard(33));
+    await this.transport.playTrace(this.traces.lower(33));
+    this.requireCalibrationExample("protego", 1);
     await this.transport.playTrace(this.traces.guard(36));
+    await this.transport.playTrace(this.traces.lower(36));
+    this.requireCalibrationExample("protego", 2);
     await this.transport.playTrace(this.traces.guard(39));
+    await this.transport.playTrace(this.traces.lower(39));
     const motion = this.motion.getState();
     if (motion.phase !== "ready")
       throw new Error(
@@ -247,6 +252,8 @@ class QaPlayer {
       () => this.castAcks.has(attempt.id),
       2_000,
     );
+    // A raised guard is lowered again before the next scripted movement, as a player would.
+    if (spell === "protego") await this.transport.playTrace(this.traces.lower(32));
     return this.castAcks.get(attempt.id)!;
   }
 

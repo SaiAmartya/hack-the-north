@@ -41,12 +41,16 @@ export type MotionRejectionReason =
   | "too-small" | "missing-stop" | "inconsistent-direction" | "guard-tilt"
   | "no-match" | "ambiguous";
 
-export const MOTION_RECOGNIZER_VERSION = 2 as const;
+/**
+ * Recognizer revision. The diagnostics record below keeps the version-2 wire shape that the
+ * deployed phone service validates; `reason` strings carry the v3 outcome.
+ */
+export const MOTION_RECOGNIZER_VERSION = 3 as const;
 
 export type MotionStopEvidence = "opposite" | "release" | "none";
 
 export type MotionDiagnostics = {
-  version: typeof MOTION_RECOGNIZER_VERSION;
+  version: 2;
   neutralMg?: readonly [number, number, number];
   noiseMg: number;
   candidate?: {
@@ -62,175 +66,112 @@ export type MotionDiagnostics = {
 };
 
 type Vector = readonly [number, number, number];
-type Matrix = [[number, number, number], [number, number, number], [number, number, number]];
-type Candidate = {
+type Sample = { t: number; a: Vector; jerk: number };
+type Burst = {
   startMs: number;
-  samples: CapturedMotion[];
+  rest: Vector;            // pose the movement started from (frozen)
+  samples: Sample[];
+  peak: number;
+  peakAt: number;
+  peakIndex: number;
+  settled: boolean;        // an impulse was already evaluated; the rest of the burst is ignored
 };
-type CandidateFeatures = {
+type Features = {
   startMs: number;
   endMs: number;
   durationMs: number;
-  direction: Vector;
+  direction: Vector;       // signed device-frame direction of the strongest stroke
   dominantRatio: number;
   peak: number;
-  stopped: boolean;
-  stopEvidence: MotionStopEvidence;
-  startAngleDeg: number;
-  finalAngleDeg: number;
-  finalDirection: Vector;
+  lobeMs: number;          // how long the strongest stroke stayed above half its peak
+  tiltDeg: number;         // orientation change from the starting pose to the held end pose
+  tiltDirection: Vector;   // device-frame direction of that orientation change
+  startPose: Vector;       // resting pose the movement started from
+  endQuiet: boolean;       // the movement ended in a still hold (guards need this)
 };
-type GestureTemplate =
-  | { kind: "impulse"; direction: Vector; typicalPeak: number }
-  | { kind: "guard"; direction: Vector };
+type ImpulseTemplate = { kind: "impulse"; direction: Vector; peak: number };
+type GuardTemplate = { kind: "guard"; direction: Vector; tiltDeg: number; peak: number };
+type GestureTemplate = ImpulseTemplate | GuardTemplate;
 
-const SPELLS: readonly SpellName[] = [
-  "stupefy",
-  "protego",
-  "expelliarmus",
-];
+const SPELLS: readonly SpellName[] = ["stupefy", "protego", "expelliarmus"];
 const CORE_SPELLS: readonly SpellName[] = ["stupefy", "protego"];
-const STILLNESS_MS = 3_000;
-const REST_MS = 200;
-const MOVEMENT_MIN_MS = 150;
-const MOVEMENT_MAX_MS = 900;
-const SETTLE_MS = 150;
-const MAX_GAP_MS = 150;
-const DOMINANT_RATIO = 0.65;
-const NEUTRAL_DEGREES = 20;
-const GUARD_DEGREES = 25;
-const DIRECTION_DEGREES = 25;
+const EXAMPLES_PER_SPELL = 3;
+
+// Wii-remote style segmentation: a movement starts on a sharp change, continues through any number of
+// strokes, and ends when the wand is held still again in whatever pose it ended up. Nothing requires
+// returning to the calibrated pose; the resting reference follows the player's hand while it is quiet.
+const STILLNESS_MS = 1_500;
 const RESUME_MS = 1_000;
-const ONSET_MIN_MG = 120;
-const ONSET_TILT_DEGREES = 8;
-const ONSET_SUSTAIN_MS = 40;
-const QUASI_STATIC_MG = 180;
-const RELEASE_RMS_MG = 60;
-const RELEASE_DRIFT_MG = 80;
-const RELEASE_ROTATION_DEGREES = 5;
-
-// Integrate observed intervals, not sample counts, so callback jitter cannot
-// overweight a burst of readings. Window boundaries never become observations.
-function weightedMean(samples: readonly CapturedMotion[], start: number, end: number): Vector {
-  let total: Vector = [0, 0, 0];
-  let duration = 0;
-  for (let index = 1; index < samples.length; index++) {
-    const left = samples[index - 1], right = samples[index];
-    const from = Math.max(start, left.browserMs), to = Math.min(end, right.browserMs);
-    if (to <= from) continue;
-    const interpolate = (time: number) => add(vector(left), scale(subtract(vector(right), vector(left)), (time - left.browserMs) / (right.browserMs - left.browserMs)));
-    const weight = to - from;
-    total = add(total, scale(add(interpolate(from), interpolate(to)), weight / 2));
-    duration += weight;
-  }
-  return duration > 0 ? scale(total, 1 / duration) : vector(samples[samples.length - 1]);
-}
-
-function weightedEnergy(samples: readonly CapturedMotion[], start: number, end: number, center: Vector): Matrix {
-  const matrix: Matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-  for (let index = 1; index < samples.length; index++) {
-    const left = samples[index - 1], right = samples[index];
-    const from = Math.max(start, left.browserMs), to = Math.min(end, right.browserMs);
-    if (to <= from) continue;
-    const a = subtract(vector(left), center), b = subtract(vector(right), center);
-    const delta = subtract(b, a);
-    const first = add(a, scale(delta, (from - left.browserMs) / (right.browserMs - left.browserMs)));
-    const last = add(a, scale(delta, (to - left.browserMs) / (right.browserMs - left.browserMs)));
-    for (let row = 0; row < 3; row++) for (let column = 0; column < 3; column++)
-      matrix[row][column] += (to - from) * (2 * first[row] * first[column] + first[row] * last[column] + last[row] * first[column] + 2 * last[row] * last[column]) / 6;
-  }
-  return matrix;
-}
-
-function leadingDirection(matrix: Matrix): { direction: Vector; ratio: number } {
-  const diagonal = [matrix[0][0], matrix[1][1], matrix[2][2]];
-  const multiply = (value: Vector): Vector => [
-    dot(matrix[0], value),
-    dot(matrix[1], value),
-    dot(matrix[2], value),
-  ];
-  let direction: Vector = [1, 0, 0], eigenvalue = -Infinity;
-  for (const seed of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
-    let candidate: Vector = seed;
-    for (let step = 0; step < 24; step++) candidate = normalized(multiply(candidate));
-    const value = dot(candidate, multiply(candidate));
-    if (value > eigenvalue) {
-      direction = candidate;
-      eigenvalue = value;
-    }
-  }
-  const total = diagonal.reduce((sum, value) => sum + value, 0);
-  return { direction, ratio: total > 0 ? eigenvalue / total : 0 };
-}
+const ARM_MS = 250;                 // quiet before a new movement may start
+const QUIET_WINDOW_MS = 200;        // trailing still window that ends a movement
+const QUIET_JERK_MG = 140;          // per 20 ms; resting hands measure well under 100
+const QUIET_SPREAD_MG = 150;
+const ONSET_JERK_MG = 180;          // two consecutive samples, or one sample above the single threshold
+const ONSET_JERK_SINGLE_MG = 450;
+const ONSET_LINEAR_MG = 450;        // weak movements still start a candidate so coaching can say "harder"
+const ONSET_TILT_DEG = 15;          // a slow deliberate raise still starts a movement
+const MAX_GAP_MS = 150;
+const MOVEMENT_MAX_MS = 2_000;
+const IMPULSE_EARLY_PEAK_MG = 800;  // strokes this strong resolve without waiting for stillness
+const IMPULSE_SETTLE_MS = 120;
+const IMPULSE_SETTLE_JERK_MG = 250; // the stroke is over once the wand stops accelerating sharply
+const IMPULSE_MIN_PEAK_MG = 600;    // calibration floor for a jab or sweep
+const IMPULSE_MIN_LOBE_MS = 60;     // a stroke has to last three samples; a twitch does not
+const PLAY_MIN_PEAK_MG = 400;
+const CANDIDATE_MIN_PEAK_MG = 150;  // below this a "movement" is just the hand drifting
+const COACH_MIN_MS = 150;           // shorter, weaker movements get no coaching at all
+const GUARD_MIN_TILT_DEG = 22;
+const GUARD_MIN_PEAK_MG = 200;
+const DIRECTION_TOLERANCE_DEG = 40;
+const GUARD_TOLERANCE_DEG = 45;
+const CONSISTENCY_DEG = 50;
+const SEPARATION_DEG = 50;
+const AMBIGUITY_MARGIN_DEG = 15;
+const REST_TAU_MS = 500;
+const LOBE_FRACTION = 0.5;
 
 function vector(sample: CapturedMotion): Vector {
   return [sample.axMg, sample.ayMg, sample.azMg];
 }
-
-function add(left: Vector, right: Vector): Vector {
-  return [left[0] + right[0], left[1] + right[1], left[2] + right[2]];
+function add(l: Vector, r: Vector): Vector { return [l[0] + r[0], l[1] + r[1], l[2] + r[2]]; }
+function subtract(l: Vector, r: Vector): Vector { return [l[0] - r[0], l[1] - r[1], l[2] - r[2]]; }
+function scale(v: Vector, k: number): Vector { return [v[0] * k, v[1] * k, v[2] * k]; }
+function dot(l: Vector, r: Vector): number { return l[0] * r[0] + l[1] * r[1] + l[2] * r[2]; }
+function magnitude(v: Vector): number { return Math.sqrt(dot(v, v)); }
+function normalized(v: Vector): Vector {
+  const length = magnitude(v);
+  return length > 0 ? scale(v, 1 / length) : [0, 0, 0];
 }
-
-function subtract(left: Vector, right: Vector): Vector {
-  return [left[0] - right[0], left[1] - right[1], left[2] - right[2]];
-}
-
-function scale(value: Vector, factor: number): Vector {
-  return [value[0] * factor, value[1] * factor, value[2] * factor];
-}
-
-function dot(left: Vector, right: Vector): number {
-  return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
-}
-
-function magnitude(value: Vector): number {
-  return Math.sqrt(dot(value, value));
-}
-
-function normalized(value: Vector): Vector {
-  const length = magnitude(value);
-  return length > 0 ? scale(value, 1 / length) : [0, 0, 0];
-}
-
 function mean(values: readonly Vector[]): Vector {
-  return scale(values.reduce(add, [0, 0, 0] as Vector), 1 / values.length);
+  return values.length ? scale(values.reduce(add, [0, 0, 0] as Vector), 1 / values.length) : [0, 0, 0];
 }
-
-function angleDegrees(left: Vector, right: Vector): number {
-  const divisor = magnitude(left) * magnitude(right);
+function angleDegrees(l: Vector, r: Vector): number {
+  const divisor = magnitude(l) * magnitude(r);
   if (divisor === 0) return 180;
-  const cosine = Math.max(-1, Math.min(1, dot(left, right) / divisor));
-  return (Math.acos(cosine) * 180) / Math.PI;
+  return (Math.acos(Math.max(-1, Math.min(1, dot(l, r) / divisor))) * 180) / Math.PI;
 }
-
 function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
 }
-
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value));
-}
-
-function spellCounts(): Record<SpellName, number> {
-  return { stupefy: 0, protego: 0, expelliarmus: 0 };
-}
+function clamp01(value: number): number { return Math.max(0, Math.min(1, value)); }
+function spellCounts(): Record<SpellName, number> { return { stupefy: 0, protego: 0, expelliarmus: 0 }; }
 
 export class MotionRecognizer {
   private phase: MotionRecognizerPhase = "uncalibrated";
   private generation?: number;
-  private stillSamples: CapturedMotion[] = [];
-  private stillStartedAt?: number;
   private neutral?: Vector;
   private noiseRms = 0;
   private calibratingSpell?: SpellName;
-  private readonly examples = new Map<SpellName, CandidateFeatures[]>();
+  private readonly examples = new Map<SpellName, Features[]>();
   private readonly templates = new Map<SpellName, GestureTemplate>();
   private enabledSpells = new Set<SpellName>(CORE_SPELLS);
   private previous?: CapturedMotion;
-  private recent: CapturedMotion[] = [];
-  private armed = false;
-  private candidate?: Candidate;
+  private window: Sample[] = [];
+  private rest?: Vector;
+  private quietSince?: number;
+  private armed = false;   // latched once the hand has been still for ARM_MS; cleared when a movement starts
+  private burst?: Burst;
   private evidenceSequence = 0;
   private lastIssue = "";
   private reason?: MotionRejectionReason;
@@ -244,8 +185,6 @@ export class MotionRecognizer {
   beginCalibration(): void {
     this.phase = "stillness";
     this.generation = undefined;
-    this.stillSamples = [];
-    this.stillStartedAt = undefined;
     this.neutral = undefined;
     this.noiseRms = 0;
     this.calibratingSpell = undefined;
@@ -253,10 +192,11 @@ export class MotionRecognizer {
     this.templates.clear();
     this.enabledSpells = new Set(CORE_SPELLS);
     this.evidenceSequence = 0;
-    this.lastIssue = "Hold the wand still for 3 seconds";
+    this.lastIssue = "Hold your wand still";
     this.reason = undefined;
     this.lastCandidate = undefined;
     this.clearSegmenter();
+    this.rest = undefined;
     this.setProgress("hold-still", 0, STILLNESS_MS);
   }
 
@@ -268,7 +208,7 @@ export class MotionRecognizer {
     this.calibratingSpell = undefined;
     this.phase = "resuming";
     this.clearSegmenter();
-    this.lastIssue = "Hold your calibrated neutral grip for 1 second";
+    this.lastIssue = "Hold your wand still for a moment";
     this.setProgress("return-neutral", 0, RESUME_MS);
     return true;
   }
@@ -280,11 +220,11 @@ export class MotionRecognizer {
     this.examples.set(spell, []);
     this.templates.delete(spell);
     this.phase = "gesture-calibration";
-    this.lastIssue = `Collect three coached ${spell} examples`;
+    this.lastIssue = spell === "protego" ? "Raise your wand into a guard and hold it" : spell === "stupefy" ? "Jab forward" : "Sweep sideways";
     this.reason = undefined;
     this.lastCandidate = undefined;
     this.clearSegmenter();
-    this.setProgress("return-neutral", 0, REST_MS);
+    this.setProgress("armed", 0, ARM_MS);
   }
 
   setEnabledSpells(spells: readonly SpellName[]): void {
@@ -304,46 +244,28 @@ export class MotionRecognizer {
       this.reset("Motion generation changed; recalibrate for the new stream");
       return;
     }
-
     if (!this.isFiniteSample(sample) || sample.ageUpperMs < 0 || sample.ageUpperMs > 200) {
-      this.breakContinuity("Non-finite motion sample");
+      this.breakContinuity("Non-finite motion sample", "invalid-sample");
       return;
     }
-    if (
-      !(sample.flags & MotionFlag.Valid) ||
-      sample.flags & (MotionFlag.Saturated | MotionFlag.Discontinuity)
-    ) {
-      this.breakContinuity("Invalid, saturated or discontinuous motion");
+    if (!(sample.flags & MotionFlag.Valid) || sample.flags & (MotionFlag.Saturated | MotionFlag.Discontinuity)) {
+      this.breakContinuity("Invalid, saturated or discontinuous motion", "invalid-sample");
       return;
     }
+    const gap = this.previous ? sample.browserMs - this.previous.browserMs : undefined;
+    if (gap !== undefined && (gap <= 0 || gap > MAX_GAP_MS))
+      this.breakContinuity(gap > MAX_GAP_MS ? "Motion gap exceeded 150 ms" : "Motion timestamps were not monotonic", "motion-gap");
+    if (sample.breaksGesture) this.breakContinuity("Motion source marked a gesture break", "motion-gap");
 
-    const gap = this.previous
-      ? sample.browserMs - this.previous.browserMs
-      : undefined;
-    if (gap !== undefined && (gap <= 0 || gap > MAX_GAP_MS)) {
-      this.breakContinuity(
-        gap > MAX_GAP_MS
-          ? "Motion gap exceeded 150 ms"
-          : "Motion timestamps were not monotonic",
-      );
-    }
-    if (sample.breaksGesture) {
-      this.breakContinuity("Motion source marked a gesture break");
-    }
-
-    if (this.phase === "stillness") this.pushStillness(sample);
-    else if (this.phase === "resuming") this.pushResume(sample);
-    else if (this.calibratingSpell || this.phase === "ready")
-      this.pushSegmenter(sample);
+    const current = this.observe(sample);
     this.previous = sample;
+    if (this.phase === "stillness") this.pushStillness(current);
+    else if (this.phase === "resuming") this.pushResume(current);
+    else if (this.calibratingSpell || this.phase === "ready") this.pushSegmenter(current);
   }
 
   clearPending(reason = ""): void {
     this.clearSegmenter();
-    if (this.phase === "stillness") {
-      this.stillSamples = [];
-      this.stillStartedAt = undefined;
-    }
     this.lastIssue = reason;
     this.reason = undefined;
     this.lastCandidate = undefined;
@@ -352,8 +274,6 @@ export class MotionRecognizer {
   reset(reason = ""): void {
     this.phase = "uncalibrated";
     this.generation = undefined;
-    this.stillSamples = [];
-    this.stillStartedAt = undefined;
     this.neutral = undefined;
     this.noiseRms = 0;
     this.calibratingSpell = undefined;
@@ -365,6 +285,7 @@ export class MotionRecognizer {
     this.reason = undefined;
     this.lastCandidate = undefined;
     this.clearSegmenter();
+    this.rest = undefined;
   }
 
   getState(): MotionRecognizerState {
@@ -373,16 +294,7 @@ export class MotionRecognizer {
     return {
       phase: this.phase,
       generation: this.generation,
-      stillnessMs:
-        this.phase === "stillness" && this.stillStartedAt !== undefined
-          ? Math.max(
-              0,
-              (this.stillSamples.at(-1)?.browserMs ?? this.stillStartedAt) -
-                this.stillStartedAt,
-            )
-          : this.neutral
-            ? STILLNESS_MS
-            : 0,
+      stillnessMs: this.phase === "stillness" ? this.quietElapsed() : this.neutral ? STILLNESS_MS : 0,
       calibratingSpell: this.calibratingSpell,
       examplesBySpell: counts,
       calibratedSpells: SPELLS.filter((spell) => this.templates.has(spell)),
@@ -396,156 +308,131 @@ export class MotionRecognizer {
   }
 
   getDiagnostics(): MotionDiagnostics {
-    return {
-      version: MOTION_RECOGNIZER_VERSION,
-      neutralMg: this.neutral,
-      noiseMg: this.noiseRms,
-      candidate: this.lastCandidate,
-    };
+    return { version: 2, neutralMg: this.neutral, noiseMg: this.noiseRms, candidate: this.lastCandidate };
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Sample conditioning
 
   private isFiniteSample(sample: CapturedMotion): boolean {
-    return [
-      sample.browserMs,
-      sample.ageUpperMs,
-      sample.axMg,
-      sample.ayMg,
-      sample.azMg,
-    ].every(Number.isFinite);
+    return [sample.browserMs, sample.ageUpperMs, sample.axMg, sample.ayMg, sample.azMg].every(Number.isFinite);
   }
 
-  private breakContinuity(reason: string): void {
+  private observe(sample: CapturedMotion): Sample {
+    const a = vector(sample);
+    const last = this.window[this.window.length - 1];
+    const dt = last ? sample.browserMs - last.t : 0;
+    // Sample-to-sample change normalised to a 20 ms step: orientation drift barely registers,
+    // a real stroke does, and it is immune to whatever pose the hand has drifted into.
+    const jerk = last && dt > 0 ? (magnitude(subtract(a, last.a)) * 20) / Math.max(dt, 5) : 0;
+    const current: Sample = { t: sample.browserMs, a, jerk };
+    this.window.push(current);
+    const keep = Math.max(QUIET_WINDOW_MS, RESUME_MS, STILLNESS_MS) + 100;
+    while (this.window.length > 2 && this.window[0].t < sample.browserMs - keep) this.window.shift();
+    return current;
+  }
+
+  private breakContinuity(reason: string, code: MotionRejectionReason): void {
     this.lastIssue = reason;
-    this.candidate = undefined;
+    this.reason = code;
+    this.burst = undefined;
+    this.window = [];
+    this.quietSince = undefined;
     this.armed = false;
-    this.recent = [];
-    this.lastCandidate = undefined;
-    this.reason = reason.includes("gap") ? "motion-gap" : "invalid-sample";
-    this.setProgress(this.phase === "stillness" ? "hold-still" : "return-neutral", 0, this.phase === "stillness" ? STILLNESS_MS : this.phase === "resuming" ? RESUME_MS : REST_MS);
     this.previous = undefined;
-    if (this.phase === "stillness") {
-      this.stillSamples = [];
-      this.stillStartedAt = undefined;
-    }
+    this.lastCandidate = undefined;
+    if (this.phase === "stillness") this.setProgress("hold-still", 0, STILLNESS_MS);
+    else if (this.phase === "resuming") this.setProgress("return-neutral", 0, RESUME_MS);
+    else this.setProgress("armed", 0, ARM_MS);
   }
 
-  private pushStillness(sample: CapturedMotion): void {
-    if (this.stillStartedAt === undefined) this.stillStartedAt = sample.browserMs;
-    this.stillSamples.push(sample);
-    this.trimWindow(this.stillSamples, STILLNESS_MS);
-    const elapsed = sample.browserMs - this.stillSamples[0].browserMs;
-    this.setProgress("hold-still", Math.min(elapsed, STILLNESS_MS), STILLNESS_MS);
-    if (elapsed >= REST_MS && !this.stable(this.stillSamples, Math.min(elapsed, STILLNESS_MS))) {
-      this.stillSamples = [sample];
-      this.stillStartedAt = sample.browserMs;
-      this.lastIssue = "Keep still; the quiet window will restart automatically";
+  /** Trailing samples covering `duration` ms ending at the latest sample, if the window has them. */
+  private trailing(duration: number, notBefore = -Infinity): Sample[] | undefined {
+    const end = this.window[this.window.length - 1]?.t;
+    if (end === undefined) return undefined;
+    const start = end - duration;
+    if (start < notBefore) return undefined;
+    const slice = this.window.filter((sample) => sample.t >= start);
+    if (slice.length < 4 || slice[0].t > start + 40) return undefined;
+    return slice;
+  }
+
+  private isQuiet(slice: readonly Sample[]): boolean {
+    const center = mean(slice.map((sample) => sample.a));
+    let spread = 0, jerk = 0;
+    for (let index = 0; index < slice.length; index++) {
+      spread = Math.max(spread, magnitude(subtract(slice[index].a, center)));
+      if (index > 0) jerk = Math.max(jerk, slice[index].jerk);
+    }
+    return jerk < QUIET_JERK_MG && spread < QUIET_SPREAD_MG;
+  }
+
+  private quietElapsed(): number {
+    const end = this.window[this.window.length - 1]?.t;
+    return end === undefined || this.quietSince === undefined ? 0 : Math.max(0, end - this.quietSince);
+  }
+
+  /** Extend or restart the quiet run; returns the current quiet duration. */
+  private trackQuiet(current: Sample): number {
+    const slice = this.trailing(QUIET_WINDOW_MS);
+    if (!slice || !this.isQuiet(slice)) {
+      this.quietSince = undefined;
+      return 0;
+    }
+    const center = mean(slice.map((sample) => sample.a));
+    if (this.quietSince === undefined || !this.rest) {
+      // A fresh still run (after a movement, a gap or a reconnect) re-anchors the resting pose at once;
+      // a lagging reference would otherwise read the next raise as already under way.
+      this.quietSince = slice[0].t;
+      this.rest = center;
+    } else {
+      const k = Math.min(1, (current.t - (this.window[this.window.length - 2]?.t ?? current.t)) / REST_TAU_MS);
+      this.rest = add(this.rest, scale(subtract(center, this.rest), k));
+    }
+    return current.t - this.quietSince;
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Calibration phases
+
+  private pushStillness(current: Sample): void {
+    const quiet = this.trackQuiet(current);
+    this.setProgress("hold-still", Math.min(quiet, STILLNESS_MS), STILLNESS_MS);
+    if (quiet === 0) {
+      this.lastIssue = "Keep still; the timer restarts on its own";
       this.reason = "keep-still";
-      this.progressMs = 0;
       return;
     }
-    if (elapsed < STILLNESS_MS) return;
-
-    const start = sample.browserMs - STILLNESS_MS;
-    const neutral = weightedMean(this.stillSamples, start, sample.browserMs);
-    const energy = weightedEnergy(this.stillSamples, start, sample.browserMs, neutral);
-    const rms = Math.sqrt((energy[0][0] + energy[1][1] + energy[2][2]) / STILLNESS_MS);
+    if (quiet < STILLNESS_MS) return;
+    const slice = this.trailing(STILLNESS_MS)!;
+    const neutral = mean(slice.map((sample) => sample.a));
     const gravity = magnitude(neutral);
-    if (gravity < 750 || gravity > 1_250) {
-      this.lastIssue = "Hold the controller still in its neutral grip";
+    if (gravity < 700 || gravity > 1_300) {
+      this.lastIssue = "Hold the wand still in a comfortable grip";
       this.reason = "invalid-gravity";
-      this.stillSamples = [sample];
-      this.stillStartedAt = sample.browserMs;
+      this.quietSince = undefined;
       return;
     }
+    let energy = 0;
+    for (const sample of slice) energy += dot(subtract(sample.a, neutral), subtract(sample.a, neutral));
     this.neutral = neutral;
-    this.noiseRms = rms;
+    this.rest = neutral;
+    this.noiseRms = Math.sqrt(energy / slice.length);
     this.phase = "gesture-calibration";
-    this.lastIssue = "Stillness captured; collect three coached examples per core spell";
-    this.stillSamples = [];
-    this.stillStartedAt = undefined;
-    this.clearSegmenter();
+    this.lastIssue = "Grip learned";
     this.reason = undefined;
-    this.setProgress("return-neutral", 0, REST_MS);
+    this.clearSegmenter();
+    this.setProgress("armed", 0, ARM_MS);
   }
 
-  private pushSegmenter(sample: CapturedMotion): void {
-    if (!this.neutral) return;
-    this.recent.push(sample);
-    this.trimWindow(this.recent, REST_MS);
-    const current = vector(sample);
-    if (!this.candidate) {
-      const stable = this.stable(this.recent, REST_MS);
-      const onsetMs = this.armed ? this.onsetStart(this.recent) : undefined;
-      if (onsetMs !== undefined) {
-        const start = Math.max(0, onsetMs - 20);
-        this.candidate = {
-          startMs: onsetMs,
-          samples: this.recent.filter((candidateSample) => candidateSample.browserMs >= start),
-        };
-        this.armed = false;
-        this.setProgress("moving", 0, MOVEMENT_MAX_MS);
-        return;
-      }
-      if (stable && this.isNeutral(current)) {
-        this.armed = true;
-        if (this.reason === "return-neutral") {
-          this.reason = undefined;
-          this.lastIssue = "";
-        }
-        this.setProgress("armed", REST_MS, REST_MS);
-      } else {
-        if (!stable && this.armed) {
-          this.setProgress("armed", this.stableSuffix(this.recent, REST_MS), REST_MS);
-          return;
-        }
-        this.armed = false;
-        if (stable && !this.isNeutral(current)) {
-          this.reason = "return-neutral";
-          this.lastIssue = "Return to the calibrated neutral grip, or restart calibration for this grip";
-        }
-        this.setProgress("return-neutral", this.isNeutral(current) ? this.stableSuffix(this.recent, REST_MS) : 0, REST_MS);
-      }
-      return;
-    }
-
-    this.candidate.samples.push(sample);
-    const elapsed = sample.browserMs - this.candidate.startMs;
-    if (elapsed > MOVEMENT_MAX_MS + SETTLE_MS) {
-      this.rejectCandidate("Gesture exceeded the 900 ms movement limit", "too-long");
-      return;
-    }
-    this.setProgress("moving", elapsed, MOVEMENT_MAX_MS);
-    const release = this.releaseSuffix(this.candidate.samples, this.candidate.startMs);
-    if (release) this.setProgress("settling", release.durationMs, SETTLE_MS);
-    if (release && release.durationMs >= SETTLE_MS) {
-      const endMs = release.startMs;
-      const duration = endMs - this.candidate.startMs;
-      if (duration < MOVEMENT_MIN_MS || duration > MOVEMENT_MAX_MS) {
-        this.rejectCandidate("Make one deliberate jab or guard, then let the wand settle", duration < MOVEMENT_MIN_MS ? "too-short" : "too-long", endMs);
-        return;
-      }
-      this.completeCandidate(this.candidate, endMs);
-      this.candidate = undefined;
-      this.armed = false;
-      this.recent = [sample];
-      this.setProgress("return-neutral", 0, REST_MS);
-    }
-  }
-
-  private pushResume(sample: CapturedMotion): void {
-    this.recent.push(sample);
-    this.trimWindow(this.recent, RESUME_MS);
-    if (!this.isNeutral(vector(sample))) {
-      this.recent = [sample];
-      this.reason = "return-neutral";
-    }
-    const elapsed = sample.browserMs - this.recent[0].browserMs;
-    if (elapsed >= REST_MS && !this.stable(this.recent, Math.min(elapsed, RESUME_MS))) {
-      this.recent = [sample];
+  private pushResume(current: Sample): void {
+    const quiet = this.trackQuiet(current);
+    this.setProgress("return-neutral", Math.min(quiet, RESUME_MS), RESUME_MS);
+    if (quiet === 0) {
       this.reason = "keep-still";
+      return;
     }
-    this.setProgress("return-neutral", sample.browserMs - this.recent[0].browserMs, RESUME_MS);
-    if (!this.stable(this.recent, RESUME_MS) || !this.isNeutral(vector(sample))) return;
+    if (quiet < RESUME_MS) return;
     this.phase = "ready";
     this.clearSegmenter();
     this.lastIssue = "";
@@ -553,130 +440,158 @@ export class MotionRecognizer {
     this.setProgress("ready", RESUME_MS, RESUME_MS);
   }
 
-  private trimWindow(samples: CapturedMotion[], duration: number): void {
-    const start = samples[samples.length - 1].browserMs - duration;
-    while (samples.length > 2 && samples[1].browserMs <= start) samples.shift();
-  }
+  // ---------------------------------------------------------------------------------------------
+  // Segmenter
 
-  private stable(samples: readonly CapturedMotion[], duration: number): boolean {
-    const end = samples[samples.length - 1]?.browserMs;
-    if (end === undefined || duration <= 0 || samples[0].browserMs > end - duration ||
-      samples.filter((sample) => sample.browserMs >= end - duration).length < 4) return false;
-    const start = end - duration;
-    const center = weightedMean(samples, start, end);
-    const energy = weightedEnergy(samples, start, end, center);
-    const rms = Math.sqrt((energy[0][0] + energy[1][1] + energy[2][2]) / duration);
-    const first = weightedMean(samples, start, start + Math.min(50, duration));
-    const last = weightedMean(samples, end - Math.min(50, duration), end);
-    return rms <= Math.max(30, 3 * this.noiseRms) &&
-      magnitude(subtract(first, last)) <= Math.max(40, 4 * this.noiseRms) &&
-      angleDegrees(first, last) <= 3;
-  }
-
-  private stableSuffix(samples: readonly CapturedMotion[], limit: number): number {
-    const end = samples[samples.length - 1].browserMs;
-    let longest = 0;
-    for (let index = samples.length - 4; index >= 0; index--) {
-      const duration = Math.min(limit, end - samples[index].browserMs);
-      if (this.stable(samples, duration)) longest = duration;
-      else break;
-      if (duration === limit) break;
-    }
-    return longest;
-  }
-
-  private onsetStart(samples: readonly CapturedMotion[]): number | undefined {
-    if (!this.neutral || samples.length < 4) return undefined;
-    const threshold = Math.max(ONSET_MIN_MG, 6 * this.noiseRms);
-    let start: number | undefined;
-    for (const sample of samples) {
-      const value = vector(sample);
-      const active =
-        magnitude(subtract(value, this.neutral)) >= threshold ||
-        angleDegrees(value, this.neutral) >= ONSET_TILT_DEGREES;
-      if (!active) {
-        start = undefined;
-        continue;
+  private pushSegmenter(current: Sample): void {
+    if (!this.rest) this.rest = this.neutral;
+    if (!this.burst) {
+      const quiet = this.trackQuiet(current);
+      if (quiet >= ARM_MS) this.armed = true;
+      if (this.armed && this.onset(current)) {
+        const rest = this.rest!;
+        const previous = this.window[this.window.length - 2];
+        const lead = previous && current.t - previous.t <= MAX_GAP_MS ? [previous, current] : [current];
+        this.burst = { startMs: lead[0].t, rest, samples: lead, peak: 0, peakAt: lead[0].t, peakIndex: 0, settled: false };
+        this.quietSince = undefined;
+        this.armed = false;
+        for (let index = 0; index < lead.length; index++) this.trackPeak(this.burst, index);
+        this.setProgress("moving", 0, MOVEMENT_MAX_MS);
+        return;
       }
-      start ??= sample.browserMs;
-      if (sample.browserMs - start >= ONSET_SUSTAIN_MS) return start;
-    }
-    return undefined;
-  }
-
-  private releaseSuffix(samples: readonly CapturedMotion[], earliestStartMs: number): { startMs: number; durationMs: number } | undefined {
-    const end = samples[samples.length - 1]?.browserMs;
-    if (!this.neutral || end === undefined || samples.length < 4) return undefined;
-    let best: { startMs: number; durationMs: number } | undefined;
-    for (let index = samples.length - 4; index >= 0; index--) {
-      const startMs = samples[index].browserMs;
-      if (startMs < earliestStartMs) break;
-      const durationMs = end - startMs;
-      if (durationMs > SETTLE_MS + 200) break;
-      if (durationMs < ONSET_SUSTAIN_MS) continue;
-      if (samples.filter((sample) => sample.browserMs >= startMs).length < 4) continue;
-
-      const center = weightedMean(samples, startMs, end);
-      const energy = weightedEnergy(samples, startMs, end, center);
-      const rms = Math.sqrt((energy[0][0] + energy[1][1] + energy[2][2]) / durationMs);
-      const edgeMs = Math.min(50, durationMs);
-      const first = weightedMean(samples, startMs, startMs + edgeMs);
-      const last = weightedMean(samples, end - edgeMs, end);
-      const drift = magnitude(subtract(first, last));
-      const rotation = angleDegrees(first, last);
-      const gravityError = Math.abs(magnitude(center) - magnitude(this.neutral));
-      const tiltedEndpoint = angleDegrees(center, this.neutral) > ONSET_TILT_DEGREES;
-      if (
-        rms <= (tiltedEndpoint ? Math.max(30, 3 * this.noiseRms) : Math.max(RELEASE_RMS_MG, 4 * this.noiseRms)) &&
-        drift <= (tiltedEndpoint ? Math.max(40, 4 * this.noiseRms) : Math.max(RELEASE_DRIFT_MG, 6 * this.noiseRms)) &&
-        rotation <= (tiltedEndpoint ? 3 : RELEASE_ROTATION_DEGREES) &&
-        gravityError <= QUASI_STATIC_MG
-      )
-        best = { startMs, durationMs };
-      else if (best) break;
-    }
-    return best;
-  }
-
-  private setProgress(progress: MotionRecognizerState["progress"], elapsed: number, target: number): void {
-    this.progress = progress;
-    this.progressMs = Math.max(0, elapsed);
-    this.progressTargetMs = target;
-  }
-
-  private completeCandidate(candidate: Candidate, endMs: number): void {
-    if (candidate.samples.filter((sample) => sample.browserMs >= candidate.startMs && sample.browserMs <= endMs).length < 4) {
-      this.lastIssue = "The movement needs at least four fresh observations";
-      this.reason = "too-short";
+      this.setProgress("armed", this.armed ? ARM_MS : Math.min(quiet, ARM_MS), ARM_MS);
       return;
     }
-    const features = this.features(candidate, endMs);
-    this.recordCandidate(features, "candidate");
+
+    const burst = this.burst;
+    burst.samples.push(current);
+    this.trackPeak(burst, burst.samples.length - 1);
+    const elapsed = current.t - burst.startMs;
+    const slice = this.trailing(QUIET_WINDOW_MS, burst.startMs + 20);
+    const quiet = slice !== undefined && this.isQuiet(slice);
+    if (quiet) this.setProgress("settling", QUIET_WINDOW_MS, QUIET_WINDOW_MS);
+    else this.setProgress("moving", elapsed, MOVEMENT_MAX_MS);
+
+    if (!burst.settled && this.calibratingSpell !== "protego" && this.impulseComplete(burst, current)) {
+      burst.settled = true;
+      this.complete(this.features(burst, current.t, false), "early");
+    }
+    if (quiet) {
+      const features = this.features(burst, slice![0].t, true);
+      const center = mean(slice!.map((sample) => sample.a));
+      this.burst = undefined;
+      this.rest = center;
+      this.quietSince = slice![0].t;
+      if (!burst.settled) this.complete(features, "quiet");
+      else this.setProgress("armed", 0, ARM_MS);
+      return;
+    }
+    if (elapsed > MOVEMENT_MAX_MS) {
+      const features = this.features(burst, current.t, false);
+      this.burst = undefined;
+      this.quietSince = undefined;
+      if (!burst.settled) {
+        if (features.peak >= CANDIDATE_MIN_PEAK_MG) this.rejectCandidate(features, "Pause between spells so each one can settle", "too-long");
+      }
+      this.setProgress("armed", 0, ARM_MS);
+    }
+  }
+
+  private onset(current: Sample): boolean {
+    const previous = this.window[this.window.length - 2];
+    const rest = this.rest!;
+    if (current.jerk >= ONSET_JERK_SINGLE_MG) return true;
+    if (previous && current.jerk >= ONSET_JERK_MG && previous.jerk >= ONSET_JERK_MG) return true;
+    if (magnitude(subtract(current.a, rest)) >= ONSET_LINEAR_MG) return true;
+    const recent = this.window.slice(-3);
+    return recent.length === 3 && angleDegrees(mean(recent.map((sample) => sample.a)), rest) >= ONSET_TILT_DEG;
+  }
+
+  private trackPeak(burst: Burst, index: number): void {
+    const sample = burst.samples[index];
+    const linear = magnitude(subtract(sample.a, burst.rest));
+    if (linear > burst.peak) {
+      burst.peak = linear;
+      burst.peakAt = sample.t;
+      burst.peakIndex = index;
+    }
+  }
+
+  private impulseComplete(burst: Burst, current: Sample): boolean {
+    if (burst.peak < IMPULSE_EARLY_PEAK_MG || current.t - burst.peakAt < IMPULSE_SETTLE_MS) return false;
+    // Pose-independent: the hand may still be rotated; the stroke is over when sharp acceleration is.
+    const since = current.t - 100;
+    const tail = burst.samples.filter((sample) => sample.t >= since);
+    return tail.length >= 3 && tail.every((sample) => sample.jerk < IMPULSE_SETTLE_JERK_MG);
+  }
+
+  private features(burst: Burst, endMs: number, endQuiet: boolean): Features {
+    const movement = burst.samples.filter((sample) => sample.t <= endMs);
+    const linear = movement.map((sample) => subtract(sample.a, burst.rest));
+    const peakIndex = Math.min(burst.peakIndex, movement.length - 1);
+    const peak = burst.peak;
+    const floor = peak * LOBE_FRACTION;
+    let from = peakIndex, to = peakIndex;
+    while (from > 0 && magnitude(linear[from - 1]) >= floor) from--;
+    while (to < linear.length - 1 && magnitude(linear[to + 1]) >= floor) to++;
+    // Cubic weighting keeps the direction anchored on the strongest part of the stroke rather than
+    // on the wind-up and follow-through that rotate around it.
+    let weighted: Vector = [0, 0, 0], energy = 0;
+    for (let index = from; index <= to; index++) {
+      const value = linear[index], size = magnitude(value);
+      weighted = add(weighted, scale(value, size * size * size));
+      energy += size * size;
+    }
+    const direction = normalized(weighted);
+    const lobeMs = to > from ? movement[to].t - movement[from].t + 20 : 20;
+    let along = 0;
+    for (let index = from; index <= to; index++) along += dot(linear[index], direction) ** 2;
+    const tailStart = endMs - 100;
+    const tail = burst.samples.filter((sample) => sample.t >= tailStart && sample.t <= endMs + QUIET_WINDOW_MS);
+    const endPose = tail.length ? mean(tail.map((sample) => sample.a)) : movement[movement.length - 1].a;
+    return {
+      startMs: burst.startMs,
+      endMs,
+      durationMs: endMs - burst.startMs,
+      direction,
+      dominantRatio: energy > 0 ? along / energy : 0,
+      peak,
+      lobeMs,
+      tiltDeg: angleDegrees(burst.rest, endPose),
+      tiltDirection: normalized(subtract(endPose, burst.rest)),
+      startPose: burst.rest,
+      endQuiet,
+    };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Completion, calibration and classification
+
+  private complete(features: Features, how: "early" | "quiet"): void {
+    if (features.peak < CANDIDATE_MIN_PEAK_MG) {
+      this.setProgress("armed", 0, ARM_MS);
+      return;  // the hand drifted; not a movement anyone meant
+    }
+    this.recordCandidate(features, how === "early" ? "opposite" : "release", "candidate");
     if (this.calibratingSpell) {
-      this.acceptCalibrationExample(this.calibratingSpell, features);
+      this.acceptCalibrationExample(this.calibratingSpell, features, how);
       return;
     }
     if (this.phase !== "ready" || this.generation === undefined) return;
-
-    const matches = [...this.enabledSpells]
-      .map((spell) => ({ spell, quality: this.match(spell, features) }))
-      .filter(
-        (result): result is { spell: SpellName; quality: number } =>
-          result.quality !== undefined,
-      );
-    if (matches.length !== 1) {
-      this.lastIssue =
-        matches.length > 1
-          ? "Gesture matched multiple spell profiles"
-          : "Gesture did not match a calibrated spell";
-      this.reason = matches.length > 1 ? "ambiguous" : "no-match";
-      this.recordCandidate(features, this.reason);
+    const match = this.classify(features);
+    if (!match.spell) {
+      if (match.reason !== undefined) {
+        this.reason = match.reason;
+        this.lastIssue = match.message;
+        this.recordCandidate(features, how === "early" ? "opposite" : "release", match.reason);
+      }
+      this.setProgress("armed", 0, ARM_MS);
       return;
     }
-    const match = matches[0];
     this.lastIssue = "";
     this.reason = undefined;
-    this.recordCandidate(features, "accepted");
+    this.recordCandidate(features, how === "early" ? "opposite" : "release", "accepted");
+    this.setProgress("ready", ARM_MS, ARM_MS);
     this.onGesture({
       id: `${this.generation}:gesture:${++this.evidenceSequence}`,
       generation: this.generation,
@@ -687,220 +602,158 @@ export class MotionRecognizer {
     });
   }
 
-  private features(candidate: Candidate, endMs: number): CandidateFeatures {
-    if (!this.neutral) throw new Error("Neutral calibration missing");
-    const movement = candidate.samples.filter((sample) => sample.browserMs <= endMs);
-    const principal = leadingDirection(weightedEnergy(candidate.samples, candidate.startMs, endMs, this.neutral));
-    const projections = movement.map((sample) => dot(subtract(vector(sample), this.neutral!), principal.direction));
-    const lobeThreshold = Math.max(40, this.noiseRms * 4);
-    let firstSign = 0, runSign = 0, runStart = 0, firstLobeEnd = Infinity;
-    for (let index = 0; index < movement.length; index++) {
-      const value = projections[index];
-      const sign = Math.abs(value) >= lobeThreshold ? Math.sign(value) : 0;
-      if (sign === 0 || sign !== runSign) {
-        runSign = sign;
-        runStart = movement[index].browserMs;
-      }
-      if (sign !== 0 && movement[index].browserMs - runStart >= 40) {
-        firstSign = sign;
-        firstLobeEnd = movement[index].browserMs;
-        break;
-      }
+  private acceptCalibrationExample(spell: SpellName, features: Features, how: "early" | "quiet"): void {
+    const issue = this.calibrationIssue(spell, features, how);
+    if (issue === "ignore") {
+      this.setProgress("armed", 0, ARM_MS);
+      return;
     }
-    const direction = scale(principal.direction, firstSign);
-    const peak = Math.max(0, ...projections.map((value) => value * firstSign));
-    const weakStopThreshold = Math.max(80, peak * 0.08, this.noiseRms * 3);
-    const opposite = movement.some((sample, index) =>
-      sample.browserMs > firstLobeEnd && projections[index] * firstSign <= -weakStopThreshold);
-    const lastSampleMs = candidate.samples[candidate.samples.length - 1].browserMs;
-    const finalVector = weightedMean(candidate.samples, endMs, lastSampleMs);
-    const finalResidual = magnitude(subtract(finalVector, this.neutral));
-    const finalProjection = Math.abs(dot(subtract(finalVector, this.neutral), scale(principal.direction, firstSign)));
-    const release =
-      lastSampleMs - endMs >= SETTLE_MS &&
-      endMs - firstLobeEnd >= 60 &&
-      finalResidual <= Math.max(QUASI_STATIC_MG, peak * 0.35) &&
-      finalProjection <= Math.max(ONSET_MIN_MG, peak * 0.25);
-    const stopEvidence: MotionStopEvidence = opposite
-      ? "opposite"
-      : release
-        ? "release"
-        : "none";
-    return {
-      startMs: candidate.startMs,
-      endMs,
-      durationMs: endMs - candidate.startMs,
-      direction,
-      dominantRatio: principal.ratio,
-      peak,
-      stopped: stopEvidence !== "none",
-      stopEvidence,
-      startAngleDeg: angleDegrees(vector(candidate.samples[0]), this.neutral),
-      finalAngleDeg: angleDegrees(finalVector, this.neutral),
-      finalDirection: normalized(subtract(finalVector, this.neutral)),
-    };
-  }
-
-  private acceptCalibrationExample(
-    spell: SpellName,
-    features: CandidateFeatures,
-  ): void {
-    const issue = this.calibrationIssue(spell, features);
     if (issue) {
       this.lastIssue = issue.message;
       this.reason = issue.reason;
-      this.recordCandidate(features, issue.reason);
+      this.recordCandidate(features, how === "early" ? "opposite" : "release", issue.reason);
+      this.setProgress("armed", 0, ARM_MS);
       return;
     }
     const examples = this.examples.get(spell) ?? [];
     examples.push(features);
     this.examples.set(spell, examples);
-    this.lastIssue = `${examples.length}/3 ${spell} examples captured`;
     this.reason = undefined;
-    if (examples.length < 3) return;
-
+    this.recordCandidate(features, how === "early" ? "opposite" : "release", "accepted");
+    this.setProgress("ready", ARM_MS, ARM_MS);
+    if (examples.length < EXAMPLES_PER_SPELL) {
+      this.lastIssue = `${examples.length} of ${EXAMPLES_PER_SPELL}. ${spell === "protego" ? "Lower, then raise again." : "Again."}`;
+      return;
+    }
     if (spell === "protego") {
       this.templates.set(spell, {
         kind: "guard",
-        direction: normalized(mean(examples.map((example) => example.finalDirection))),
+        direction: normalized(mean(examples.map((example) => example.tiltDirection))),
+        tiltDeg: median(examples.map((example) => example.tiltDeg)),
+        peak: median(examples.map((example) => example.peak)),
       });
     } else {
       this.templates.set(spell, {
         kind: "impulse",
         direction: normalized(mean(examples.map((example) => example.direction))),
-        typicalPeak: median(examples.map((example) => example.peak)),
+        peak: median(examples.map((example) => example.peak)),
       });
     }
     this.calibratingSpell = undefined;
     this.updateReadyPhase();
-    this.lastIssue =
-      this.phase === "ready"
-        ? "Core gesture calibration complete; held-out checks remain"
-        : `${spell} calibrated; collect the remaining enabled spell examples`;
+    this.lastIssue = this.phase === "ready" ? "" : `${spell} learned`;
   }
 
-  private calibrationIssue(
-    spell: SpellName,
-    features: CandidateFeatures,
-  ): { message: string; reason: MotionRejectionReason } | undefined {
-    if (features.startAngleDeg > NEUTRAL_DEGREES)
-      return { message: "Begin each coached gesture from the calibrated neutral grip", reason: "return-neutral" };
+  private calibrationIssue(spell: SpellName, features: Features, how: "early" | "quiet"):
+    { message: string; reason: MotionRejectionReason } | "ignore" | undefined {
     const prior = this.examples.get(spell) ?? [];
     if (spell === "protego") {
-      if (features.finalAngleDeg < GUARD_DEGREES)
-        return { message: "Protego must finish in a stable tilt of at least 25 degrees", reason: "guard-tilt" };
-      if (
-        prior.some((example) => angleDegrees(features.finalDirection, example.finalDirection) > DIRECTION_DEGREES)
-      )
-        return { message: "Protego examples must use a consistent tilt direction", reason: "inconsistent-direction" };
+      if (how === "early" || !features.endQuiet) return "ignore";
+      // The first held tilt defines the raise, wherever the hand happens to rest; each lowering
+      // afterwards points the opposite way and is ignored rather than coached.
+      if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > 120)
+        return "ignore";
+      const stupefy = this.templates.get("stupefy");
+      if (stupefy?.kind === "impulse" && angleDegrees(features.direction, stupefy.direction) <= 30 && features.peak >= stupefy.peak * 0.5)
+        return { message: "That looked like a jab. Raise your wand into a guard and hold it.", reason: "unclear-direction" };
+      if (features.peak < GUARD_MIN_PEAK_MG) {
+        if (features.tiltDeg < GUARD_MIN_TILT_DEG) return "ignore";  // the hand drifting, not an attempt
+        return { message: "Raise a little quicker, then hold it still.", reason: "too-small" };
+      }
+      if (features.tiltDeg < GUARD_MIN_TILT_DEG)
+        return { message: "Raise your wand higher, then hold it still.", reason: "guard-tilt" };
+      if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > CONSISTENCY_DEG)
+        return { message: "Raise the same way each time.", reason: "inconsistent-direction" };
       return undefined;
     }
-    if (features.dominantRatio < DOMINANT_RATIO || magnitude(features.direction) < 0.9)
-      return { message: "Impulse examples need a clear first direction and at least 65% energy along it", reason: "unclear-direction" };
-    if (features.finalAngleDeg > NEUTRAL_DEGREES)
-      return { message: "Impulse examples must return within 20 degrees of neutral", reason: "return-neutral" };
-    if (features.peak < 250) return { message: "Impulse example was too small to calibrate", reason: "too-small" };
-    if (!features.stopped) return { message: "Finish the impulse with an opposite stopping movement", reason: "missing-stop" };
-    if (
-      prior.some(
-        (example) =>
-          angleDegrees(example.direction, features.direction) > DIRECTION_DEGREES,
-      )
-    )
-      return { message: "Impulse examples must keep directions within 25 degrees", reason: "inconsistent-direction" };
+    if (features.durationMs > MOVEMENT_MAX_MS) return { message: "One movement, then pause.", reason: "too-long" };
+    if (features.peak < IMPULSE_MIN_PEAK_MG || features.lobeMs < IMPULSE_MIN_LOBE_MS) {
+      if (features.durationMs < COACH_MIN_MS && features.peak < IMPULSE_MIN_PEAK_MG) return "ignore";  // a twitch before the real jab
+      return { message: spell === "stupefy" ? "Jab a little harder." : "Sweep a little harder.", reason: "too-small" };
+    }
+    if (features.dominantRatio < 0.35)
+      return { message: "Make one clear stroke.", reason: "unclear-direction" };
+    if (prior.length && angleDegrees(features.direction, mean(prior.map((example) => example.direction))) > CONSISTENCY_DEG)
+      return { message: spell === "stupefy" ? "Jab the same way each time." : "Sweep the same way each time.", reason: "inconsistent-direction" };
     const stupefy = this.templates.get("stupefy");
-    if (
-      spell === "expelliarmus" &&
-      stupefy?.kind === "impulse" &&
-      angleDegrees(stupefy.direction, features.direction) < 65
-    )
-      return { message: "Expelliarmus must use a distinct direction from Stupefy", reason: "inconsistent-direction" };
+    if (spell === "expelliarmus" && stupefy?.kind === "impulse" && angleDegrees(stupefy.direction, features.direction) < SEPARATION_DEG)
+      return { message: "Sweep sideways, away from your jab direction.", reason: "inconsistent-direction" };
     return undefined;
   }
 
-  private match(
-    spell: SpellName,
-    features: CandidateFeatures,
-  ): number | undefined {
-    const template = this.templates.get(spell);
-    if (!template || features.startAngleDeg > NEUTRAL_DEGREES) return undefined;
-    if (template.kind === "guard") {
-      const direction = dot(features.finalDirection, template.direction);
-      if (features.finalAngleDeg < GUARD_DEGREES || angleDegrees(features.finalDirection, template.direction) > DIRECTION_DEGREES)
-        return undefined;
-      return clamp01(
-        0.5 +
-          (features.finalAngleDeg - GUARD_DEGREES) / 50 +
-          (direction - 0.8),
-      );
+  private classify(features: Features): { spell?: SpellName; quality: number; reason?: MotionRejectionReason; message: string } {
+    const impulses: { spell: SpellName; angle: number; template: ImpulseTemplate }[] = [];
+    let guard: { spell: SpellName; quality: number } | undefined;
+    for (const spell of this.enabledSpells) {
+      const template = this.templates.get(spell);
+      if (!template) continue;
+      if (template.kind === "impulse") {
+        const angle = angleDegrees(features.direction, template.direction);
+        if (angle <= DIRECTION_TOLERANCE_DEG && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
+          features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35))
+          impulses.push({ spell, angle, template });
+      } else if (features.endQuiet) {
+        const angle = angleDegrees(features.tiltDirection, template.direction);
+        if (features.tiltDeg >= Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) && angle <= GUARD_TOLERANCE_DEG &&
+          features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) && features.peak <= Math.max(template.peak * 4, 1_500))
+          guard = { spell, quality: clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
+      }
     }
-    const minimumPeak = Math.max(180, template.typicalPeak * 0.5);
-    if (
-      angleDegrees(features.direction, template.direction) > DIRECTION_DEGREES ||
-      features.dominantRatio < DOMINANT_RATIO ||
-      features.finalAngleDeg > NEUTRAL_DEGREES ||
-      features.peak < minimumPeak || !features.stopped
-    )
-      return undefined;
-    return clamp01(
-      0.45 +
-        (features.dominantRatio - DOMINANT_RATIO) +
-        Math.min(0.3, features.peak / template.typicalPeak / 3) +
-        (NEUTRAL_DEGREES - features.finalAngleDeg) / 100,
-    );
+    impulses.sort((a, b) => a.angle - b.angle);
+    const best = impulses[0];
+    if (best && impulses[1] && impulses[1].angle - best.angle < AMBIGUITY_MARGIN_DEG)
+      return { quality: 0, reason: "ambiguous", message: "That movement matched two spells. Make it clearer." };
+    if (best && (!guard || features.peak >= best.template.peak * 0.6)) {
+      const quality = clamp01(0.5 + (DIRECTION_TOLERANCE_DEG - best.angle) / (2 * DIRECTION_TOLERANCE_DEG) + Math.min(0.25, features.peak / best.template.peak / 4));
+      return { spell: best.spell, quality, message: "" };
+    }
+    if (guard) return { spell: guard.spell, quality: guard.quality, message: "" };
+    const weak = features.peak < PLAY_MIN_PEAK_MG && features.tiltDeg < GUARD_MIN_TILT_DEG;
+    return weak
+      ? { quality: 0, message: "" }  // gentle fidgeting: no coaching needed
+      : { quality: 0, reason: "no-match", message: "That movement did not match a spell." };
   }
 
-  private isNeutral(value: Vector): boolean {
-    return this.neutral !== undefined && magnitude(value) >= 750 && magnitude(value) <= 1250 && angleDegrees(value, this.neutral) <= NEUTRAL_DEGREES;
+  // ---------------------------------------------------------------------------------------------
+  // Bookkeeping
+
+  private setProgress(progress: MotionRecognizerState["progress"], elapsed: number, target: number): void {
+    this.progress = progress;
+    this.progressMs = Math.max(0, elapsed);
+    this.progressTargetMs = target;
   }
 
-  private recordCandidate(features: CandidateFeatures, reason: string): void {
+  private recordCandidate(features: Features, stopEvidence: MotionStopEvidence, reason: string): void {
     const candidate = {
       startMs: features.startMs,
       endMs: features.endMs,
       durationMs: features.durationMs,
       peakMg: features.peak,
-      dominantRatio: features.dominantRatio,
-      stopEvidence: features.stopEvidence,
-      finalAngleDeg: features.finalAngleDeg,
+      dominantRatio: Math.min(1, features.dominantRatio),
+      stopEvidence,
+      finalAngleDeg: features.tiltDeg,
       reason,
     };
-    if ([
-      candidate.startMs,
-      candidate.endMs,
-      candidate.durationMs,
-      candidate.peakMg,
-      candidate.dominantRatio,
-      candidate.finalAngleDeg,
-    ].every(Number.isFinite))
+    if ([candidate.startMs, candidate.endMs, candidate.durationMs, candidate.peakMg, candidate.dominantRatio, candidate.finalAngleDeg].every(Number.isFinite))
       this.lastCandidate = candidate;
   }
 
-  private rejectCandidate(reason: string, code: MotionRejectionReason, endMs?: number): void {
-    this.lastIssue = reason;
+  private rejectCandidate(features: Features, message: string, code: MotionRejectionReason): void {
+    this.lastIssue = message;
     this.reason = code;
-    if (this.candidate && this.neutral) {
-      const fallbackEnd = this.candidate.samples[this.candidate.samples.length - 1]?.browserMs ?? this.candidate.startMs;
-      this.recordCandidate(this.features(this.candidate, endMs ?? fallbackEnd), code);
-    }
-    this.candidate = undefined;
-    this.armed = false;
-    this.recent = [];
-    this.setProgress("return-neutral", 0, REST_MS);
+    this.recordCandidate(features, "none", code);
   }
 
   private updateReadyPhase(): void {
     if (this.phase === "resuming") return;
-    this.phase = [...this.enabledSpells].every((spell) => this.templates.has(spell))
-      ? "ready"
-      : "gesture-calibration";
+    this.phase = [...this.enabledSpells].every((spell) => this.templates.has(spell)) ? "ready" : "gesture-calibration";
   }
 
   private clearSegmenter(): void {
     this.previous = undefined;
-    this.recent = [];
+    this.window = [];
+    this.quietSince = undefined;
     this.armed = false;
-    this.candidate = undefined;
-    this.setProgress(this.phase === "stillness" ? "hold-still" : "return-neutral", 0, this.phase === "stillness" ? STILLNESS_MS : this.phase === "resuming" ? RESUME_MS : REST_MS);
+    this.burst = undefined;
   }
 }

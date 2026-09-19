@@ -392,12 +392,12 @@ export function GameApp() {
                   ✧
                 </div>
                 <h1>{wand?.phase === "unsupported" ? "Your badge needs repair."
-                  : wand?.phase === "recovering" ? "Reconnecting your iPhone…"
+                  : wand?.phase === "recovering" ? (c.source === "phone" ? "Reconnecting your iPhone…" : "Reconnecting your badge…")
                   : wand?.phase === "validating" ? "Checking fresh movement…"
                   : c.busy ? "Connecting…" : "Let's reconnect."}</h1>
                 {wand?.phase === "unsupported" ? <button onClick={() => void c.connect("phone")}>Use iPhone</button> : !c.busy && !["recovering", "validating", "synchronizing"].includes(wand?.phase ?? "") && (
                   <>
-                    <button onClick={() => void (wand?.canRetry ? c.wand?.retryRecovery() : c.connect(c.source === "phone" ? "phone" : "ble"))}>
+                    <button onClick={() => void (wand?.canRetry ? c.retryWand() : c.connect(c.source === "phone" ? "phone" : "ble"))}>
                       {c.source === "phone" ? "Reconnect iPhone" : "Reconnect badge"}
                     </button>
                     <button className="quiet" onClick={() => setRevision((n) => n + 1)}>
@@ -440,13 +440,13 @@ export function GameApp() {
                 <div className="result-star" aria-hidden="true">
                   ✧
                 </div>
-                <h1>{motion.phase === "resuming" ? "Return to your starting grip." : "Hold your wand still."}</h1>
+                <h1>{motion.phase === "resuming" ? "Hold still for a moment." : "Hold your wand still."}</h1>
                 <progress
-                  max={motion.progressTargetMs || 3000}
+                  max={motion.progressTargetMs || 1500}
                   value={motion.progressMs}
                   aria-label="Stillness calibration"
                 />
-                <p role="status">{motion.lastIssue || "Keep this comfortable grip."}</p>
+                <p role="status">{motion.reason === "keep-still" ? "Keep still; the timer restarts on its own." : "Keep this comfortable grip."}</p>
                 <button className="quiet" onClick={() => c.startCalibration()}>Reset grip</button>
               </>
             ) : !practice ? (
@@ -462,14 +462,14 @@ export function GameApp() {
                 <h1>
                   {motion?.calibratingSpell
                     ? motion.calibratingSpell === "stupefy"
-                      ? "Three gentle jabs."
-                      : "Raise. Tilt. Hold."
+                      ? "Jab forward, three times."
+                      : "Raise, hold, lower. Three times."
                     : "Learn your wand."}
                 </h1>
                 {motion?.calibratingSpell ? (
                   <>
                     <p>{motion.examplesBySpell[motion.calibratingSpell]} / 3</p>
-                    <p role="status">{motion.lastIssue || ({ "hold-still": "Hold still", "return-neutral": "Return to your starting grip", armed: "Ready to move", moving: "Moving", settling: "Stop and hold", ready: "Accepted" }[motion.progress])}</p>
+                    <p role="status">{motion.lastIssue || ({ "hold-still": "Hold still", "return-neutral": "Hold still", armed: "Ready when you are", moving: "Moving…", settling: "Settling…", ready: "Got it" }[motion.progress])}</p>
                   </>
                 ) : (
                   <button

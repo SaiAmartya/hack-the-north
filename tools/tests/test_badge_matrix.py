@@ -63,7 +63,7 @@ def test_does_not_reboot_a_connected_badge(monkeypatch):
     assert seen == ["status"] * 8
 
 
-def test_ble_loaded_requires_current_019_info(monkeypatch):
+def test_ble_loaded_requires_matching_profile_info(monkeypatch):
     class FakeScanner:
         @staticmethod
         async def find_device_by_filter(_predicate, timeout):
@@ -87,7 +87,7 @@ def test_ble_loaded_requires_current_019_info(monkeypatch):
     monkeypatch.setattr(
         matrix.wp,
         "decode_info",
-        lambda _payload: types.SimpleNamespace(caps=0, fw=(0, 1, 8), sample_hz=50, range_g=8),
+        lambda _payload: types.SimpleNamespace(caps=0x0F, fw=(0, 2, 0), sample_hz=100, range_g=2),
     )
     with pytest.raises(RuntimeError, match="Diagnostic INFO"):
         asyncio.run(matrix.loaded(None, "WAND-B602", 50, 8, 3))

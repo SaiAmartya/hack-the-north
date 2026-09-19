@@ -21,19 +21,29 @@ struct Diagnostics {
   uint8_t reset_ctrl0, reset_ctrl1, reset_ctrl4, trace_count;
   bool reset_readback_ok;
 };
+// One fresh acquisition. `ready_ms` is the MCU clock when new-data was observed, before the burst
+// read; that is the contract's capture time. `overrun_flag` mirrors STATUS bit 7 for diagnostics
+// only: on this sensor it is set on virtually every fresh read while the measured fresh-read
+// cadence equals the configured output rate, so it is not evidence of a lost sample.
+struct Sample {
+  int16_t x, y, z;   // mg on the chip's own axes
+  bool saturated;    // any native axis at its rail
+  bool overrun_flag;
+  uint32_t ready_ms;
+};
 Diagnostics diagnostics();
 bool ready_trace(uint8_t index, ReadyTrace &out); // first 16 successful bursts after boot/trace reset
 void reset_trace(); // re-arm bounded capture; does not change configuration or health counters
-bool begin();                 // boot-selected SC7A20H diagnostic profile; cadence unqualified
+bool begin();                 // boot-selected SC7A20H profile
 bool present();
 uint8_t who_am_i();
 uint8_t ctrl1();
 uint8_t ctrl4();
 uint32_t recoveries();        // how often the wedged bus had to be re-initialised
-// Returns true only when the sensor flagged a new sample since the last read (fresh data). Values
-// in mg on the chip's own axes. `saturated` is set when any axis railed. `bus_error` reports an
-// I2C failure; no values are produced in that case.
-bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, bool &overrun);
+uint32_t period_ms();         // nominal output period for the boot-selected profile
+// Returns true only when the sensor flagged a new sample since the last read (fresh data).
+// `bus_error` reports an I2C failure; no values are produced in that case.
+bool poll(Sample &out, bool &bus_error);
 // Native signed decoding, before any axis remap or normalized wire encoding.
 constexpr int16_t signed_counts(uint8_t low, uint8_t high) {
   const uint16_t raw = (uint16_t)low | ((uint16_t)high << 8);

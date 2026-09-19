@@ -14,55 +14,68 @@ firmware route, and the organizers now publish an official
 
 **Teammate starting point:** build/backup/install instructions are in [Safe teammate setup](#safe-teammate-setup).
 For the laptop game and iPhone setup, start at the [repository README](../README.md).
-The checked-in firmware is currently a **diagnostic image, not a playable badge release**.
-It can advertise and exchange diagnostic BLE records, but the app deliberately refuses casting.
-Installing it does not unblock badge gameplay; use the iPhone path for independent platform QA.
-Real physical phone qualification remains separate and incomplete.
 
-**Current source: 0.1.9 diagnostic-discoverability candidate, not flashed or gameplay-qualified.**
-It changes only the diagnostic cold/watchdog default from `creator` BLE `off` to `creator` BLE
-`on`, bumps the firmware version and RTC selection magic, and preserves capability bits at zero.
-The explicit `profile creator off` row remains available for controlled no-radio matrix runs.
-The 0.1.8 eight profile/BLE combinations below completed a short controlled comparison on
-WAND-B602; all still show the overwrite anomaly. [Image/readback and matrix evidence](../docs/qa/firmware-0.1.8-matrix.md)
-does not qualify gameplay. They preserve the conservative overwrite flag and never advertise casting capabilities.
+## 0.2.0 — gameplay image (current source)
+
+**What changed from the 0.1.x diagnostic images.** The badge boots straight into the contract's
+gameplay profile and advertises after **every** kind of reset:
+
+- **Boot profile:** native **50 Hz / ±8 g** (`CTRL1=0x47`, `CTRL4=0xA0`, normal mode) is the default row.
+  INFO reports `capabilities 0x0F`, `sample_hz 50`, `range_g 8`, `axis_convention 1`, so the browser's
+  duel gate passes. The creator 100 Hz/±2 g row and the 50 Hz/±2 g row remain reachable from the console
+  and stay **capabilities 0** (diagnostic). The high-performance ±8 g row is also gameplay-capable.
+- **Radio always on:** 0.1.8 booted with BLE **off** on any cold, USB, brownout or watchdog reset and only
+  kept the radio on across a software reboot, which is why a badge "disappeared" from the Chrome chooser
+  after a power cycle. 0.2.0 defaults to BLE on; only an explicit `profile <row> off` console command
+  turns it off for the *next* software reboot, and the RTC magic changed so 0.1.x selections are ignored.
+- **Advertising watchdog:** the loop re-arms connectable advertising every 500 ms whenever the badge is
+  idle and the stack reports it stopped; `status` counts `adv_restarts` and `connections`.
+- **Connection parameters:** on connect the badge requests a **15–30 ms** interval, no slave latency
+  and a 3 s supervision timeout, and publishes the same preferred range in its scan response. `status`
+  reports the negotiated `conn_interval_us`. Advertising runs at 20–40 ms for a snappy chooser.
+- **Overwrite flag no longer poisons the stream.** Every 0.1.x image counted the sensor's STATUS bit 7
+  as a lost sample and flagged nearly every MOTION record discontinuous, which the browser rightly
+  rejected — so the badge could never feed a gesture. Measured fresh-read cadence on this sensor equals
+  the configured output rate (97 Hz at 100 Hz, 48.7 Hz at 50 Hz, 1 kHz polling, thousands of no-data polls
+  in between), which is impossible if a sample were overwritten before every read. 0.2.0 therefore treats
+  the flag as a diagnostic counter (`overrun_flags`) and derives discontinuity from **measured** evidence:
+  a fresh-read gap over 1.5 output periods (30 ms at 50 Hz, so a single lost native sample is always
+  caught), a sample older than 100 ms at notification time, a refused notification, a bus error, or a
+  stream (re)start. `gaps` in `status` is the real cadence-loss counter and `lost = dropped + gaps` is
+  what STATUS health reports as `detail0`.
+- **Capture time:** `capture_ms` is the MCU clock at the moment new-data was observed, before the burst read.
+- **Paced acquisition:** after each fresh read the task sleeps until 4 ms before the next expected
+  sample (anchored to the capture time, so processing and notify time never eat the margin), then
+  polls once per tick; no 1 kHz busy-polling of the shared I²C bus between samples.
+- **Bounded I²C recovery back-off:** a wedged bus is re-initialised at most every 250 ms.
+
+**Evidence so far (source-level, this Mac):** portable protocol golden vectors, the new continuity-policy
+test, the boot-profile/RTC test, axis-mapping and console-default tests all pass; PlatformIO build
+succeeds (655,961 bytes flash, 26,304 bytes static RAM). The application image is
+`.pio/build/badge/firmware.bin`, SHA-256 `3cce4f3c3658e526413387ecf17f0d4491698a34e725ecd44eae4571e54cbc1e`.
+**Not yet flashed.** Hardware results (Chrome chooser after a power cycle, stream rate, discontinuity
+count, reconnects) belong in [the 0.2.0 change record](../docs/qa/firmware-0.2.0.md) once the QA card
+there has been run. Battery-only boot, six faces, 20 reconnects, endurance and Windows remain H-gates.
+
+**Build.** The bundled `~/.platformio/penv` core (6.1.19) is too old for the pinned pioarduino platform
+and will *uninstall* it; build with a current core instead:
+
+```sh
+cd firmware
+uv run --python 3.12 --with "platformio>=6.2.0" pio run -e badge
+```
+
+## 0.1.x history (diagnostic images)
+
 The 0.1.3 live test passed OPEN/SYNC and streamed 48.7 Hz but marked nearly every sample
-discontinuous because hardware STATUS bit 7 remained set; it is not a gameplay-qualified image.
-0.1.4 measured `CTRL0/2/3/5/6/FIFO_CTRL=00`, revision `28`, and STATUS `FF → 00`
-across each burst. The overrun clears, so it was not simply one latched startup error; FIFO was
-disabled. The reason it reappears at the measured 20–21 ms cadence is not yet established.
-0.1.5 explicitly selected the manufacturer's high-performance mode: power down, set CTRL0 HR=1
-with OSR=000/DLPF1=0 (preserving reserved bits), then CTRL4=A0, CTRL1=47, delay/readback.
-It still produced near-every-read overrun on the connected badge. This did not fix the defect.
-0.1.6 keeps that exact configuration and removes the 16 ms post-read sleep: acquisition polls
-once per RTOS tick, reports native ready-observation intervals and a histogram, no-data polls,
-and elapsed time from the previous completed read to the next observed DRDY. `status` identifies
-the tick rate and register-configured ODR separately from measured acquisition. Compute the
-observed rate as `(fresh_reads - 1) * 1e6 / ready_span_us` between reconfigurations; it is a host
-observation, not the sensor's physical acquisition timestamp. Measure disconnected first, then
-with BLE/feedback active. All overrun/discontinuity flags remain enabled; there is no decimation.
-INFO capabilities are deliberately **0**, so casting is blocked even though the configured-rate
-field remains 50 (the codec does not allow a zero/unknown rate). This explicitly unsupported
-diagnostic INFO is not a new valid v1 game profile or a claim that output cadence has passed.
-The 0.1.6 measurement found ~50.8 Hz fresh reads with 1 kHz polling and 23,931 no-data polls
-between 1,282 readings, yet 1,275 overwrite flags. Removing the sleep did not fix the anomaly.
-0.1.7 makes one additional, manufacturer-documented change: after checking WHO=11/VERSION=28,
-write `SOFT_RESET(68h)=A5` once at boot, wait a bounded 10 ms, recheck identity/read reset defaults,
-then run the same configuration. This is not repeated during I²C recovery. The settling delay is
-an implementation margin, not a documented reset-completion guarantee. `status` reports the
-post-reset defaults; `trace` prints the first 16 fresh-read transitions captured in bounded RAM:
-last no-data observation, first ready observation, six-byte burst start/end and post-burst STATUS.
-Acquisition never prints the trace. All times are MCU observations in microseconds, not physical
-sample timestamps. Capability zero and strict flags remain.
-
-**0.1.7 hardware result: still blocked.** The 682,544-byte application was flashed and fully
-read back with SHA-256 `c57d27d1e2c9a312e2d2de123b10ed25282e7b34b261d0c90851077a301690b1`.
-Post-reset CTRL0/1/4 were `00/07/00`, confirming the observed reset defaults. All first 16
-captured fresh-read bursts still showed `FF → 00`; preceding no-data observations were `00`
-about 1 ms before the ready observation. The six-byte burst took about 272 µs, followed by
-about 156 µs for the post-burst status read. Reset did **not** fix the anomaly. This image remains
-diagnostic-only; creator/manufacturer clarification is required before reinterpreting the flag.
-These MCU observations do not prove that the sensor never lost an internal measurement.
+discontinuous because hardware STATUS bit 7 remained set. 0.1.4 measured
+`CTRL0/2/3/5/6/FIFO_CTRL=00`, revision `28`, and STATUS `FF → 00` across each burst. 0.1.5 tried the
+manufacturer's high-performance mode; 0.1.6 removed the post-read sleep and measured ~50.8 Hz fresh
+reads with 23,931 no-data polls between 1,282 readings yet 1,275 overwrite flags; 0.1.7 added the
+boot-only `SOFT_RESET(68h)=A5` and still saw `FF → 00` on all 16 traced bursts (six-byte burst ≈ 272 µs).
+0.1.8 ran an eight-row profile/BLE matrix; 0.1.9 (never flashed) only changed the cold-boot default to
+BLE on. None of those images advertised duel capabilities. 0.2.0 keeps the `trace` and `status`
+instrumentation, the bounded recovery and the console matrix; it changes the *interpretation* above.
 
 ### 0.1.8 controlled matrix (one image, eight boot modes)
 
@@ -361,12 +374,12 @@ python tools/wand_ble_check.py --name WAND-XXXX --scan 15 --seconds 5
 
 Replace placeholders; close the monitor before another console command and disconnect Chrome
 before Bleak. Console opening can reset the badge; do not open it halfway through a timing run.
-`id` must identify the built image and selected diagnostic profile; cold 0.1.9 defaults to
-`creator`, BLE `on`, capabilities **0**. The game-ready BLE check is expected to fail its INFO
-gate on this diagnostic build. That is truthful rejection, not a reason to remove the gate.
+`id` must identify the built image; a cold 0.2.0 boot reports `profile=range ble=on caps=0F`.
+`wand_ble_check.py` must pass its INFO gate on this build; a `creator`/`rate` boot row is expected to
+fail it, and that is truthful rejection, not a reason to remove the gate.
 
 For separately approved profile experiments, `python tools/badge_matrix.py --help` describes the
-0.1.9-only runner. It **reboots through eight profiles and sends real display/LED feedback**;
+profile runner. It **reboots through eight profiles and sends real display/LED feedback**;
 it is not passive monitoring. Leave it off the ordinary player startup path. Its short comparisons
 cannot replace six faces, clipping tests, combined-load endurance, battery operation, reconnects
 and Windows/two-badge acceptance. See [the contract's H0–H5 gates](../BADGE-FIRMWARE-CONTRACT.md#8-acceptance-and-handoff-checklist).
@@ -374,8 +387,8 @@ and Windows/two-badge acceptance. See [the contract's H0–H5 gates](../BADGE-FI
 **Port busy/access denied:** close the actual IDE/monitor owning the port, then re-list ports. Do
 not kill unrelated processes or disable security software. **Not in the pairing list:** verify
 normal app boot, Bluetooth permission, no other central, and the actual `id`/`status` version.
-Installed 0.1.8 cold boots intentionally use BLE `off`; 0.1.9 changes that default but remains
-diagnostic. A new source build is not proof that a connected badge has been flashed.
+Installed 0.1.8 cold boots use BLE `off`; 0.2.0 boots with the radio on and re-arms advertising.
+A new source build is not proof that a connected badge has been flashed: check `id`.
 
 ## Checked against the official custom-flash guide
 
@@ -386,7 +399,7 @@ diagnostic. A new source build is not proof that a connected badge has been flas
 | LCD MOSI 10 / CLK 1 / CS 2 / DC 0 / RST 4, 40 MHz, mode 0, RGB565 | `pins.h`; Adafruit ST7789 at 40 MHz, mode 0, 16-bit colour |
 | Init: invert_color(true), swap_xy(true), mirror(true,false) | Adafruit init sends INVON; the tested panel's current fresh rotation is **3**. Verify the actual panel; `rot <0-3>` persists an explicitly selected orientation |
 | I2C SDA 5 / SCL 6, 400 kHz; accel 0x19, NFC 0x26 | `Wire.begin(5, 6, 400000)`; only the accelerometer is initialised, NFC untouched (guide: don't init it if unused) |
-| Accel WHO_AM_I 0x11; CTRL_REG1 0x57; CTRL_REG4 0x80; ZYXDA poll; OUT_X_L auto-increment; raw>>4 | WHO_AM_I must be 0x11; boot-selected matrix starts at the creator's **0x57/0x80**, 100 Hz/±2g, 1 mg/count; all rows verify readbacks and check new-data/overrun flags |
+| Accel WHO_AM_I 0x11; CTRL_REG1 0x57; CTRL_REG4 0x80; ZYXDA poll; OUT_X_L auto-increment; raw>>4 | WHO_AM_I must be 0x11; the gameplay row is **0x47/0xA0** (50 Hz/±8 g, 4 mg/count); the creator 0x57/0x80 row stays selectable for diagnostics; all rows verify readbacks; ZYXDA gates every read, STATUS bit 7 is counted but not treated as loss |
 | Bounded I2C timeouts + retry (NFC can wedge the bus) | 10 ms bus timeout; after 5 consecutive failures the bus is re-initialised and the sensor reconfigured; count in `status` (`i2c_recover`) |
 | HC165 DATA 7 / LOAD 20 / CLK 21; order A,B,Home,Down,Left,Right,Up,Aux1; active-low; latch then 8× sample+clock | `buttons.cpp`: same protocol; bits 7..0 = A,B,Home,Down,Left,Right,Up,Aux1, inverted so 1 = pressed |
 | Start on GPIO9, active-low, strapping pin | read with pull-up; only used to re-seed the activity baseline |
@@ -398,7 +411,7 @@ diagnostic. A new source build is not proof that a connected badge has been flas
 
 ## Bring-up checklist (first time on hardware)
 
-1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.1.9|name=WAND-xxxx|...|sensor=1`. Verify `profile=creator|ble=on` after a cold boot. The screen
+1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.2.0|name=WAND-xxxx|...|profile=range|ble=on|caps=0F|...|sensor=1` after a cold boot. The screen
    shows boot diagnostics (accelerometer id 11, reset reason) then the wand screen;
    LEDs breathe blue. Fresh badges default to `rot 3`; use `rot 0`, `rot 1`, or `rot 2` if the panel differs. The selected rotation is saved in NVS.
 2. `selftest` runs the contract's golden vectors on the badge. Expect `selftest failures=0`.
@@ -411,9 +424,9 @@ diagnostic. A new source build is not proof that a connected badge has been flas
    laptop walks the whole contract over real BLE (scan, INFO, OPEN, SYNC, SET_STATE, cues, motion
    stream, health) and prints PASS/FAIL per step with rate and interval statistics. Use `--scan 15`
    in a crowded venue. Chrome must be disconnected from the badge while it runs.
-6. The 0.1.9 diagnostic image deliberately fails the game-ready INFO gate. Do not enter gameplay
-   until an accurately profiled, measured image restores the required capabilities. Collect
-   technical counters through scripts, not a debug dashboard.
+6. `status` after a minute of streaming should show `gaps` and `dropped` near zero and
+   `notify_failures=0`; `overrun_flags` may be large and is informational. Collect counters through
+   scripts, not a debug dashboard.
 7. `status` prints counters (acquired/notified/dropped/i2c_recover/heap) for the transport gate;
    `echo on` prints low-rate snapshots, not a raw capture; use BLE for full-rate evidence.
 

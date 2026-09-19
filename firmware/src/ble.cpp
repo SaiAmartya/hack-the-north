@@ -7,14 +7,16 @@
 #include <atomic>
 #include <freertos/semphr.h>
 
+// One connectable peripheral, one central, initialized once per boot (never torn down). Advertising
+// resumes on every disconnect and a loop watchdog re-arms it if the stack ever leaves it stopped.
 namespace ble {
 namespace {
 NimBLEServer *g_server = nullptr;
 NimBLECharacteristic *g_info = nullptr, *g_motion = nullptr, *g_control = nullptr, *g_status = nullptr;
 ControlHandler g_handler = nullptr;
 LinkHandler g_link_handler = nullptr;
-std::atomic<bool> g_connected{false}, g_motion_sub{false}, g_status_sub{false};
-std::atomic<uint32_t> g_gen{0}, g_notify_failures{0};
+std::atomic<bool> g_enabled{false}, g_connected{false}, g_motion_sub{false}, g_status_sub{false};
+std::atomic<uint32_t> g_gen{0}, g_notify_failures{0}, g_connections{0}, g_adv_restarts{0}, g_conn_interval_units{0};
 uint16_t g_handle = BLE_HS_CONN_HANDLE_NONE;
 StaticSemaphore_t g_send_lock_storage;
 SemaphoreHandle_t g_send_lock = nullptr;
@@ -27,7 +29,7 @@ char g_name[16] = "WAND-0000";
 class ServerCB : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override {
     if (g_connected) {
-      server->disconnect(info.getConnHandle());
+      server->disconnect(info.getConnHandle());  // one central at a time
       return;
     }
     {
@@ -37,8 +39,12 @@ class ServerCB : public NimBLEServerCallbacks {
       g_status_sub = false;
       ++g_gen;
       g_connected = true;
+      g_conn_interval_units = info.getConnInterval();
     }
+    ++g_connections;
     NimBLEDevice::stopAdvertising();
+    // Ask for a short interval so 50 Hz notifications never queue behind a slow central schedule.
+    server->updateConnParams(info.getConnHandle(), CONN_INTERVAL_MIN, CONN_INTERVAL_MAX, CONN_LATENCY, CONN_TIMEOUT);
     if (g_link_handler) g_link_handler(g_gen.load());
   }
   void onDisconnect(NimBLEServer *, NimBLEConnInfo &info, int) override {
@@ -49,10 +55,14 @@ class ServerCB : public NimBLEServerCallbacks {
       g_motion_sub = false;
       g_status_sub = false;
       g_handle = BLE_HS_CONN_HANDLE_NONE;
+      g_conn_interval_units = 0;
       ++g_gen;
     }
     if (g_link_handler) g_link_handler(g_gen.load());
     NimBLEDevice::startAdvertising();  // resume connectable advertising for the next central
+  }
+  void onConnParamsUpdate(NimBLEConnInfo &info) override {
+    if (info.getConnHandle() == g_handle) g_conn_interval_units = info.getConnInterval();
   }
 };
 
@@ -92,10 +102,11 @@ void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t
   g_send_lock = xSemaphoreCreateMutexStatic(&g_send_lock_storage);
 
   NimBLEDevice::init(g_name);
-  NimBLEDevice::setPower(ESP_PWR_LVL_P3);
+  NimBLEDevice::setPower(TX_POWER_DBM);
+  NimBLEDevice::setSecurityAuth(false, false, false);  // no bonding/pairing in v1 (contract section 3)
   g_server = NimBLEDevice::createServer();
   g_server->setCallbacks(&g_server_cb);
-  g_server->advertiseOnDisconnect(false);
+  g_server->advertiseOnDisconnect(true);
 
   NimBLEService *svc = g_server->createService(NimBLEUUID(UUID_WAND_SERVICE));
   g_info = svc->createCharacteristic(NimBLEUUID(UUID_INFO), NIMBLE_PROPERTY::READ);
@@ -107,24 +118,41 @@ void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t
   g_status = svc->createCharacteristic(NimBLEUUID(UUID_STATUS), NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   g_status->setCallbacks(&g_subscribe_cb);
   g_status->setValue(health_rec, 20);
+  g_server->start();  // registers the service table; NimBLEService::start() is a no-op in 2.x
 
-  // 128-bit service UUID fills the advertising packet; the name goes in the scan response.
+  // 128-bit service UUID fills the advertising packet; the name and preferred connection interval
+  // go in the scan response. Fast advertising keeps the chooser snappy and reconnects quick.
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  adv->setMinInterval(ADV_INTERVAL_MIN);
+  adv->setMaxInterval(ADV_INTERVAL_MAX);
   NimBLEAdvertisementData advData;
   advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
   advData.addServiceUUID(NimBLEUUID(UUID_WAND_SERVICE));
   adv->setAdvertisementData(advData);
   NimBLEAdvertisementData scan;
   scan.setName(g_name);
+  scan.setPreferredParams(CONN_INTERVAL_MIN, CONN_INTERVAL_MAX);
   adv->setScanResponseData(scan);
+  g_enabled = true;
   adv->start();
 }
 
 const char *name() { return g_name; }
+bool enabled() { return g_enabled; }
 bool connected() { return g_connected; }
+bool advertising() { return g_enabled && !g_connected && NimBLEDevice::getAdvertising()->isAdvertising(); }
+void ensure_advertising() {
+  if (!g_enabled || g_connected) return;
+  NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  if (adv->isAdvertising()) return;
+  if (adv->start()) ++g_adv_restarts;
+}
 bool motion_subscribed() { return g_motion_sub; }
 bool status_subscribed() { return g_status_sub; }
 uint32_t generation() { return g_gen; }
+uint32_t connections() { return g_connections; }
+uint32_t advertising_restarts() { return g_adv_restarts; }
+uint32_t conn_interval_us() { return g_conn_interval_units.load() * 1250u; }
 
 bool notify_motion(const uint8_t rec[20], uint32_t gen) {
   if (!g_send_lock) return false; // BLE-off boot: no semaphore or NimBLE objects exist

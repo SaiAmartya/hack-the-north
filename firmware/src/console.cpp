@@ -43,7 +43,7 @@ void axes_text(char *out, size_t n) {
 
 void help() {
   Serial.println("HPOK|commands: help status trace id selftest axes [+x -y +z] btn rot <0-3> leds on|off echo on|off recal reboot flashmode");
-  Serial.println("HPOK|diagnostic: profile creator|rate|range|high off|on (BLE mode; reboots); trace reset (capture next 16 bursts)");
+  Serial.println("HPOK|boot profile: profile creator|rate|range|high on|off (sensor row + radio; reboots; range on is the gameplay default); trace reset (capture next 16 bursts)");
 }
 
 bool parse_axis(const char *tok, int8_t &map, int8_t &sign) {
@@ -73,25 +73,28 @@ void handle(char *line) {
     reply("name=%s fw=%s boot=%08lX", ble::name(), FW_VERSION_STR, (unsigned long)wand::stats().boot_id);
   } else if (!strcmp(cmd, "status")) {
     const diagnostic::Profile &p = diagnostic::profile();
-    reply("profile=%s ble=%s caps=0 configured_hz=%u range_g=%u mg_per_count=%u expected_ctrl0_1_4=%02X/%02X/%02X",
-          p.name, diagnostic::selection().ble ? "on" : "off", p.sample_hz, p.range_g, p.mg_per_count, p.ctrl0, p.ctrl1, p.ctrl4);
+    reply("profile=%s ble=%s caps=%02X configured_hz=%u range_g=%u mg_per_count=%u expected_ctrl0_1_4=%02X/%02X/%02X",
+          p.name, diagnostic::selection().ble ? "on" : "off", diagnostic::capabilities_for(p), p.sample_hz, p.range_g, p.mg_per_count, p.ctrl0, p.ctrl1, p.ctrl4);
     const wand::Stats &w = wand::stats();
     char ax[24];
     axes_text(ax, sizeof(ax));
-    reply("fw=%s name=%s connected=%d motion_sub=%d status_sub=%d sensor=%d cfg=%02X/%02X i2c_recover=%lu seq=%u acquired=%lu notified=%lu dropped=%lu xyz=%d,%d,%d axes=%s",
+    reply("fw=%s name=%s connected=%d motion_sub=%d status_sub=%d sensor=%d cfg=%02X/%02X i2c_recover=%lu seq=%u acquired=%lu notified=%lu dropped=%lu gaps=%lu lost=%lu overrun_flags=%lu xyz=%d,%d,%d axes=%s",
           FW_VERSION_STR, ble::name(), ble::connected() ? 1 : 0, ble::motion_subscribed() ? 1 : 0, ble::status_subscribed() ? 1 : 0, w.sensor_ok ? 1 : 0,
           accel::ctrl1(), accel::ctrl4(), (unsigned long)accel::recoveries(), w.seq, (unsigned long)w.acquired, (unsigned long)w.notified,
-          (unsigned long)w.dropped, w.x, w.y, w.z, ax);
-    reply("resources reset=%d heap_free=%lu heap_min=%lu heap_largest=%lu acq_stack_hwm_bytes=%lu overrun_events=%lu notify_failures=%lu",
+          (unsigned long)w.dropped, (unsigned long)w.gaps, (unsigned long)w.lost, (unsigned long)w.overrun_flags, w.x, w.y, w.z, ax);
+    reply("radio enabled=%d advertising=%d connections=%lu adv_restarts=%lu conn_interval_us=%lu",
+          ble::enabled() ? 1 : 0, ble::advertising() ? 1 : 0, (unsigned long)ble::connections(), (unsigned long)ble::advertising_restarts(),
+          (unsigned long)ble::conn_interval_us());
+    reply("resources reset=%d heap_free=%lu heap_min=%lu heap_largest=%lu acq_stack_hwm_bytes=%lu notify_failures=%lu",
           (int)esp_reset_reason(), (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
-          (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)wand::stack_headroom(), (unsigned long)w.overruns,
+          (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)wand::stack_headroom(),
           (unsigned long)ble::notification_failures());
     const accel::Diagnostics d = accel::diagnostics();
     reply("sensor ctrl0=%02X ctrl2=%02X ctrl3=%02X ctrl5=%02X ctrl6=%02X fifo_ctrl=%02X revision=%02X status_before=%02X status_after=%02X overrun_cleared=%lu overrun_still_set=%lu",
           d.ctrl0, d.ctrl2, d.ctrl3, d.ctrl5, d.ctrl6, d.fifo_ctrl, d.revision, d.status_before, d.status_after,
           (unsigned long)d.overrun_cleared, (unsigned long)d.overrun_still_set);
-    reply("cadence diagnostic=%d configured_hz=%d tick_hz=%d status_polls=%lu not_ready=%lu fresh_reads=%lu ready_span_us=%llu",
-          DIAGNOSTIC_SENSOR_CADENCE, p.sample_hz, configTICK_RATE_HZ, (unsigned long)d.status_polls,
+    reply("cadence configured_hz=%d tick_hz=%d status_polls=%lu not_ready=%lu fresh_reads=%lu ready_span_us=%llu",
+          p.sample_hz, configTICK_RATE_HZ, (unsigned long)d.status_polls,
           (unsigned long)d.not_ready_polls, (unsigned long)d.fresh_reads, (unsigned long long)d.ready_interval_sum_us);
     reply("cadence ready_us_last_min_max=%lu,%lu,%lu after_read_us_last_min_max=%lu,%lu,%lu",
           (unsigned long)d.ready_interval_us, (unsigned long)d.min_ready_interval_us, (unsigned long)d.max_ready_interval_us,
@@ -124,12 +127,12 @@ void handle(char *line) {
     const int index = diagnostic::profile_index(arg);
     const char *mode = strtok(nullptr, " \t");
     if (index < 0 || !mode || (strcmp(mode, "off") && strcmp(mode, "on")) || strtok(nullptr, " \t")) {
-      reply("usage: profile creator|rate|range|high off|on (BLE mode; reboots)");
+      reply("usage: profile creator|rate|range|high on|off (sensor row + radio; reboots)");
       return;
     }
     if (ble::connected()) { reply("disconnect BLE before selecting a boot profile"); return; }
     if (!diagnostic::select_next_boot((uint8_t)index, !strcmp(mode, "on"))) return;
-    reply("next_boot profile=%s ble=%s caps=0; software rebooting; no NVS write", arg, mode);
+    reply("next_boot profile=%s ble=%s caps=%02X; software rebooting; no NVS write", arg, mode, diagnostic::capabilities_for(diagnostic::PROFILES[index]));
     delay(100);
     ESP.restart();
   } else if (!strcmp(cmd, "selftest")) {
@@ -233,9 +236,9 @@ void hello() {
   char ax[24];
   axes_text(ax, sizeof(ax));
   const diagnostic::Profile &p = diagnostic::profile();
-  Serial.printf("HPHELLO|fw=%s|name=%s|boot=%08lX|hz=%u|range=%u|profile=%s|ble=%s|caps=0|axes=%s|sensor=%d\n",
+  Serial.printf("HPHELLO|fw=%s|name=%s|boot=%08lX|hz=%u|range=%u|profile=%s|ble=%s|caps=%02X|axes=%s|sensor=%d\n",
                 FW_VERSION_STR, ble::name(), (unsigned long)wand::stats().boot_id, p.sample_hz, p.range_g,
-                p.name, diagnostic::selection().ble ? "on" : "off", ax, wand::stats().sensor_ok ? 1 : 0);
+                p.name, diagnostic::selection().ble ? "on" : "off", diagnostic::capabilities_for(p), ax, wand::stats().sensor_ok ? 1 : 0);
 }
 
 void tick() {

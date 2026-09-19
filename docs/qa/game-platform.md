@@ -3,8 +3,8 @@
 Updated September 19, 2026. Software checkpoint; physical end-to-end acceptance is pending.
 
 **Current work supersedes this historical checkpoint:** see [the input rebuild](input-rebuild.md)
-for direct-first phone sessions, explicit calibration, current tests/deployment and the
-0.1.8 diagnostic matrix. No earlier result below qualifies that rebuild.
+for direct-first phone sessions, the v3 gesture detector, badge auto-reconnect, and
+[firmware 0.2.0](firmware-0.2.0.md). No earlier result below qualifies that rebuild.
 
 **Prior connectivity work:** [the stabilization report](connectivity-stabilization.md)
 records the repaired clock/relay lifecycle, fresh firmware diagnostics, current deployment,

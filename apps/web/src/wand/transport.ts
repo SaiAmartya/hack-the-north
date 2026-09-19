@@ -36,6 +36,8 @@ export interface WandTransport {
   connect(onDisconnect: DisconnectListener): Promise<void>;
   /** Resets a logical link, retaining only an already approved phone pairing. */
   recover?(onDisconnect: DisconnectListener): Promise<void>;
+  /** Whether recover() has something to resume (a chosen badge, an approved pair). */
+  canRecover?(): boolean;
   readInfo(): Promise<Uint8Array>;
   readStatus(): Promise<Uint8Array>;
   subscribe(kind: NotificationKind, listener: ByteListener): Promise<void>;
@@ -45,6 +47,9 @@ export interface WandTransport {
 
 const deviceOwners = new Map<string, symbol>();
 
+const RECOVERY_ATTEMPTS = 4;
+const RECOVERY_DELAYS_MS = [0, 500, 1000, 2000];
+
 export class BleWandTransport implements WandTransport {
   readonly source = "REAL BLE";
   private generation = 0;
@@ -53,11 +58,18 @@ export class BleWandTransport implements WandTransport {
   private service?: GattService;
   private tail: Promise<unknown> = Promise.resolve();
   private cleanup: (() => void)[] = [];
+  /** The badge the player chose; kept across link loss so recovery needs no chooser. */
+  private chosen?: BleDevice;
 
-  constructor(private readonly bluetooth: BluetoothAccess) {}
+  constructor(
+    private readonly bluetooth: BluetoothAccess,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
+  ) {}
 
-  async connect(onDisconnect: () => void): Promise<void> {
+  async connect(onDisconnect: DisconnectListener): Promise<void> {
     this.disconnect();
+    this.chosen = undefined;
     const generation = this.generation;
     const device = await this.bluetooth.requestDevice({
       filters: [{ services: [WAND_UUIDS.service] }],
@@ -66,10 +78,64 @@ export class BleWandTransport implements WandTransport {
     if (!device.gatt) throw new Error("Selected device has no GATT server");
     if (deviceOwners.has(device.id))
       throw new Error("Selected wand is already in use");
+    this.chosen = device;
+    await this.attach(device, generation, onDisconnect);
+  }
+
+  /**
+   * Bounded automatic carrier recovery for the badge the player already chose: no chooser, a
+   * fresh GATT link (or the still-open one), then the client performs a full new handshake.
+   */
+  readonly canRecover = (): boolean => Boolean(this.chosen?.gatt);
+
+  readonly recover = async (onDisconnect: DisconnectListener): Promise<void> => {
+    const device = this.chosen;
+    if (!device?.gatt) throw new Error("Choose your badge again.");
+    this.disconnect();
+    const generation = this.generation;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < RECOVERY_ATTEMPTS; attempt++) {
+      if (RECOVERY_DELAYS_MS[attempt]) await this.sleep(RECOVERY_DELAYS_MS[attempt]);
+      this.assertGeneration(generation);
+      if (deviceOwners.has(device.id)) throw new Error("Selected wand is already in use");
+      try {
+        await this.attach(device, generation, onDisconnect);
+        return;
+      } catch (error) {
+        this.assertGeneration(generation);
+        lastError = error;
+      }
+    }
+    throw new Error(
+      lastError instanceof Error && lastError.message
+        ? `Badge connection lost: ${lastError.message}`
+        : "Badge connection lost. Reconnect your badge.",
+    );
+  };
+
+  private async attach(
+    device: BleDevice,
+    generation: number,
+    onDisconnect: DisconnectListener,
+  ): Promise<void> {
     const owner = Symbol("ble-wand-connection");
     deviceOwners.set(device.id, owner);
     this.device = device;
     this.owner = owner;
+    let service: GattService;
+    try {
+      const server = await device.gatt!.connect();
+      this.assertGeneration(generation);
+      service = await server.getPrimaryService(WAND_UUIDS.service);
+      this.assertGeneration(generation);
+    } catch (error) {
+      // Release without bumping the generation so a bounded retry can attach again.
+      if (generation === this.generation) this.release();
+      else disconnectStaleDevice(device, owner);
+      throw error;
+    }
+    // A drop while attaching rejects the attach above and stays inside the retry loop; only a
+    // link that reached service discovery reports loss to the client.
     const lost = () => {
       if (
         generation !== this.generation ||
@@ -77,23 +143,17 @@ export class BleWandTransport implements WandTransport {
       )
         return;
       this.disconnect();
-      onDisconnect();
+      onDisconnect({
+        code: "device_disconnected",
+        message: "Badge connection lost.",
+        recoverable: true,
+      });
     };
     device.addEventListener("gattserverdisconnected", lost);
     this.cleanup.push(() =>
       device.removeEventListener("gattserverdisconnected", lost),
     );
-    try {
-      const server = await device.gatt.connect();
-      this.assertGeneration(generation);
-      const service = await server.getPrimaryService(WAND_UUIDS.service);
-      this.assertGeneration(generation);
-      this.service = service;
-    } catch (error) {
-      if (generation === this.generation) this.disconnect();
-      else disconnectStaleDevice(device, owner);
-      throw error;
-    }
+    this.service = service;
   }
 
   readInfo() {
@@ -159,13 +219,17 @@ export class BleWandTransport implements WandTransport {
 
   disconnect(): void {
     this.generation++;
+    this.release();
+    this.tail = Promise.resolve();
+  }
+
+  private release(): void {
     for (const remove of this.cleanup.splice(0)) remove();
     this.service = undefined;
     if (this.device && this.owner)
       disconnectOwnedDevice(this.device, this.owner);
     this.device = undefined;
     this.owner = undefined;
-    this.tail = Promise.resolve();
   }
 
   private assertGeneration(generation: number): void {

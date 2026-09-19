@@ -2,6 +2,35 @@
 
 September 19, 2026. This report separates implemented behavior from hardware/physical qualification.
 
+## Evening rebuild: recognizer v3, badge auto-reconnect, firmware 0.2.0
+
+Sai's second recorded attempt (`wandduel-phone-trace 2.json`, three deliberate jabs) showed six clear
+strokes of 3.7–4.8 g with a device-frame direction consistent to within ~15°, separated by 12–18° of
+hand drift and slow returns. Recognizer v2 rejected all of them (`too-long`, `too-short`,
+`missing-stop`) because it segmented on drift from a frozen neutral and demanded a return to that
+pose. **v3** replaces the segmenter and classifier:
+
+- A movement starts on a sharp sample-to-sample change (jerk ≥ 180 mg/20 ms on two samples, a single
+  ≥ 450, a linear excursion ≥ 450 mg, or a 15° orientation change) and ends when the trailing 200 ms
+  is still again (jerk < 140, spread < 150 mg) — in whatever pose the hand ended up. The resting
+  reference re-anchors at each still run; nothing requires returning to the calibrated grip.
+- Strong strokes (≥ 800 mg) resolve as soon as sharp acceleration stops (~250 ms after the peak),
+  before the hand settles; a rapid succession of strokes is one spell; the next needs 250 ms of stillness.
+- Features: peak-weighted stroke direction in device axes, peak magnitude, stroke length, and the
+  orientation change from the starting pose to the held end pose. Templates per spell come from three
+  examples: jab/sweep = direction + typical peak; guard = tilt direction + typical tilt/peak.
+- Calibration coaching is one sentence and actionable (`Jab a little harder`, `Raise higher, then hold`,
+  `That looked like a jab`); pre-jab twitches and slow drift are ignored silently; lowering a guard is
+  recognized as the opposite of the raise and ignored.
+
+The recorded trace now calibrates on its first three jabs and recognizes the remaining two as
+held-out Stupefy (test `calibrates and recognizes Sai's recorded iPhone jabs`). Synthetic fixtures were
+reshaped to match the recording (wind-up, thrust, brake, slow drifting return). This is still not a
+physical pass: the next iPhone and badge sessions must confirm it with real hands.
+
+Badge firmware **0.2.0** and the browser's badge auto-reconnect are described in
+[the 0.2.0 change record](firmware-0.2.0.md), together with the physical QA card.
+
 ## Checkpoint and boundaries
 
 The previous incomplete/diagnostic checkpoint was published to `main` at **3c0ed45**, incorporating teammate display-rotation defaults. The rebuild integrates teammate main **76b6388**; a fresh fetch before publication found no newer main commits. Sai authorized publishing this reviewed checkpoint from `codex/wand-input-rebuild` to `main`. This is a software/diagnostic checkpoint, not a qualified physical release. Backups, secrets, local model weights and build outputs are excluded. See [teammate setup](../TEAM-SETUP.md) for clean-install/run instructions and [firmware installation](../../firmware/README.md#safe-teammate-setup) for the separately gated hardware procedure.

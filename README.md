@@ -5,16 +5,20 @@ video-only WebRTC and local speech recognition on each laptop. No button casting
 cloud ASR, serial gameplay gateway or badge IDE dependency.
 
 **This is an incomplete development checkpoint, not a qualified demo release.**
-The iPhone path now has direct-first Wi-Fi, explicit Internet fallback, visible sensing
-and player-started grip calibration. The rebuilt physical gesture detector needs held-out
-iPhone testing; an intermittent Internet-relay freshness failure remains open.
-Badge source **0.1.9 is diagnostic-only**: it is not gameplay firmware and has not been
-flashed or hardware-qualified. Teammate main through `76b6388` is incorporated.
+The iPhone path has direct-first Wi-Fi, explicit Internet fallback, visible sensing and
+player-started grip calibration. The gesture detector is now **v3**: a Wii-remote style segmenter
+(a movement starts on a sharp change and ends when the wand is still again, in whatever pose it
+ended up) with per-player jab/guard templates; it calibrates and recognizes the recorded iPhone jabs
+that v2 rejected. Badge firmware **0.2.0** is the first gameplay image: 50 Hz/±8 g by default, radio
+on after every reset, and the sensor overwrite flag no longer marks every sample discontinuous.
+It is built but **not yet flashed**; see [the 0.2.0 change record and QA card](docs/qa/firmware-0.2.0.md).
+The browser reconnects a dropped badge link automatically (bounded) and no longer drops the wand on a
+short page stall. An intermittent Internet-relay freshness failure remains open.
 See [current implementation and measured evidence](docs/qa/input-rebuild.md).
 
 - **[Start here: teammate setup](docs/TEAM-SETUP.md)** — fresh-clone macOS/Windows install,
   local speech, iPhone connection, two laptops, checks and troubleshooting.
-- **[Badge build, backup and flash instructions](firmware/README.md)** — diagnostic only at this checkpoint.
+- **[Badge build, backup and flash instructions](firmware/README.md)** — 0.2.0 gameplay image, awaiting flash and QA.
 - [MVP](MVP-OUTLINE.md) · [Implementation plan](IMPLEMENTATION-PLAN.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
 - [Design system](DESIGN_SYSTEMS.md) · [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
 

@@ -300,6 +300,35 @@ export class DuelController {
       }
     }
   }
+  /** Explicit retry of a dropped wand link; completes the referee session a badge retry skipped. */
+  async retryWand() {
+    const wand = this.wand;
+    if (!wand || this.busy) return;
+    const request = ++this.attemptGeneration;
+    this.busy = true;
+    this.issue = "";
+    this.onChange();
+    try {
+      await wand.retryRecovery();
+      if (request !== this.attemptGeneration || this.dead || this.wand !== wand) return;
+      const state = wand.getSnapshot();
+      if (state.phase !== "streaming") {
+        if (state.phase === "fault" && !state.canRetry) this.issue = state.issue || "Wand connection failed";
+        return;
+      }
+      if (this.source === "ble" && !this.game.snapshot) await this.game.connect("ble");
+      if (request !== this.attemptGeneration || this.dead) return;
+      this.syncInputState();
+    } catch (error) {
+      if (request === this.attemptGeneration)
+        this.issue = error instanceof Error ? error.message : "Could not reconnect";
+    } finally {
+      if (request === this.attemptGeneration) {
+        this.busy = false;
+        this.onChange();
+      }
+    }
+  }
   confirmPhoneClaim() {
     const claim = this.phoneClaim;
     const phone = this.phoneSession ?? this.phoneRelay;
@@ -403,10 +432,11 @@ export class DuelController {
     const mic = this.speech.getSnapshot().phase;
     const instruction = !["listening", "busy"].includes(mic) ? "Enable the laptop microphone"
       : motion.phase === "uncalibrated" ? "Find a comfortable grip. Start on the laptop."
-      : motion.phase === "stillness" ? "Hold this grip still"
-      : motion.phase === "resuming" ? "Return to your starting grip"
-      : motion.calibratingSpell === "stupefy" ? "Push forward. Stop. Return."
-      : motion.calibratingSpell === "protego" ? "Raise. Tilt. Hold."
+      : motion.phase === "stillness" ? "Hold still"
+      : motion.phase === "resuming" ? "Hold still for a moment"
+      : motion.calibratingSpell === "stupefy" ? "Jab forward, three times"
+      : motion.calibratingSpell === "protego" ? "Raise into a guard, hold, lower. Three times"
+      : motion.calibratingSpell === "expelliarmus" ? "Sweep sideways, three times"
       : motion.phase === "ready" ? "Move and speak your spell" : "Continue on the laptop";
     this.phoneSession?.coach({ instruction, completed: motion.calibratingSpell ? motion.examplesBySpell[motion.calibratingSpell] : 0,
       total: motion.calibratingSpell ? 3 : 0, hint: motion.lastIssue, diagnostics: this.motion.getDiagnostics() });

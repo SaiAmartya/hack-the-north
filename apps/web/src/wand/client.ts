@@ -75,6 +75,11 @@ export type WandSnapshot = {
   lastSample?: CapturedMotion;
 };
 
+const BROWSER_STALL_MS = 200;
+const BROWSER_PAUSE_MS = 2000;
+const RECOVERY_LIMIT = 3;
+const RECOVERY_WINDOW_MS = 60_000;
+
 function signedDelta32(next: number, previous: number): number {
   const delta = unsignedDelta32(next, previous);
   return delta >= 0x80000000 ? delta - 0x100000000 : delta;
@@ -109,6 +114,8 @@ export class WandClient {
   private cues: (FeedbackCue & { expiresAt: number })[] = [];
   private pumping = false;
   private recovering = false;
+  private carrierRecovering = false;  // transport.recover() in flight: its retry loop owns disconnects
+  private recoveryTimes: number[] = [];
   private validation?: { startedAt: number; since?: number; resolve: () => void; reject: (error: Error) => void };
 
   constructor(
@@ -155,10 +162,14 @@ export class WandClient {
 
   private disconnected(generation: number) {
     return (failure?: TransportFailure) => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.carrierRecovering) return;
       this.fail(failure?.message ?? "Device connection ended", failure?.recoverable ?? false,
         failure?.code ?? "device_disconnected");
     };
+  }
+
+  private canRecover(): boolean {
+    return Boolean(this.transport.recover) && (this.transport.canRecover ? this.transport.canRecover() : true);
   }
 
   private async handshake(generation: number): Promise<void> {
@@ -244,8 +255,9 @@ export class WandClient {
 
   /** Explicit retry after bounded automatic carrier recovery. Never resumes combat. */
   async retryRecovery(): Promise<void> {
-    if (!this.transport.recover || this.recovering) return;
-    await this.recover(this.snapshot.issue || "Restoring phone connection", this.snapshot.failureCode);
+    if (!this.canRecover() || this.recovering) return;
+    this.recoveryTimes = [];
+    await this.recover(this.snapshot.issue || "Restoring wand connection", this.snapshot.failureCode);
   }
 
   setState(state: FeedbackState): void {
@@ -293,23 +305,32 @@ export class WandClient {
 
   private fail(reason: string, recoverable = true, code = "input_interrupted"): void {
     if (this.snapshot.phase === "fault" && this.snapshot.issue) return;
-    if (recoverable && this.transport.recover && !this.recovering &&
-        this.snapshot.phase === "streaming") {
-      void this.recover(reason, code);
-      return;
+    if (recoverable && this.canRecover() && !this.recovering &&
+        ["streaming", "validating"].includes(this.snapshot.phase)) {
+      // Bounded automatic recovery: a link that keeps dropping needs the player, not a loop.
+      const now = this.now();
+      this.recoveryTimes = this.recoveryTimes.filter((at) => now - at < RECOVERY_WINDOW_MS);
+      if (this.recoveryTimes.length < RECOVERY_LIMIT) {
+        this.recoveryTimes.push(now);
+        void this.recover(reason, code);
+        return;
+      }
+      reason = "Your wand keeps dropping out. Reconnect it to continue.";
+      code = "unstable_link";
     }
     const last = this.snapshot;
-    // Keep an approved phone pair available for an explicit retry; BLE/replay
-    // have no resume credential and continue to close immediately.
+    // Keep an approved phone pair available for an explicit retry. A badge link is dropped so the
+    // badge advertises again and stops streaming into the void; the chosen device is remembered,
+    // so an explicit retry still needs no chooser.
     this.clearProtocol();
-    if (!this.transport.recover) this.transport.disconnect();
+    if (!this.transport.recover || this.transport.source === "REAL BLE") this.transport.disconnect();
     this.snapshot = {
       ...last,
       generation: this.generation,
       phase: "fault",
       issue: reason,
       failureCode: code,
-      canRetry: Boolean(this.transport.recover),
+      canRetry: this.canRecover(),
       lastSample: undefined,
     };
   }
@@ -322,8 +343,16 @@ export class WandClient {
     this.snapshot = { ...this.snapshot, phase: "recovering", info, issue: reason,
       failureCode: code, canRetry: false };
     try {
-      await this.transport.recover!(this.disconnected(generation));
+      this.carrierRecovering = true;
+      try {
+        await this.transport.recover!(this.disconnected(generation));
+      } finally {
+        this.carrierRecovering = false;
+      }
       this.assertGeneration(generation);
+      // The carrier is back; a fault during the new handshake's validation may recover again
+      // (within the budget) instead of ending in a manual fault.
+      this.recovering = false;
       await this.handshake(generation);
     } catch (error) {
       if (generation === this.generation) {
@@ -550,9 +579,20 @@ export class WandClient {
   }
 
   private checkTiming(now: number): boolean {
-    if (now - this.lastTick > 200) {
-      this.fail("Browser stalled over 200 ms; reconnect for a fresh baseline");
+    const stall = now - this.lastTick;
+    if (stall > BROWSER_PAUSE_MS) {
+      this.fail("The page paused for too long; reconnecting your wand", true, "browser_paused");
       return false;
+    }
+    if (stall > BROWSER_STALL_MS) {
+      // Contract section 6: a stall clears pending evidence and requires a fresh baseline. The
+      // link stays up; buffered samples fail the age check and the next fresh one breaks gestures.
+      this.broken = true;
+      this.samples = [];
+      this.lastTick = now;
+      this.lastValid = now;  // the wand was not silent; the page was. Give fresh motion its full 500 ms.
+      if (this.validation) this.validation.since = undefined;
+      this.syncDue = Math.min(this.syncDue, now);
     }
     if (
       !this.sync ||
@@ -570,7 +610,7 @@ export class WandClient {
     if (!this.checkTiming(now)) return;
     this.lastTick = now;
     if (now - this.lastValid >= 500) {
-      this.fail("No fresh valid motion for 500 ms");
+      this.fail("No fresh motion for 500 ms", true, "motion_silent");
       return;
     }
     if (this.validation && now - this.validation.startedAt >= 10_000) {

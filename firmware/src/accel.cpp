@@ -1,4 +1,5 @@
 #include "accel.h"
+#include "config.h"
 #include "diagnostic.h"
 #include "pins.h"
 #include <Arduino.h>
@@ -10,14 +11,16 @@ namespace accel {
 namespace {
 const uint8_t REG_WHO_AM_I = 0x0F, REG_CTRL0 = 0x1F, REG_CTRL1 = 0x20, REG_CTRL4 = 0x23, REG_STATUS = 0x27, REG_OUT_X_L = 0x28, AUTO_INC = 0x80;
 const uint8_t STATUS_ZYXDA = 0x08;   // new X, Y and Z data available
-const uint8_t STATUS_ZYXOR = 0x80;   // at least one axis overwritten; exact missed count is unknown
+const uint8_t STATUS_ZYXOR = 0x80;   // "overwritten" report; see Sample::overrun_flag
 const int16_t RAIL_COUNTS = 2040;    // 12-bit output rails at +/-2047
-const uint16_t BUS_TIMEOUT_MS = 10;
+const uint16_t BUS_TIMEOUT_MS = 10;  // bounded: the NFC chip can wedge the bus on droopy power
 const uint8_t ERRORS_BEFORE_RECOVERY = 5;
+const uint32_t RECOVERY_BACKOFF_MS = 250;
 std::atomic<bool> g_present{false};
 std::atomic<uint8_t> g_who{0}, g_ctrl1{0}, g_ctrl4{0};
 uint8_t g_errors = 0;
 std::atomic<uint32_t> g_recoveries{0};
+uint32_t g_next_recovery_ms = 0;
 portMUX_TYPE g_diag_lock = portMUX_INITIALIZER_UNLOCKED;
 Diagnostics g_diag{};
 ReadyTrace g_trace[TRACE_CAPACITY]{};
@@ -56,8 +59,8 @@ bool configure() {
   g_who = who;
   if (who != 0x11) return false;
   if (!write_reg(REG_CTRL1, 0x07) || !read_regs(REG_CTRL0, &c0, 1)) return false;
-  // Creator/normal rows leave CTRL0 at its documented reset value. Never overwrite
-  // reserved bits to force a match. Only the high row writes the documented HR bit.
+  // Normal rows leave CTRL0 at its documented reset value; never overwrite reserved bits.
+  // Only the high-performance row writes the documented HR bit.
   if (c0 != 0 && c0 != p.ctrl0) return false;
   if (c0 != p.ctrl0 && !write_reg(REG_CTRL0, p.ctrl0)) return false;
   if (!write_reg(REG_CTRL4, p.ctrl4)) return false;
@@ -93,7 +96,7 @@ bool reset_once_at_boot() {
   if (!read_regs(REG_WHO_AM_I, &who, 1) || !read_regs(0x70, &revision, 1) ||
       who != 0x11 || revision != 0x28) return false;
   // Silan SC7A20H v1.1 p27 section 13.34: this command resets the sensor circuit.
-  // One boot-only diagnostic; never write reserved/calibration/NVM registers.
+  // One boot-only step; never write reserved/calibration/NVM registers.
   if (!write_reg(0x68, 0xa5)) return false;
   delay(10); // bounded settling margin, not a manufacturer-specified reset completion time
   if (!read_regs(REG_WHO_AM_I, &who, 1) || !read_regs(0x70, &revision, 1) ||
@@ -110,6 +113,9 @@ bool reset_once_at_boot() {
 }
 
 void recover() {
+  const uint32_t now = millis();
+  if ((int32_t)(now - g_next_recovery_ms) < 0) return;  // bounded retry rate while the bus is wedged
+  g_next_recovery_ms = now + RECOVERY_BACKOFF_MS;
   g_recoveries++;
   Wire.end();
   delay(2);
@@ -136,6 +142,10 @@ uint8_t who_am_i() { return g_who; }
 uint8_t ctrl1() { return g_ctrl1; }
 uint8_t ctrl4() { return g_ctrl4; }
 uint32_t recoveries() { return g_recoveries; }
+uint32_t period_ms() {
+  const uint8_t hz = diagnostic::profile().sample_hz;
+  return hz ? 1000u / hz : 20u;
+}
 Diagnostics diagnostics() {
   portENTER_CRITICAL(&g_diag_lock);
   const Diagnostics snapshot = g_diag;
@@ -155,9 +165,8 @@ void reset_trace() {
   portEXIT_CRITICAL(&g_diag_lock);
 }
 
-bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, bool &overrun) {
+bool poll(Sample &out, bool &bus_error) {
   bus_error = false;
-  overrun = false;
   if (!g_present) {
     bus_error = true;
     fail();
@@ -169,6 +178,7 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, 
     return fail();
   }
   const uint32_t ready_observed_us = micros();
+  const uint32_t ready_observed_ms = millis();
   portENTER_CRITICAL(&g_diag_lock);
   ++g_diag.status_polls;
   if (!(st & STATUS_ZYXDA)) ++g_diag.not_ready_polls;
@@ -197,14 +207,15 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, 
   const int16_t rx = signed_counts(b[0], b[1]);
   const int16_t ry = signed_counts(b[2], b[3]);
   const int16_t rz = signed_counts(b[4], b[5]);
-  x = diagnostic::to_mg(rx, p);
-  y = diagnostic::to_mg(ry, p);
-  z = diagnostic::to_mg(rz, p);
+  out.x = diagnostic::to_mg(rx, p);
+  out.y = diagnostic::to_mg(ry, p);
+  out.z = diagnostic::to_mg(rz, p);
+  out.ready_ms = ready_observed_ms;
   portENTER_CRITICAL(&g_diag_lock);
   if (g_diag.trace_count < TRACE_CAPACITY) {
     g_trace[g_diag.trace_count++] = ReadyTrace{g_last_not_ready_us, ready_observed_us,
         burst_start_us, burst_end_us, read_finished_us, g_last_not_ready_status, st, after, g_have_not_ready,
-        {rx, ry, rz}, {x, y, z}};
+        {rx, ry, rz}, {out.x, out.y, out.z}};
   }
   ++g_diag.fresh_reads;
   if (g_have_previous_read) {
@@ -232,9 +243,8 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, 
   g_have_previous_read = true;
   g_have_not_ready = false;
   g_errors = 0;
-  overrun = (st & STATUS_ZYXOR) != 0;
-  // Preserve native rail and overwrite evidence in every diagnostic row.
-  saturated = abs(rx) >= RAIL_COUNTS || abs(ry) >= RAIL_COUNTS || abs(rz) >= RAIL_COUNTS;
+  out.overrun_flag = (st & STATUS_ZYXOR) != 0;
+  out.saturated = abs(rx) >= RAIL_COUNTS || abs(ry) >= RAIL_COUNTS || abs(rz) >= RAIL_COUNTS;
   return true;
 }
 

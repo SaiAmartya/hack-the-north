@@ -228,26 +228,36 @@ describe("shared wand lifecycle", () => {
       accepted: 2,
     });
   });
-  it("rejects motion arriving before the watchdog after a browser stall", async () => {
+  it("clears evidence after a browser stall, drops buffered samples and keeps the link", async () => {
     const { client, transport } = await setup();
     await vi.advanceTimersByTimeAsync(100);
     const delivered = vi.fn();
     client.onSample(delivered);
     const previous = client.getSnapshot().lastSample!;
+    expect(client.getSamples().length).toBeGreaterThan(1);
     vi.setSystemTime(Date.now() + 250);
-    transport.endpoint.emitMotion({
-      ...previous,
-      flags: MotionFlag.Valid,
-      seq: previous.seq + 1,
-      captureMs: Date.now(),
-    });
+    // A sample captured before the stall was buffered by the OS: too old to be fresh.
+    transport.endpoint.emitMotion({ ...previous, flags: MotionFlag.Valid, seq: previous.seq + 1, captureMs: Date.now() - 240 });
     await Promise.resolve();
     expect(delivered).not.toHaveBeenCalled();
-    expect(client.getSnapshot()).toMatchObject({
-      phase: "fault",
-      issue: "Browser stalled over 200 ms; reconnect for a fresh baseline",
-    });
+    expect(client.getSnapshot().phase).toBe("streaming");
     expect(client.getSamples()).toHaveLength(0);
+    // A genuinely fresh sample resumes the stream but starts a new gesture baseline.
+    transport.endpoint.emitMotion({ ...previous, flags: MotionFlag.Valid, seq: previous.seq + 2, captureMs: Date.now() });
+    await Promise.resolve();
+    expect(delivered).toHaveBeenCalledTimes(1);
+    expect(delivered.mock.calls[0][0].breaksGesture).toBe(true);
+    expect(client.getSnapshot().phase).toBe("streaming");
+  });
+
+  it("treats a page pause over two seconds as an interruption", async () => {
+    const { client, transport } = await setup();
+    await vi.advanceTimersByTimeAsync(100);
+    const previous = client.getSnapshot().lastSample!;
+    vi.setSystemTime(Date.now() + 2500);
+    transport.endpoint.emitMotion({ ...previous, flags: MotionFlag.Valid, seq: previous.seq + 1, captureMs: Date.now() });
+    await Promise.resolve();
+    expect(client.getSnapshot()).toMatchObject({ phase: "fault", failureCode: "browser_paused" });
   });
   it("refreshes state, sends one cue, and lets stopped feedback expire", async () => {
     const { client, transport } = await setup();
@@ -407,5 +417,109 @@ describe("shared wand lifecycle", () => {
     } finally {
       clearInterval(cues);
     }
+  });
+
+  it("recovers a quiet badge link automatically, at most three times a minute", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    const transport: WandTransport = {
+      source: "REAL BLE",
+      connect: cb => endpoint.connect(cb),
+      recover: vi.fn(async cb => { endpoint.disconnect(); await endpoint.connect(cb); }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb), writeControl: data => endpoint.writeControl(data),
+      disconnect: () => endpoint.disconnect(),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect();
+    await vi.advanceTimersByTimeAsync(1200); await connecting;
+    expect(client.getSnapshot().phase).toBe("streaming");
+    for (let outage = 1; outage <= 3; outage++) {
+      endpoint.injectOutage();
+      await vi.advanceTimersByTimeAsync(600);
+      expect(client.getSnapshot().phase).not.toBe("fault");
+      expect(transport.recover).toHaveBeenCalledTimes(outage);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(client.getSnapshot().phase).toBe("streaming");
+    }
+    endpoint.injectOutage();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(client.getSnapshot()).toMatchObject({ phase: "fault", failureCode: "unstable_link", canRetry: true });
+    expect(transport.recover).toHaveBeenCalledTimes(3);
+    // An explicit retry by the player resets the budget.
+    const retry = client.retryRecovery();
+    await vi.advanceTimersByTimeAsync(1500); await retry;
+    expect(client.getSnapshot().phase).toBe("streaming");
+    expect(transport.recover).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps the link through a 600 ms page stall even when the watchdog tick runs first", async () => {
+    const { client, transport } = await setup();
+    await vi.advanceTimersByTimeAsync(100);
+    const delivered = vi.fn();
+    client.onSample(delivered);
+    const previous = client.getSnapshot().lastSample!;
+    // The page freezes for 600 ms while the badge keeps streaming into the OS buffer.
+    vi.setSystemTime(Date.now() + 600);
+    transport.endpoint.emitMotion({ ...previous, flags: MotionFlag.Valid, seq: previous.seq + 1, captureMs: Date.now() - 590 });
+    await Promise.resolve();
+    expect(delivered).not.toHaveBeenCalled();
+    // The overdue watchdog tick runs before any fresh sample arrives: the wand was not silent.
+    vi.advanceTimersByTime(26);
+    expect(client.getSnapshot().phase).toBe("streaming");
+    transport.endpoint.emitMotion({ ...previous, flags: MotionFlag.Valid, seq: previous.seq + 2, captureMs: Date.now() });
+    await Promise.resolve();
+    expect(client.getSnapshot().phase).toBe("streaming");
+    expect(delivered).toHaveBeenCalled();
+    expect(delivered.mock.calls[0][0].breaksGesture).toBe(true);
+  });
+
+  it("offers a retry only when the transport has something to recover", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    const transport: WandTransport = {
+      source: "REAL BLE",
+      connect: vi.fn(async () => { throw new Error("Chooser cancelled"); }),
+      recover: vi.fn(async cb => endpoint.connect(cb)),
+      canRecover: () => false,
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb), writeControl: data => endpoint.writeControl(data),
+      disconnect: () => endpoint.disconnect(),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    await client.connect();
+    expect(client.getSnapshot()).toMatchObject({ phase: "fault", issue: "Chooser cancelled", canRetry: false });
+    await client.retryRecovery();
+    expect(transport.recover).not.toHaveBeenCalled();
+  });
+
+  it("ignores link loss reported while the carrier's own retry loop is running, and recovers again during validation", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    let lost: DisconnectListener = () => {};
+    const transport: WandTransport = {
+      source: "REAL BLE",
+      connect: async cb => { lost = cb; await endpoint.connect(cb); },
+      recover: vi.fn(async cb => {
+        lost = cb;
+        cb({ code: "device_disconnected", message: "Badge connection lost.", recoverable: true });  // mid-attach drop
+        endpoint.disconnect();
+        await endpoint.connect(cb);
+      }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb), writeControl: data => endpoint.writeControl(data),
+      disconnect: () => endpoint.disconnect(),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect();
+    await vi.advanceTimersByTimeAsync(1200); await connecting;
+    expect(client.getSnapshot().phase).toBe("streaming");
+    lost({ code: "device_disconnected", message: "Badge connection lost.", recoverable: true });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(transport.recover).toHaveBeenCalledTimes(1);
+    expect(client.getSnapshot().phase).toBe("validating");
+    // A second outage inside the recovery's own validation window recovers again.
+    endpoint.injectOutage();
+    await vi.advanceTimersByTimeAsync(700);
+    expect(transport.recover).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(client.getSnapshot().phase).toBe("streaming");
   });
 });

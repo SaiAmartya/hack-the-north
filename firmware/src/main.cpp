@@ -1,6 +1,6 @@
-// Harry Potter Battle Simulator wand firmware for the Hack the North 2026 Hacker Badge.
-// Implements BADGE-FIRMWARE-CONTRACT.md v1: BLE GATT peripheral, 50 Hz raw acceleration, session
-// commands (OPEN/SYNC/SET_STATE/CUE) and on-badge feedback. See README.md in this folder.
+// Wandduel wand firmware for the Hack the North 2026 Hacker Badge.
+// Implements BADGE-FIRMWARE-CONTRACT.md v1: BLE GATT peripheral, native 50 Hz raw acceleration,
+// session commands (OPEN/SYNC/SET_STATE/CUE) and on-badge feedback. See README.md in this folder.
 //
 // Tasks: the NimBLE host task answers CONTROL writes (on_control), the acquisition task in wand.cpp
 // samples and notifies MOTION, and the Arduino loop does everything else (buttons, console, leases,
@@ -35,7 +35,7 @@ bool g_health_dirty = false;           // guarded by g_lock
 uint32_t g_boot_id = 0;
 uint32_t g_session_gen = 0, g_seen_gen = 0, g_present_revision = 0;
 uint32_t g_next_health = 0, g_last_health_bits = 0xFFFFFFFF;
-uint32_t g_rate_window_start = 0, g_rate_hz = 0, g_last_acquired = 0;
+uint32_t g_rate_window_start = 0, g_rate_hz = 0, g_last_acquired = 0, g_next_adv_check = 0;
 bool g_streaming = false;
 
 uint32_t health_bits() {
@@ -51,7 +51,7 @@ void publish_health(uint32_t now, bool force) {
   g_health_dirty = false;
   g_last_health_bits = bits;
   g_next_health = now + STATUS_HEALTH_PERIOD_MS;
-  const proto::Status h = g_session.health(now, wand::stats().dropped, health_bits());
+  const proto::Status h = g_session.health(now, wand::stats().lost, health_bits());
   uint8_t rec[proto::REC];
   proto::encode_status(h, rec);
   ble::set_health(rec);
@@ -72,7 +72,7 @@ void on_link(uint32_t generation) {
   update_stream();
   g_health_dirty = true;
   uint8_t rec[proto::REC];
-  proto::encode_status(g_session.health(millis(), wand::stats().dropped, health_bits()), rec);
+  proto::encode_status(g_session.health(millis(), wand::stats().lost, health_bits()), rec);
   ble::set_health(rec);
 }
 
@@ -94,7 +94,7 @@ void on_control(const uint8_t *raw, size_t len, uint32_t received_ms, uint32_t g
     update_stream();
     if (stale_before != g_session.state_stale()) g_health_dirty = true;
     uint8_t health[proto::REC];
-    proto::encode_status(g_session.health(millis(), wand::stats().dropped, health_bits()), health);
+    proto::encode_status(g_session.health(millis(), wand::stats().lost, health_bits()), health);
     ble::set_health(health);
   }
 }
@@ -108,16 +108,16 @@ void boot_diag() {
   present::boot_line(b);
   snprintf(b, sizeof(b), "reset reason %d", (int)esp_reset_reason());
   present::boot_line(b);
-  if (Serial) Serial.printf("HPDIAG|reset=%d|profile=%s|ble=%s|caps=0|accel=%d|who=%02X|ctrl0=%02X|ctrl1=%02X|ctrl4=%02X\n",
-                            (int)esp_reset_reason(), p.name, diagnostic::selection().ble ? "on" : "off", accel::present() ? 1 : 0,
-                            accel::who_am_i(), accel::diagnostics().ctrl0, accel::ctrl1(), accel::ctrl4());
+  if (Serial) Serial.printf("HPDIAG|reset=%d|profile=%s|ble=%s|caps=%02X|accel=%d|who=%02X|ctrl0=%02X|ctrl1=%02X|ctrl4=%02X\n",
+                            (int)esp_reset_reason(), p.name, diagnostic::selection().ble ? "on" : "off", diagnostic::capabilities_for(p),
+                            accel::present() ? 1 : 0, accel::who_am_i(), accel::diagnostics().ctrl0, accel::ctrl1(), accel::ctrl4());
 }
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(5);  // a stalled USB host must never block acquisition
-  diagnostic::begin(); // latch the RTC selection before any sensor or radio access
+  diagnostic::begin(); // latch the boot profile before any sensor or radio access
   g_lock = xSemaphoreCreateMutexStatic(&g_lock_storage);
   btn::begin();
   console::load_settings();
@@ -192,7 +192,13 @@ void loop() {
     g_rate_window_start = now;
   }
 
+  // Advertising watchdog: an idle wand must always be discoverable (contract section 6).
+  if ((int32_t)(now - g_next_adv_check) >= 0) {
+    g_next_adv_check = now + ADV_WATCHDOG_MS;
+    ble::ensure_advertising();
+  }
+
   publish_health(now, false);
-  present::tick(st, stale, now, ble::connected(), streaming, g_rate_hz, w.dropped);
+  present::tick(st, stale, now, ble::connected(), streaming, g_rate_hz, w.lost);
   delay(1);
 }

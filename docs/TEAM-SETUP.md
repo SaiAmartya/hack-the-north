@@ -12,9 +12,10 @@ change certificate trust, open firewall rules or flash a badge automatically.
   is still pending. Do not substitute a newer Python for the documented environment.
 - Each player needs their own laptop microphone, camera and one phone or qualified BLE badge.
   Voice stays on that laptop; the phone requests motion access only.
-- The current firmware is **0.1.9 diagnostic-only**, not a playable release. Its sensor-status
-  interpretation remains unresolved; a successful flash or Bluetooth connection cannot bypass
-  that gate. See [firmware installation and recovery](../firmware/README.md).
+- The current firmware source is **0.2.0**, the first gameplay-profile image (50 Hz/±8 g, radio on after
+  every reset, measured-gap discontinuity instead of the sensor's overwrite flag). It is built but must
+  be flashed and physically QA'd per [the 0.2.0 change record](qa/firmware-0.2.0.md) before a badge is
+  called qualified. See [firmware installation and recovery](../firmware/README.md).
 - iPhone recognition has been rebuilt, but real held-out movement/speech testing is pending.
   Internet relay has an unresolved intermittent 500 ms freshness failure. Prefer the direct
   route for the next physical test; do not describe either input as fully qualified yet.
@@ -179,7 +180,7 @@ connection, with no deployed TURN fallback. Wi-Fi peer isolation can block phone
 
 For a later **qualified** badge, omit the two `--phone-*` options on that player's launcher
 and select Connect badge. Badge-only qualification can additionally use `--badge-only`.
-Current diagnostic firmware cannot pass Ready; changing source is not a way to bypass it.
+A badge on a 0.1.x diagnostic image cannot pass Ready; flash 0.2.0 rather than changing browser gates.
 
 ## 5. Repeatable checks and useful failure reports
 
@@ -213,8 +214,9 @@ in [the input rebuild report](qa/input-rebuild.md); the older `qa_public_phone.m
 | Direct connection unavailable | Check venue peer isolation; explicitly try Internet if desired. Its intermittent freshness failure is still open. Do not loosen timing limits. |
 | Sensor active, but no Reaching laptop | Report route, received rate, age and visible last failure from Connection details. Export a trace only deliberately. |
 | Jab/guard counter stuck | Report its actionable hint; Reset grip and hold the same starting grip. Share a fresh trace if requested. Physical classifier accuracy is not yet qualified. |
-| Badge missing after a cold boot | Installed diagnostic 0.1.8 defaults BLE off. Source 0.1.9 corrects that default but is not installed automatically. Follow firmware instructions, not repeated blind reconnects. |
-| Badge says firmware needs repair / diagnostic INFO only | Expected for current diagnostic capabilities. Do not restore capability bits merely to make the message disappear. |
+| Badge missing after a cold boot | A badge still on 0.1.8 boots with BLE off after any power cycle. Flash 0.2.0 (radio on for every reset, advertising watchdog); check `id` on the console, not repeated blind reconnects. |
+| Badge says firmware needs repair / diagnostic INFO only | The badge is on a 0.1.x image or a diagnostic boot row (`profile creator|rate`). Flash 0.2.0 or select `profile range on`; never restore capability bits in the browser. |
+| Laptop says Reconnecting your badge… | Normal bounded auto-reconnect after a dropped link (up to three per minute). If it ends in Reconnect badge, press it once; if that fails, power-cycle the badge and report `status`. |
 | Camera or multiplayer peers cannot connect | Confirm both clients selected the same referee, their own local origin, network approval and peer reachability. No public TURN fallback is configured. |
 | Port occupied | Stop the known old launcher using its own Ctrl+C. Do not kill every Node/Python process or print full process environments/arguments. |
 

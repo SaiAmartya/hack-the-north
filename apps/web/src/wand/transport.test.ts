@@ -241,4 +241,73 @@ describe("BLE adapter against a fake browser API, not physical BLE", () => {
     write.resolve();
     await writeResult;
   });
+
+  it("recovers the chosen badge without the chooser, retrying briefly, then gives up", async () => {
+    const f = fixture();
+    const sleeps: number[] = [];
+    const transport = new BleWandTransport({ requestDevice: f.requestDevice }, async (ms) => { sleeps.push(ms); });
+    const lost = vi.fn();
+    await transport.connect(lost);
+    expect(f.requestDevice).toHaveBeenCalledTimes(1);
+    // The badge drops the link: the transport reports a recoverable failure once.
+    f.device.dispatchEvent(new Event("gattserverdisconnected"));
+    expect(lost).toHaveBeenCalledTimes(1);
+    expect(lost.mock.calls[0][0]).toMatchObject({ code: "device_disconnected", recoverable: true });
+    // Recovery reconnects the same device (no chooser) and is usable again.
+    const lostAgain = vi.fn();
+    await transport.recover(lostAgain);
+    expect(f.requestDevice).toHaveBeenCalledTimes(1);
+    expect(f.connect).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([]);
+    await expect(transport.readInfo()).resolves.toHaveLength(20);
+    // Transient failures are retried with growing delays; persistent failure surfaces once.
+    f.device.dispatchEvent(new Event("gattserverdisconnected"));
+    f.connect.mockRejectedValue(new Error("GATT operation failed"));
+    await expect(transport.recover(vi.fn())).rejects.toThrow(/Badge connection lost/);
+    expect(sleeps).toEqual([500, 1000, 2000]);
+    expect(f.connect).toHaveBeenCalledTimes(6);
+  });
+
+  it("refuses recovery before any badge was chosen and yields to a newer owner", async () => {
+    const f = fixture();
+    const transport = new BleWandTransport({ requestDevice: f.requestDevice }, async () => {});
+    expect(transport.recover).toBeDefined();
+    await expect(transport.recover!(vi.fn())).rejects.toThrow("Choose your badge again.");
+    await transport.connect(vi.fn());
+    transport.disconnect();
+    const other = new BleWandTransport({ requestDevice: f.requestDevice });
+    await other.connect(vi.fn());
+    await expect(transport.recover!(vi.fn())).rejects.toThrow("already in use");
+    other.disconnect();
+  });
+
+  it("keeps retrying when the link drops while a recovery attempt is still discovering services", async () => {
+    const f = fixture();
+    const sleeps: number[] = [];
+    const transport = new BleWandTransport({ requestDevice: f.requestDevice }, async (ms) => { sleeps.push(ms); });
+    const lost = vi.fn();
+    await transport.connect(lost);
+    expect(transport.canRecover()).toBe(true);
+    f.device.dispatchEvent(new Event("gattserverdisconnected"));
+    // First attempt: the link comes up, then drops during service discovery.
+    let attempts = 0;
+    vi.mocked(f.server.getPrimaryService).mockImplementation(async () => {
+      if (++attempts === 1) {
+        f.device.dispatchEvent(new Event("gattserverdisconnected"));
+        throw new Error("GATT Server is disconnected");
+      }
+      return f.service;
+    });
+    const lostAgain = vi.fn();
+    await transport.recover(lostAgain);
+    expect(lostAgain).not.toHaveBeenCalled();
+    expect(sleeps).toEqual([500]);
+    await expect(transport.readInfo()).resolves.toHaveLength(20);
+  });
+
+  it("reports canRecover false until a badge was chosen", () => {
+    const f = fixture();
+    const transport = new BleWandTransport({ requestDevice: f.requestDevice });
+    expect(transport.canRecover()).toBe(false);
+  });
 });

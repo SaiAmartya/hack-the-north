@@ -116,10 +116,11 @@ it("keeps recognition paused through motion calibration and enables it for pract
   controller.calibrate("stupefy");
   fixtures.calibration.stupefy.forEach((trace) => trace.forEach(sample));
   controller.calibrate("protego");
-  fixtures.calibration.protego.slice(0, 2).forEach((trace) => trace.forEach(sample));
+  // Two guards, each followed by lowering the wand again.
+  fixtures.calibration.protego.slice(0, 4).forEach((trace) => trace.forEach(sample));
   expect(recognition.mock.calls.every(([enabled]) => !enabled)).toBe(true);
 
-  fixtures.calibration.protego[2].forEach(sample);
+  fixtures.calibration.protego.slice(4).forEach((trace) => trace.forEach(sample));
   expect(controller.motion.getState().phase).toBe("ready");
   expect(recognition).toHaveBeenLastCalledWith(true);
   controller.calibrate("stupefy");
@@ -232,3 +233,24 @@ it("keeps the trusted-LAN code flow when hosted pairing is disabled", async () =
   await connecting;
   controller.destroy();
 });
+
+it("re-establishes the referee session when a badge retry succeeds after an initial fault", async () => {
+  vi.spyOn(WandClient.prototype, "onSample").mockImplementation(() => () => {});
+  let phase: "fault" | "streaming" = "fault";
+  vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
+  vi.spyOn(WandClient.prototype, "retryRecovery").mockImplementation(async () => { phase = "streaming"; });
+  const getSnapshot = WandClient.prototype.getSnapshot;
+  vi.spyOn(WandClient.prototype, "getSnapshot").mockImplementation(function (this: WandClient) {
+    return { ...getSnapshot.call(this), phase, canRetry: phase === "fault", issue: phase === "fault" ? "GATT operation failed" : "" };
+  });
+  const gameConnect = vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
+  vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
+  const controller = new DuelController();
+  await controller.connect("ble");
+  expect(gameConnect).not.toHaveBeenCalled();
+  await controller.retryWand();
+  expect(gameConnect).toHaveBeenCalledWith("ble");
+  expect(controller.busy).toBe(false);
+  controller.destroy();
+});
+

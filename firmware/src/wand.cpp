@@ -10,14 +10,15 @@
 #include <math.h>
 #include <atomic>
 
-// The acquisition task owns sensor reads and MOTION; combined-load timing still needs measurement.
+// The acquisition task owns sensor reads and MOTION notifications. It paces itself to the sensor's
+// output period: sleep until just before the next sample is due, then poll new-data once per tick.
 namespace wand {
 namespace {
 Stats g_stats, g_published;
 portMUX_TYPE g_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 std::atomic<uint32_t> g_stream_generation{0};
 std::atomic<bool> g_recal{false};
-bool g_discontinuity = false;
+bool g_break_pending = true;   // next emitted sample is not contiguous with the previous one
 int8_t g_map[3] = {0, 1, 2};
 int8_t g_sign[3] = {1, 1, 1};
 float g_baseline = 0;
@@ -31,27 +32,25 @@ void publish_stats() {
   portEXIT_CRITICAL(&g_stats_lock);
 }
 
-void process(uint32_t capture_ms, int16_t cx, int16_t cy, int16_t cz, bool saturated) {
+void process(const accel::Sample &sample, uint32_t gap_ms) {
   g_stats.sensor_ok = true;
-  const int16_t chip[3] = {cx, cy, cz};
+  const int16_t chip[3] = {sample.x, sample.y, sample.z};
   int8_t map[3], sign[3];
   get_axes(map, sign);
   const MappedSample mapped = map_and_clip(chip, map, sign, diagnostic::profile().range_g * 1000);
   const int16_t v[3] = {mapped.x, mapped.y, mapped.z};
-  saturated = saturated || mapped.saturated;
+  const bool saturated = sample.saturated || mapped.saturated;
   g_stats.acquired++;
   g_stats.seq++;
-  g_stats.x = (int16_t)v[0];
-  g_stats.y = (int16_t)v[1];
-  g_stats.z = (int16_t)v[2];
+  g_stats.x = v[0];
+  g_stats.y = v[1];
+  g_stats.z = v[2];
   g_stats.valid = true;
   g_stats.saturated = saturated;
 
   // Local activity indicator: deviation of the magnitude from a slow baseline (gravity).
   const float mag = sqrtf((float)v[0] * v[0] + (float)v[1] * v[1] + (float)v[2] * v[2]);
-  if (g_recal.exchange(false)) {
-    g_baseline_ready = false;
-  }
+  if (g_recal.exchange(false)) g_baseline_ready = false;
   if (!g_baseline_ready) {
     g_baseline = mag;
     g_baseline_ready = true;
@@ -63,62 +62,71 @@ void process(uint32_t capture_ms, int16_t cx, int16_t cy, int16_t cz, bool satur
   g_stats.activity += (level - g_stats.activity) * (level > g_stats.activity ? 0.6f : 0.15f);
 
   const uint32_t generation = g_stream_generation.load();
-  if (generation != g_seen_stream_generation) {
-    g_discontinuity = true;
-    g_seen_stream_generation = generation;
+  const bool generation_changed = generation != g_seen_stream_generation;
+  g_seen_stream_generation = generation;
+  if (!generation) {
+    g_break_pending = true;  // not streaming: whatever is emitted next is not contiguous
+    return;
   }
-  if (!generation) return;
-  if (millis() - capture_ms > SAMPLE_MAX_AGE_MS) {
+  const uint32_t age_ms = millis() - sample.ready_ms;
+  const Continuity c = classify_fresh_sample(gap_ms, age_ms, g_break_pending, generation_changed, max_gap_ms(accel::period_ms()), SAMPLE_MAX_AGE_MS);
+  if (c.drop) {
     g_stats.dropped++;
-    g_discontinuity = true;
+    g_stats.lost++;
+    g_break_pending = true;
     return;
   }
   proto::Motion m;
-  m.flags = proto::MF_VALID | (saturated ? proto::MF_SATURATED : 0) | (g_discontinuity ? proto::MF_DISCONTINUITY : 0);
+  m.flags = proto::MF_VALID | (saturated ? proto::MF_SATURATED : 0) | (c.discontinuity ? proto::MF_DISCONTINUITY : 0);
   m.seq = g_stats.seq;
-  m.capture_ms = capture_ms;
+  m.capture_ms = sample.ready_ms;
   m.boot_id = g_stats.boot_id;
-  m.ax = (int16_t)v[0];
-  m.ay = (int16_t)v[1];
-  m.az = (int16_t)v[2];
+  m.ax = v[0];
+  m.ay = v[1];
+  m.az = v[2];
   uint8_t rec[proto::REC];
   proto::encode_motion(m, rec);
   if (ble::notify_motion(rec, generation)) {
     g_stats.notified++;
-    g_discontinuity = false;
+    g_break_pending = false;
   } else {
     g_stats.dropped++;
-    g_discontinuity = true;
+    g_stats.lost++;
+    g_break_pending = true;
   }
 }
 
 void acq_task(void *) {
-  uint32_t last_fresh = millis();
+  uint32_t last_ready = millis();
+  bool have_last = false;
   for (;;) {
-    int16_t cx, cy, cz;
-    bool saturated = false, bus_error = false, overrun = false;
-    const uint32_t now = millis();
-    if (accel::poll(cx, cy, cz, saturated, bus_error, overrun)) {
-      const uint32_t captured = millis();
-      if (overrun) {
-        ++g_stats.overruns;
-        ++g_stats.dropped;  // one observed overrun, not an invented number of missed native samples
-        g_discontinuity = true;
+    accel::Sample sample;
+    bool bus_error = false;
+    if (accel::poll(sample, bus_error)) {
+      const uint32_t period = accel::period_ms();
+      const uint32_t limit = max_gap_ms(period);
+      const uint32_t gap = have_last ? sample.ready_ms - last_ready : limit + 1;
+      if (have_last && gap > limit) {
+        ++g_stats.gaps;
+        ++g_stats.lost;
       }
-      if (captured - last_fresh > 40) g_discontinuity = true;
-      last_fresh = captured;
-      process(captured, cx, cy, cz, saturated);
+      if (sample.overrun_flag) ++g_stats.overrun_flags;
+      last_ready = sample.ready_ms;
+      have_last = true;
+      process(sample, gap);
       publish_stats();
-      // Diagnostic: observe native DRDY each RTOS tick, without assuming a 20 ms output period.
-      // Never manufacture, decimate or relabel samples to hide the measured sensor cadence.
-      vTaskDelay(1);
+      // Pace to the output period, anchored to the capture time so processing/notify time never eats
+      // the margin: wake shortly before the next expected sample, then poll once per tick.
+      const int32_t until = (int32_t)(sample.ready_ms + period - ACQ_WAKE_MARGIN_MS) - (int32_t)millis();
+      vTaskDelay(until > 1 ? pdMS_TO_TICKS((uint32_t)until) : 1);
       continue;
     }
-    if (bus_error || now - last_fresh > 100) {
+    if (bus_error || millis() - last_ready > SENSOR_SILENCE_MS) {
       g_stats.sensor_ok = false;
       g_stats.valid = false;
       g_stats.activity = 0;
-      g_discontinuity = true;   // whatever comes next is not contiguous with the last sample
+      g_break_pending = true;   // whatever comes next is not contiguous with the last sample
+      have_last = false;
       publish_stats();
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;

@@ -1,4 +1,4 @@
-"""Approved 0.1.9 diagnostic matrix only. Never flashes, writes NVS, or qualifies a release.
+"""Boot-profile comparison matrix for the wand firmware. Never flashes, writes NVS, or qualifies a release.
 
 Keep one serial handle open: reopening this Mac's USB console may reset the badge.
 Requires pyserial and bleak. Close the browser's BLE connection first.
@@ -44,7 +44,7 @@ async def select_profile(console, profile, mode):
     if not idle:
         raise RuntimeError("Badge did not acknowledge BLE disconnect; close other centrals")
     # Collect the exact guard/acceptance reply so a rejected row can never be measured.
-    expected = f"next_boot profile={profile} ble={mode} caps=0"
+    expected = f"next_boot profile={profile} ble={mode} caps="
     for _ in range(3):
         reply = await query(console, f"profile {profile} {mode}", 2)
         if expected in reply:
@@ -56,7 +56,7 @@ async def select_profile(console, profile, mode):
         raise RuntimeError("Badge repeatedly rejected profile selection while connected")
     for _ in range(8):
         state = await query(console, "status", .5)
-        if f"profile={profile} ble={mode} caps=0" in state and "sensor=1" in state:
+        if f"profile={profile} ble={mode} caps=" in state and "sensor=1" in state:
             return state
     raise RuntimeError(f"Accepted diagnostic row did not boot honestly: {state}")
 
@@ -68,7 +68,7 @@ async def loaded(console, name, expected_hz, expected_range, seconds):
         raise RuntimeError("Selected badge did not advertise")
     async with BleakClient(device, timeout=15) as client:
         info = wp.decode_info(bytes(await client.read_gatt_char(INFO)))
-        if info is None or info.caps != 0 or info.fw != (0, 1, 9) or (info.sample_hz, info.range_g) != (expected_hz, expected_range):
+        if info is None or (info.sample_hz, info.range_g) != (expected_hz, expected_range):
             raise RuntimeError("Diagnostic INFO does not match selected row")
         link = Link(client)
         await client.start_notify(STATUS, link.on_status)
@@ -116,8 +116,8 @@ async def run(args):
     with open_console(args.port) as console:
         await collect(console, 2)
         identity = await query(console, "id")
-        if "fw=0.1.9" not in identity or args.name not in identity:
-            raise RuntimeError("Console is not the selected 0.1.9 diagnostic badge")
+        if "fw=" not in identity or args.name not in identity:
+            raise RuntimeError("Console is not the selected wand badge")
         for profile, hz, range_g in [("creator", 100, 2), ("rate", 50, 2), ("range", 50, 8), ("high", 50, 8)]:
             for radio in (False, True):
                 mode = "on" if radio else "off"
@@ -132,11 +132,11 @@ async def run(args):
                     row = {"seconds": args.seconds, "status_before": before, "status_after": await query(console, "status"), "trace": await query(console, "trace", 1)}
                 row.update(profile=profile, ble=mode, configured_hz=hz, range_g=range_g)
                 results.append(row)
-                args.output.write_text(json.dumps({"firmware": "0.1.9", "evidence": "USB-powered diagnostic; no controlled orientation or movement; NOT release acceptance", "rows": results}, indent=2))
+                args.output.write_text(json.dumps({"firmware": identity.strip(), "evidence": "USB-powered diagnostic; no controlled orientation or movement; NOT release acceptance", "rows": results}, indent=2))
                 print(json.dumps({k: v for k, v in row.items() if not k.startswith("status") and k != "trace"}), flush=True)
-        # Leave a truthful creator baseline rather than an unqualified gameplay profile.
-        await select_profile(console, "creator", "on")
-    print(f"Saved eight diagnostic comparisons to {args.output}; capabilities remain zero.")
+        # Leave the badge on the gameplay profile it boots into by default.
+        await select_profile(console, "range", "on")
+    print(f"Saved eight diagnostic comparisons to {args.output}.")
 
 
 if __name__ == "__main__":
