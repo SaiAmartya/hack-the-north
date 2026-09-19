@@ -1,0 +1,266 @@
+:root {
+  --bg: #0a0c12;
+  --panel: rgba(16, 20, 30, 0.86);
+  --border: #2a3245;
+  --text: #eef2ff;
+  --muted: #8d99b8;
+  --p1: #ff4d4d;
+  --p2: #4d9dff;
+  --ok: #52e39b;
+  --warn: #ffc555;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.topbar .title {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.topbar .spacer {
+  flex: 1;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot.ok {
+  background: var(--ok);
+}
+
+.dot.warn {
+  background: var(--warn);
+}
+
+.dot.bad {
+  background: var(--p1);
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: #05070b;
+}
+
+.stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 28px 44px;
+  text-align: center;
+  backdrop-filter: blur(8px);
+}
+
+.panel h1 {
+  margin: 0 0 6px;
+  font-size: 46px;
+  letter-spacing: 0.04em;
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 26px;
+}
+
+.panel p {
+  margin: 4px 0;
+  color: var(--muted);
+}
+
+.countdown {
+  font-size: 140px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.winner {
+  font-size: 92px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.ready-row {
+  display: flex;
+  gap: 26px;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.ready-chip {
+  padding: 8px 18px;
+  border-radius: 12px;
+  border: 2px solid var(--border);
+  font-weight: 700;
+}
+
+.ready-chip.on {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.banner {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  max-width: 78%;
+}
+
+.banner .modifier {
+  padding: 7px 20px;
+  border-radius: 999px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 15px;
+  border: 1px solid currentColor;
+  background: rgba(10, 12, 18, 0.82);
+}
+
+.banner .commentary {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 9px 16px;
+  font-size: 17px;
+  text-align: center;
+}
+
+.banner .commentary .label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.hud {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.hud .side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hud .side.right {
+  align-items: flex-end;
+}
+
+.hud .name {
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: 0.06em;
+}
+
+.hud .numbers {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.hud .bar {
+  width: 320px;
+  height: 12px;
+  border-radius: 999px;
+  background: #1a2032;
+  overflow: hidden;
+}
+
+.hud .bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 120ms linear;
+}
+
+.hud .bar.mana > span {
+  background: #6f8cff;
+}
+
+.hud .middle {
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.hud .shield {
+  color: #6ee7ff;
+  font-weight: 700;
+  font-size: 13px;
+}
