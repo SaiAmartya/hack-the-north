@@ -13,6 +13,7 @@ uint32_t g_next_screen = 0, g_cue_until = 0;
 char g_cue_text[24] = "";
 uint16_t g_cue_color = 0xFFFF;
 bool g_ok = true;
+bool g_redraw = false;
 
 const char *spell_name(uint8_t s) {
   switch (s) {
@@ -36,7 +37,10 @@ bool healthy() { return g_ok; }
 void link_changed() {
   g_cue_text[0] = 0;
   g_cue_until = 0;
-  display::force_redraw();
+  leds::clear_cue();
+  leds::set_shield(false);
+  g_next_screen = millis();
+  g_redraw = true;
 }
 
 void play_cue(const proto::Cue &c, uint8_t phase) {
@@ -64,18 +68,21 @@ void play_cue(const proto::Cue &c, uint8_t phase) {
   leds::cue(c.effect, c.spell, c.duration_ms, phase);
 }
 
-void tick(const proto::Session &s, uint32_t now_ms, bool connected, bool streaming, uint32_t rate_hz, uint32_t dropped) {
+void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool connected, bool streaming, uint32_t rate_hz, uint32_t dropped) {
   const wand::Stats &w = wand::stats();
-  const proto::DisplayState &st = s.state();
   leds::set_base(!w.sensor_ok ? leds::Base::Error : connected ? leds::Base::Connected : leds::Base::Advertising);
   leds::set_activity(w.activity);
   leds::set_shield(st.valid && (st.status & proto::ST_SHIELD));
-  leds::set_stale(connected && s.state_stale());
+  leds::set_stale(connected && stale);
   leds::tick();
 
-  if (now_ms < g_next_screen) return;
+  if ((int32_t)(now_ms - g_next_screen) < 0) return;
   g_next_screen = now_ms + SCREEN_REFRESH_MS;
-  if ((int32_t)(now_ms - g_cue_until) > 0) g_cue_text[0] = 0;
+  if ((int32_t)(now_ms - g_cue_until) >= 0) g_cue_text[0] = 0;
+  if (g_redraw) {
+    g_redraw = false;
+    display::force_redraw();
+  }
 
   char foot[64];
   snprintf(foot, sizeof(foot), "fw %s  %s  %lu Hz  drop %lu  %s", FW_VERSION_STR, ble::name(), (unsigned long)rate_hz, (unsigned long)dropped,
@@ -85,7 +92,7 @@ void tick(const proto::Session &s, uint32_t now_ms, bool connected, bool streami
   v.link = streaming ? "streaming" : connected ? "connected" : "advertising";
   v.sensor_ok = w.sensor_ok;
   v.state_valid = st.valid;
-  v.stale = s.state_stale();
+  v.stale = stale;
   v.phase = st.phase;
   v.hp = st.hp;
   v.status = st.status;

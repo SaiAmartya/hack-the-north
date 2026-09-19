@@ -26,8 +26,8 @@ async function openLab(page: Page) {
     });
   });
 
-  await page.goto("/");
-  await expect(page).toHaveTitle("Wand Duel | Practice Lab");
+  await page.goto("/__qa/device-lab");
+  await expect(page).toHaveTitle("Wandduel");
   await expect(
     page.getByRole("heading", {
       level: 1,

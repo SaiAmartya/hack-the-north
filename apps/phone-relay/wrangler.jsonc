@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wandduel-phone",
+  "account_id": "a692c9c2b82d15e9fc3c7bba88240b8b",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "none"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "PairRoom"
+      }
+    ]
+  },
+  "exports": {
+    "PairRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "v": 1,
+  "type": "welcome",
+  "slot": "P1",
+  "roomId": "main",
+  "connectionGeneration": 1,
+  "rules": {
+    "version": 1,
+    "tickMs": 50,
+    "countdownMs": 3000,
+    "roundMs": 60000,
+    "heartbeatMs": 500,
+    "heartbeatTimeoutMs": 1500,
+    "maxHp": 100,
+    "offensiveRecoveryMs": 600,
+    "spells": [
+      {
+        "spell": "stupefy",
+        "enabled": true,
+        "damage": 20,
+        "cooldownMs": 2000,
+        "flightMs": 2000,
+        "shieldMs": 0,
+        "offenseLockMs": 0
+      },
+      {
+        "spell": "protego",
+        "enabled": true,
+        "damage": 0,
+        "cooldownMs": 3000,
+        "flightMs": 0,
+        "shieldMs": 1200,
+        "offenseLockMs": 0
+      },
+      {
+        "spell": "expelliarmus",
+        "enabled": false,
+        "damage": 10,
+        "cooldownMs": 6000,
+        "flightMs": 2200,
+        "shieldMs": 0,
+        "offenseLockMs": 1000
+      }
+    ]
+  },
+  "snapshot": {
+    "roomId": "main",
+    "roomGeneration": 2,
+    "roundId": 0,
+    "stateVersion": 3,
+    "serverNowMs": 42,
+    "phase": "lobby",
+    "countdownEndsAtMs": 0,
+    "roundEndsAtMs": 0,
+    "result": null,
+    "players": {
+      "P1": {
+        "slot": "P1",
+        "name": "Harry",
+        "source": "ble",
+        "connected": true,
+        "ready": false,
+        "inputHealthy": false,
+        "inputGeneration": null,
+        "deviceId": null,
+        "bootId": null,
+        "hp": 100,
+        "maxHp": 100,
+        "shieldUntilMs": 0,
+        "offenseLockedUntilMs": 0,
+        "offensiveRecoveryUntilMs": 0,
+        "cooldownUntilMs": {
+          "stupefy": 0,
+          "protego": 0,
+          "expelliarmus": 0
+        }
+      },
+      "P2": null
+    },
+    "projectiles": [],
+    "recentEvents": [
+      {
+        "id": "g2:r0:e1",
+        "type": "playerJoined",
+        "atMs": 42,
+        "roundId": 0,
+        "stateVersion": 3,
+        "actor": "P1",
+        "target": null,
+        "spell": null,
+        "actionId": null,
+        "projectileId": null,
+        "effectId": null,
+        "amount": null,
+        "reason": null
+      }
+    ]
+  }
+}

@@ -26,7 +26,7 @@ export interface BluetoothAccess {
 }
 
 export interface WandTransport {
-  readonly source: "REPLAY" | "REAL BLE";
+  readonly source: "REPLAY" | "REAL BLE" | "PHONE";
   connect(onDisconnect: () => void): Promise<void>;
   readInfo(): Promise<Uint8Array>;
   readStatus(): Promise<Uint8Array>;

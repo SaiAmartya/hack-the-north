@@ -1,0 +1,332 @@
+"""Start the isolated game stack. No installs, downloads, trust changes or flashing."""
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import urlsplit
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+FRONTEND_PORT = 5173
+REFEREE_PORT = 8000
+SPEECH_PORT = 8001
+STARTUP_TIMEOUT_SECONDS = 60.0
+HEALTH_REQUEST_TIMEOUT_SECONDS = 1.0
+MAX_HEALTH_BYTES = 64 * 1024
+
+
+class StartupError(RuntimeError):
+    pass
+
+
+def _required_listeners(
+    frontend_host: str, local_referee_host: str | None
+) -> list[tuple[str, str, int]]:
+    listeners = [
+        ("frontend", frontend_host, FRONTEND_PORT),
+        ("speech helper", "127.0.0.1", SPEECH_PORT),
+    ]
+    if local_referee_host is not None:
+        listeners.append(("referee", local_referee_host, REFEREE_PORT))
+    return listeners
+
+
+def _preflight_ports(listeners: list[tuple[str, str, int]]) -> None:
+    for label, host, port in listeners:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    probe.setsockopt(
+                        socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1
+                    )
+                else:
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind((host, port))
+                probe.listen(1)
+        except OSError:
+            raise StartupError(
+                f"{label} cannot use {host}:{port}; the port is occupied "
+                "or the selected address is unavailable. Stop the owning process "
+                "or choose the correct interface, then retry."
+            ) from None
+
+
+def _frontend_ssl_context(certificate: Path) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    try:
+        context.load_verify_locations(cafile=str(certificate))
+    except (OSError, ssl.SSLError):
+        raise StartupError(
+            "the selected TLS certificate could not be loaded as the frontend "
+            "trust anchor"
+        ) from None
+    if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    return context
+
+
+def _request_health(
+    url: str,
+    headers: dict[str, str] | None = None,
+    ssl_context: ssl.SSLContext | None = None,
+) -> dict[str, object]:
+    request = Request(url, headers=headers or {})
+    opener = build_opener(
+        ProxyHandler({}),
+        _NoRedirects(),
+        HTTPSHandler(context=ssl_context),
+    )
+    try:
+        with opener.open(request, timeout=HEALTH_REQUEST_TIMEOUT_SECONDS) as response:
+            if response.status != 200:
+                raise StartupError(f"health endpoint returned HTTP {response.status}")
+            body = response.read(MAX_HEALTH_BYTES + 1)
+    except StartupError:
+        raise
+    except Exception as error:
+        tls_error = error if isinstance(error, ssl.SSLCertVerificationError) else getattr(error, "reason", None)
+        if isinstance(tls_error, ssl.SSLCertVerificationError):
+            raise StartupError(
+                "frontend TLS trust or hostname verification failed for the "
+                "selected certificate"
+            ) from None
+        raise StartupError("health endpoint is unreachable") from None
+    if len(body) > MAX_HEALTH_BYTES:
+        raise StartupError("health response exceeded the size limit")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise StartupError("health endpoint returned invalid JSON") from None
+    if not isinstance(payload, dict):
+        raise StartupError("health endpoint returned an invalid payload")
+    return payload
+
+
+class _NoRedirects(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def _readiness_issues(
+    frontend_health_url: str,
+    referee_health_url: str,
+    speech_secret: str,
+    frontend_ssl_context: ssl.SSLContext | None = None,
+) -> list[str]:
+    issues: list[str] = []
+    for label, url in (
+        ("frontend", frontend_health_url),
+        ("referee", referee_health_url),
+    ):
+        try:
+            payload = _request_health(
+                url,
+                ssl_context=frontend_ssl_context if label == "frontend" else None,
+            )
+            if not (
+                payload.get("version") == 1
+                and payload.get("stage") == "game"
+                and payload.get("multiplayerReady") is True
+            ):
+                raise StartupError("health endpoint reported the wrong service")
+        except StartupError as error:
+            issues.append(f"{label}: {error}")
+    try:
+        speech = _request_health(
+            f"http://127.0.0.1:{SPEECH_PORT}/health",
+            {"x-wand-speech-secret": speech_secret},
+        )
+        if not all(
+            speech.get(field) is True
+            for field in ("ready", "warm", "workerAvailable")
+        ):
+            raise StartupError("health endpoint reported speech is not warm and ready")
+    except StartupError as error:
+        issues.append(f"speech helper: {error}")
+    return issues
+
+
+def _wait_for_readiness(
+    processes: list[tuple[str, subprocess.Popen]],
+    frontend_health_url: str,
+    referee_health_url: str,
+    speech_secret: str,
+    frontend_ssl_context: ssl.SSLContext | None = None,
+) -> None:
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+    issues = ["startup checks have not completed"]
+    while time.monotonic() < deadline:
+        for label, process in processes:
+            return_code = process.poll()
+            if return_code is not None:
+                raise StartupError(
+                    f"{label} exited before readiness (code {return_code})"
+                )
+        issues = _readiness_issues(
+            frontend_health_url,
+            referee_health_url,
+            speech_secret,
+            frontend_ssl_context,
+        )
+        if not issues:
+            for label, process in processes:
+                return_code = process.poll()
+                if return_code is not None:
+                    raise StartupError(
+                        f"{label} exited during readiness (code {return_code})"
+                    )
+            return
+        time.sleep(0.25)
+    raise StartupError(
+        f"readiness timed out after {STARTUP_TIMEOUT_SECONDS:.0f}s: "
+        + "; ".join(issues)
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phone-host", help="Approved private laptop IP; requires trusted TLS cert/key")
+    parser.add_argument("--cert", type=Path)
+    parser.add_argument("--key", type=Path)
+    parser.add_argument("--referee", help="Laptop A's explicitly approved http://PRIVATE_IP:8000")
+    parser.add_argument("--referee-bind", help="Explicitly expose only the referee on this private IP; frontend stays localhost")
+    parser.add_argument("--serve-referee", action="store_true", help="Explicitly expose referee on --phone-host for a second laptop")
+    parser.add_argument("--allow-origin", action="append", default=[], help="Exact second laptop HTTPS origin; no wildcard")
+    parser.add_argument("--qa", action="store_true", help="Enable script-only replay harness (not the player UI)")
+    parser.add_argument("--badge-only", action="store_true", help="Reject phone/replay input for real-badge qualification")
+    parser.add_argument("--speech-model", type=Path, help="Previously downloaded local faster-whisper model directory")
+    parser.add_argument("--phone-service", help="Approved public HTTPS phone-only service origin")
+    parser.add_argument("--phone-secret-file", type=Path, help="Private enrollment secret outside the repository")
+    parser.add_argument("--dev", action="store_true", help="Opt into hot reload; default is a stable build for human QA")
+    args = parser.parse_args()
+    phone_secret = None
+    if bool(args.phone_service) != bool(args.phone_secret_file):
+        parser.error("Hosted phone needs --phone-service and --phone-secret-file")
+    if args.phone_service:
+        service = urlsplit(args.phone_service)
+        if service.scheme != "https" or not service.hostname or service.username or service.password or service.port or service.path not in ("", "/") or service.query or service.fragment:
+            parser.error("Select one public HTTPS phone service origin, without a path or credentials")
+        secret_path = args.phone_secret_file.resolve()
+        if secret_path.is_relative_to(ROOT) or not secret_path.is_file() or secret_path.stat().st_size > 256:
+            parser.error("Keep the enrollment secret in a small private file outside the repository")
+        if os.name != "nt" and secret_path.stat().st_mode & 0o077:
+            parser.error("Enrollment secret file must be private to your user (mode 0600)")
+        phone_secret = secret_path.read_text().strip()
+        if len(phone_secret) != 64 or any(c not in "0123456789abcdef" for c in phone_secret):
+            parser.error("Enrollment secret must be 32 random bytes encoded as lowercase hex")
+        if args.badge_only: parser.error("Badge-only qualification cannot enable hosted phone")
+    if bool(args.cert) != bool(args.key): parser.error("Both --cert and --key are required")
+    if args.phone_host:
+        address = ipaddress.ip_address(args.phone_host)
+        if not address.is_private or address.is_loopback or address.is_unspecified or address.version != 4: parser.error("Select one private IPv4 interface")
+        if not args.cert or not args.key: parser.error("LAN access requires separately approved trusted TLS setup")
+    elif args.serve_referee: parser.error("--serve-referee requires --phone-host")
+    if args.referee and args.serve_referee: parser.error("Choose host or remote referee, not both")
+    if args.referee_bind:
+        address = ipaddress.ip_address(args.referee_bind)
+        if not address.is_private or address.is_loopback or address.is_unspecified or address.version != 4: parser.error("Select one private IPv4 referee interface")
+        if args.referee or args.serve_referee: parser.error("Choose exactly one referee mode")
+    for origin in args.allow_origin:
+        if not origin.startswith("https://") or "*" in origin or not origin.endswith(":5173"): parser.error("Use exact HTTPS origins on port 5173")
+    python = ROOT / "apps/host/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not python.exists() or not npm: parser.error("Install the documented Python 3.11 environment and web dependencies first")
+    env = os.environ.copy()
+    for name in ("WAND_HOST", "WAND_FRONTEND_HOST", "WAND_REFEREE_URL", "WAND_TLS_CERT", "WAND_TLS_KEY", "WAND_ALLOWED_ORIGINS", "WAND_ALLOW_REPLAY", "WAND_DEV_RELAY", "WAND_ENABLE_EXPELLIARMUS", "WAND_SPEECH_SECRET", "WAND_SPEECH_MODEL_DIR", "VITE_WAND_QA", "WAND_PHONE_SERVICE", "WAND_PHONE_CREATE_SECRET", "WAND_QA_PORTS", "WAND_GAME_BUILD_DIR"):
+        env.pop(name, None)
+    env["WAND_SPEECH_SECRET"] = secrets.token_urlsafe(32)
+    env["WAND_FRONTEND_HOST"] = args.phone_host or "127.0.0.1"
+    env["WAND_ALLOW_REPLAY"] = "true" if args.qa else "false"
+    env["WAND_DEV_RELAY"] = "false" if args.badge_only else "true"
+    if args.badge_only: env["WAND_ALLOW_REPLAY"] = "false"
+    origin = f"{'https' if args.cert else 'http'}://{env['WAND_FRONTEND_HOST']}:5173"
+    env["WAND_ALLOWED_ORIGINS"] = ",".join([origin, *args.allow_origin])
+    if args.cert and args.key:
+        env["WAND_TLS_CERT"] = str(args.cert.resolve())
+        env["WAND_TLS_KEY"] = str(args.key.resolve())
+    if args.serve_referee: env["WAND_HOST"] = args.phone_host
+    if args.referee_bind:
+        env["WAND_HOST"] = args.referee_bind
+        env["WAND_REFEREE_URL"] = f"http://{args.referee_bind}:8000"
+    if args.referee: env["WAND_REFEREE_URL"] = args.referee
+    if args.qa: env["VITE_WAND_QA"] = "1"
+    model = args.speech_model or Path.home()/".cache/wand-speech/faster-whisper-base.en"
+    env["WAND_SPEECH_MODEL_DIR"] = str(model.resolve())
+    local_referee_host = None if args.referee else env.get("WAND_HOST", "127.0.0.1")
+    referee_url = (args.referee or f"http://{local_referee_host}:{REFEREE_PORT}").rstrip("/")
+    try:
+        frontend_ssl_context = (
+            _frontend_ssl_context(args.cert.resolve()) if args.cert else None
+        )
+    except StartupError as error:
+        print(f"Startup blocked: {error}", file=sys.stderr, flush=True)
+        return 1
+    try:
+        _preflight_ports(
+            _required_listeners(env["WAND_FRONTEND_HOST"], local_referee_host)
+        )
+    except StartupError as error:
+        print(f"Startup blocked: {error}", file=sys.stderr, flush=True)
+        return 1
+    frontend_env = env.copy()
+    if phone_secret:
+        frontend_env["WAND_PHONE_SERVICE"] = args.phone_service.rstrip("/")
+        frontend_env["WAND_PHONE_CREATE_SECRET"] = phone_secret
+    processes: list[tuple[str, subprocess.Popen]] = []
+    snapshot = None
+    try:
+        if not args.dev:
+            snapshot = tempfile.TemporaryDirectory(prefix="wandduel-game-")
+            frontend_env["WAND_GAME_BUILD_DIR"] = snapshot.name
+            result = subprocess.run([npm, "run", "build"], cwd=ROOT/"apps/web", env=frontend_env)
+            if result.returncode: return result.returncode
+        if not args.referee:
+            processes.append(("referee", subprocess.Popen([str(python), "-m", "phantom_host.duel_app"], cwd=ROOT/"apps/host", env=env)))
+        processes.append(("speech helper", subprocess.Popen([str(python), "-m", "phantom_host.speech_app"], cwd=ROOT/"apps/host", env=env)))
+        processes.append(("frontend", subprocess.Popen([npm, "run", "dev" if args.dev else "preview"], cwd=ROOT/"apps/web", env=frontend_env)))
+        _wait_for_readiness(
+            processes,
+            f"{origin}/api/game/health",
+            f"{referee_url}/api/game/health",
+            env["WAND_SPEECH_SECRET"],
+            frontend_ssl_context,
+        )
+        print(f"Game ready: {origin}", flush=True)
+        print("Hot reload enabled." if args.dev else "Stable QA build; source edits and automated tests do not replace this session.", flush=True)
+        print("Ctrl+C stops this stack. No device or certificate settings were changed.", flush=True)
+        while all(process.poll() is None for _, process in processes): time.sleep(0.25)
+        return 1
+    except KeyboardInterrupt:
+        return 0
+    except StartupError as error:
+        print(f"Startup failed: {error}", file=sys.stderr, flush=True)
+        return 1
+    finally:
+        for _, process in reversed(processes):
+            if process.poll() is None: process.terminate()
+        for _, process in processes:
+            try: process.wait(timeout=5)
+            except subprocess.TimeoutExpired: process.kill(); process.wait()
+        if snapshot: snapshot.cleanup()
+
+if __name__ == "__main__":
+    sys.exit(main())

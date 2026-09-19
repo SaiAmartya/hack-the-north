@@ -9,19 +9,22 @@
 #include "wand.h"
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <soc/rtc_cntl_reg.h>
 #include <stdlib.h>
 #include <string.h>
 
 namespace console {
 namespace {
-Settings g_settings = {1, true, {0, 1, 2}, {1, 1, 1}};
+Settings g_settings = default_settings();
 Preferences g_prefs;
 char g_line[96];
 size_t g_len = 0;
+bool g_overflow = false, g_echo = false;
+uint32_t g_next_echo = 0;
 
 void reply(const char *fmt, ...) {
-  char b[200];
+  char b[240];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(b, sizeof(b), fmt, ap);
@@ -38,7 +41,7 @@ void axes_text(char *out, size_t n) {
 }
 
 void help() {
-  Serial.println("HPOK|commands: help status id selftest axes [+x -y +z] btn rot <0-3> leds on|off echo on|off recal reboot flashmode");
+  Serial.println("HPOK|commands: help status trace id selftest axes [+x -y +z] btn rot <0-3> leds on|off echo on|off recal reboot flashmode");
 }
 
 bool parse_axis(const char *tok, int8_t &map, int8_t &sign) {
@@ -50,6 +53,7 @@ bool parse_axis(const char *tok, int8_t &map, int8_t &sign) {
   } else if (*tok == '+') {
     tok++;
   }
+  if (!*tok || tok[1]) return false;
   if (*tok == 'x' || *tok == 'X') map = 0;
   else if (*tok == 'y' || *tok == 'Y') map = 1;
   else if (*tok == 'z' || *tok == 'Z') map = 2;
@@ -69,11 +73,41 @@ void handle(char *line) {
     const wand::Stats &w = wand::stats();
     char ax[24];
     axes_text(ax, sizeof(ax));
-    reply("fw=%s name=%s connected=%d motion_sub=%d status_sub=%d sensor=%d i2c_recover=%lu seq=%u acquired=%lu notified=%lu dropped=%lu xyz=%d,%d,%d axes=%s heap=%lu",
+    reply("fw=%s name=%s connected=%d motion_sub=%d status_sub=%d sensor=%d cfg=%02X/%02X i2c_recover=%lu seq=%u acquired=%lu notified=%lu dropped=%lu xyz=%d,%d,%d axes=%s",
           FW_VERSION_STR, ble::name(), ble::connected() ? 1 : 0, ble::motion_subscribed() ? 1 : 0, ble::status_subscribed() ? 1 : 0, w.sensor_ok ? 1 : 0,
-          (unsigned long)accel::recoveries(), w.seq, (unsigned long)w.acquired, (unsigned long)w.notified, (unsigned long)w.dropped, w.x, w.y, w.z, ax,
-          (unsigned long)ESP.getFreeHeap());
+          accel::ctrl1(), accel::ctrl4(), (unsigned long)accel::recoveries(), w.seq, (unsigned long)w.acquired, (unsigned long)w.notified,
+          (unsigned long)w.dropped, w.x, w.y, w.z, ax);
+    reply("resources reset=%d heap_free=%lu heap_min=%lu heap_largest=%lu acq_stack_hwm_bytes=%lu overrun_events=%lu notify_failures=%lu",
+          (int)esp_reset_reason(), (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
+          (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)wand::stack_headroom(), (unsigned long)w.overruns,
+          (unsigned long)ble::notification_failures());
+    const accel::Diagnostics d = accel::diagnostics();
+    reply("sensor ctrl0=%02X ctrl2=%02X ctrl3=%02X ctrl5=%02X ctrl6=%02X fifo_ctrl=%02X revision=%02X status_before=%02X status_after=%02X overrun_cleared=%lu overrun_still_set=%lu",
+          d.ctrl0, d.ctrl2, d.ctrl3, d.ctrl5, d.ctrl6, d.fifo_ctrl, d.revision, d.status_before, d.status_after,
+          (unsigned long)d.overrun_cleared, (unsigned long)d.overrun_still_set);
+    reply("cadence diagnostic=%d configured_hz=%d tick_hz=%d status_polls=%lu not_ready=%lu fresh_reads=%lu ready_span_us=%llu",
+          DIAGNOSTIC_SENSOR_CADENCE, SAMPLE_HZ, configTICK_RATE_HZ, (unsigned long)d.status_polls,
+          (unsigned long)d.not_ready_polls, (unsigned long)d.fresh_reads, (unsigned long long)d.ready_interval_sum_us);
+    reply("cadence ready_us_last_min_max=%lu,%lu,%lu after_read_us_last_min_max=%lu,%lu,%lu",
+          (unsigned long)d.ready_interval_us, (unsigned long)d.min_ready_interval_us, (unsigned long)d.max_ready_interval_us,
+          (unsigned long)d.ready_after_read_us, (unsigned long)d.min_ready_after_read_us, (unsigned long)d.max_ready_after_read_us);
+    reply("cadence interval_bins_lt_5_12_17_23_40_ge40ms=%lu,%lu,%lu,%lu,%lu,%lu",
+          (unsigned long)d.interval_bins[0], (unsigned long)d.interval_bins[1], (unsigned long)d.interval_bins[2],
+          (unsigned long)d.interval_bins[3], (unsigned long)d.interval_bins[4], (unsigned long)d.interval_bins[5]);
+    reply("sensor_reset readback_ok=%d ctrl0_1_4=%02X/%02X/%02X trace_count=%u",
+          d.reset_readback_ok ? 1 : 0, d.reset_ctrl0, d.reset_ctrl1, d.reset_ctrl4, d.trace_count);
+  } else if (!strcmp(cmd, "trace")) {
+    for (uint8_t i = 0; i < accel::TRACE_CAPACITY; ++i) {
+      accel::ReadyTrace t{};
+      if (!accel::ready_trace(i, t)) break;
+      reply("trace n=%u have_zero=%u zero_us=%lu zero_st=%02X ready_us=%lu before=%02X burst_start_us=%lu burst_end_us=%lu after_us=%lu after=%02X",
+            i + 1, t.have_not_ready ? 1 : 0, (unsigned long)t.last_not_ready_us, t.last_not_ready_status,
+            (unsigned long)t.ready_us, t.before, (unsigned long)t.burst_start_us, (unsigned long)t.burst_end_us,
+            (unsigned long)t.after_status_us, t.after);
+    }
+    reply("trace end");
   } else if (!strcmp(cmd, "selftest")) {
+    if (ble::connected()) { reply("disconnect BLE before selftest"); return; }
     const int fails = proto::selftest(log_line);
     reply("selftest failures=%d", fails);
   } else if (!strcmp(cmd, "axes")) {
@@ -81,14 +115,16 @@ void handle(char *line) {
       int8_t map[3], sign[3];
       char *a2 = strtok(nullptr, " \t");
       char *a3 = strtok(nullptr, " \t");
-      if (!parse_axis(arg, map[0], sign[0]) || !parse_axis(a2, map[1], sign[1]) || !parse_axis(a3, map[2], sign[2])) {
+      if (!parse_axis(arg, map[0], sign[0]) || !parse_axis(a2, map[1], sign[1]) || !parse_axis(a3, map[2], sign[2]) ||
+          map[0] == map[1] || map[0] == map[2] || map[1] == map[2]) {
         Serial.println("HPERR|usage: axes +x -y +z   (contract X Y Z in terms of chip axes)");
         return;
       }
       memcpy(g_settings.axis_map, map, 3);
       memcpy(g_settings.axis_sign, sign, 3);
-      wand::set_axes(map, sign);
       save_settings();
+      reply("axes saved; reboot required to apply with a new boot identity");
+      return;
     }
     char ax[24];
     axes_text(ax, sizeof(ax));
@@ -105,8 +141,8 @@ void handle(char *line) {
     save_settings();
     reply("leds=%d", g_settings.leds ? 1 : 0);
   } else if (!strcmp(cmd, "echo") && arg) {
-    wand::set_echo(!strcmp(arg, "on"));
-    reply("echo=%s", arg);
+    g_echo = !strcmp(arg, "on");
+    reply("echo=%s (5 Hz snapshots, not raw acquisition)", arg);
   } else if (!strcmp(cmd, "btn")) {
     // Button read-out over USB (guide section 9): raw HC165 byte plus the names currently held.
     static const char *names[btn::COUNT] = {"UP", "DOWN", "LEFT", "RIGHT", "A", "B", "HOME", "AUX1", "START"};
@@ -140,7 +176,7 @@ void handle(char *line) {
 
 void load_settings() {
   g_prefs.begin("hpwand", true);
-  g_settings.rot = g_prefs.getUChar("rot", 1);
+  g_settings.rot = g_prefs.getUChar("rot", kDefaultDisplayRotation);
   g_settings.leds = g_prefs.getBool("leds", true);
   const int8_t dmap[3] = {0, 1, 2}, dsign[3] = {1, 1, 1};
   if (g_prefs.getBytesLength("amap") != 3 || g_prefs.getBytes("amap", g_settings.axis_map, 3) != 3) memcpy(g_settings.axis_map, dmap, 3);
@@ -150,6 +186,8 @@ void load_settings() {
     if (g_settings.axis_map[i] < 0 || g_settings.axis_map[i] > 2) g_settings.axis_map[i] = (int8_t)i;
     g_settings.axis_sign[i] = (int8_t)(g_settings.axis_sign[i] < 0 ? -1 : 1);
   }
+  if (g_settings.axis_map[0] == g_settings.axis_map[1] || g_settings.axis_map[0] == g_settings.axis_map[2] ||
+      g_settings.axis_map[1] == g_settings.axis_map[2]) memcpy(g_settings.axis_map, dmap, 3);
 }
 
 void save_settings() {
@@ -165,6 +203,7 @@ Settings &settings() { return g_settings; }
 void begin() { g_len = 0; }
 
 void hello() {
+  if (!Serial) return;
   char ax[24];
   axes_text(ax, sizeof(ax));
   Serial.printf("HPHELLO|fw=%s|name=%s|boot=%08lX|hz=%d|range=%d|axes=%s|sensor=%d\n", FW_VERSION_STR, ble::name(), (unsigned long)wand::stats().boot_id,
@@ -172,18 +211,25 @@ void hello() {
 }
 
 void tick() {
-  while (Serial.available() > 0) {
+  if (!Serial) { g_echo = false; return; }
+  if (g_echo && (int32_t)(millis() - g_next_echo) >= 0 && Serial.availableForWrite() >= 80) {
+    g_next_echo = millis() + 200;
+    const wand::Stats w = wand::stats();
+    Serial.printf("HPM|%u|%d|%d|%d|%s\n", w.seq, w.x, w.y, w.z, w.valid ? "snapshot" : "invalid");
+  }
+  for (int budget = 0; budget < 128 && Serial.available() > 0; ++budget) {
     const int c = Serial.read();
     if (c < 0) break;
     // The badge console convention is a bare '\r' line ending; terminals send '\n' or "\r\n".
     if (c == '\n' || c == '\r') {
       g_line[g_len] = 0;
-      if (g_len > 0) handle(g_line);
+      if (g_len > 0 && !g_overflow) handle(g_line);
       g_len = 0;
+      g_overflow = false;
       continue;
     }
     if (g_len < sizeof(g_line) - 1) g_line[g_len++] = (char)c;
-    else g_len = 0;
+    else g_overflow = true;
   }
 }
 }  // namespace console

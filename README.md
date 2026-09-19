@@ -1,48 +1,108 @@
-# Wand Duel — iPhone-first build
+# Wandduel — badge or iPhone + local voice
 
-The current build is **Device Lab, Stages 0–1**: an isolated browser entry point,
-the exact badge protocol, a raw-motion replay endpoint, feedback previews and
-connection/fault diagnostics. It does **not** yet recognize spells, use an iPhone,
-capture audio/video or run multiplayer. Legacy files remain below for reference;
-their gateway, Lua, button and OpenAI instructions do not apply to the new build.
+The player app is a minimal wand setup, calibration/practice and two-player duel.
+Stupefy and Protego use real badge or iPhone acceleration plus speech recognized entirely on each
+laptop. Python owns combat; video is peer-to-peer and video-only; Three.js draws the spells.
+No player-facing simulated wand, diagnostic dashboard, casting buttons or cloud ASR.
+
+Firmware source now matches teammate main `6a50929` exactly. Sai requested discarding
+the local 0.1.1/0.1.2 firmware fixes; they are not part of the current firmware tree.
+Matching protocol bytes are not proof that your badge is flashed or physically qualified.
+See [the latest firmware review](docs/qa/firmware-main-6a50929.md) and
+[current platform status](docs/qa/game-platform.md) for the measured/tested boundaries.
 
 - [Approved implementation plan](IMPLEMENTATION-PLAN.md)
-- [Current checkpoint and your QA card](docs/qa/device-lab-stage-1.md)
+- [Current platform checkpoint and QA](docs/qa/game-platform.md)
 - [MVP](MVP-OUTLINE.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
 - [Design system — Wizarding Workshop](DESIGN_SYSTEMS.md)
 - [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
 
-## Run the current checkpoint
+## Run
 
-From the repository root, using Node 26.5.0:
+After the Python 3.11 environment, web dependencies and local model exist,
+run from the repository root (Node 26.5.0 on PATH):
 
 ```sh
-cd apps/web
-npm ci
-npm run dev
+python3 tools/run_game.py
 ```
 
-Open **http://127.0.0.1:5173** in desktop Chrome. Replay works without the host,
-badge, microphone, camera, API key or internet. Choose **Virtual wand · raw replay**
-and connect. Do not select a real badge for this QA card.
+The default launcher builds the web app into a temporary snapshot and serves that
+snapshot with Vite preview, so source edits cannot change a running demo. Use
+`python3 tools/run_game.py --dev` only when explicit HMR is useful. On Windows use
+`py tools/run_game.py`. Open **http://127.0.0.1:5173** in Chrome.
+Connect the correct `WAND-xxxx`, enable the microphone, follow calibration, cast each
+spell once, enable the camera, then Ready. A second player joins the same referee.
+Ctrl+C stops the stack. No legacy workers, API key or specialized badge IDE is used.
+A phone is optional; badge play does not require it.
 
-Optional isolated host, in a separate terminal with Python 3.11:
+First-time dependencies (Windows Python executable: `.venv\Scripts\python.exe`):
 
 ```sh
 cd apps/host
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m phantom_host.duel_app
+.venv/bin/python -m pip install -e '.[dev,speech]'
+cd ../web
+npm ci
 ```
 
-The host binds only to `127.0.0.1:8000`; **Check isolated host** verifies it.
-It currently serves diagnostic health and rules, not combat. No legacy workers
-are started. Shut down each server with **Ctrl+C** in its terminal.
+The one-time, explicitly approved model download is separate:
 
-Both servers are loopback-only. iPhone HTTPS, certificates, LAN exposure and
-Windows qualification are later approval/testing gates, not setup prerequisites.
+```sh
+apps/host/.venv/bin/python tools/setup_speech.py --model-dir "$HOME/.cache/wand-speech/faster-whisper-base.en"
+```
 
-## Verify the current checkpoint
+This Mac's local model is already provisioned. Runtime uses only local files and in-memory audio.
+The launcher shares a fresh secret privately between the local proxy and speech helper; never
+put it in `.env`, browser code, URLs or logs.
+
+All services default to loopback. **After approval to expose the referee on the controlled LAN**:
+Laptop A runs `python3 tools/run_game.py --referee-bind <A-private-IP>`;
+laptop B runs `python3 tools/run_game.py --referee http://<A-private-IP>:8000`.
+Both players still open their own `http://127.0.0.1:5173`, and each speech helper stays local.
+No certificate installation is needed for this localhost badge workflow. Do not expose a public
+port or make blanket firewall exceptions. Windows/Bluetooth/network performance needs real QA.
+
+### iPhone control
+
+The iPhone supplies motion only; its laptop still captures speech and video. The approved
+hosted profile uses a dedicated phone-only HTTPS service, not a public game/dev server:
+
+```sh
+python3 tools/run_game.py --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file <private-enrollment-file>
+```
+
+Open `http://127.0.0.1:5173` on the laptop. Choose **Connect iPhone**, scan the QR with the
+iPhone camera, tap **Connect wand**, allow motion, and approve the matching number on the
+laptop. Keep Safari foregrounded, portrait and unlocked. No certificate installation is
+needed for this profile; internet access is required. Never place the enrollment secret in
+the repo, browser code, URLs or logs. Current deployment/QA evidence is in
+[the platform checkpoint](docs/qa/game-platform.md); physical iPhone, microphone and
+gameplay qualification remain pending.
+
+**Optional private-LAN profile:** requires separate approval for LAN exposure and certificate
+installation/trust. With an already trusted certificate for the selected laptop's private IP:
+
+```sh
+python3 tools/run_game.py --phone-host <laptop-private-IP> --cert <certificate-path> --key <private-key-path>
+```
+
+Open `https://<laptop-private-IP>:5173` on the laptop, choose **Connect iPhone**, then
+open `/phone` at that same origin in iPhone Safari. Enter the displayed pairing code
+and enable motion. Keep Safari foregrounded, portrait, and unlocked. No simulated
+wand is offered in the player interface. Private keys stay outside the repository.
+For two laptops, use the explicit referee profiles in [the QA guide](docs/qa/game-platform.md).
+
+## Scripted QA
+
+The game launcher announces **Game ready** only after the frontend, referee and
+warmed local speech helper pass health checks. Occupied ports stop startup without
+killing other processes; a partial stack is not reported ready.
+
+Run `python3 tools/qa_game.py` from the root, or the individual checks below.
+The browser suite starts isolated loopback servers on frontend port `15173` and referee
+port `18000`, so the live game on `5173`/`8000` can remain running. Test-only replay/fault
+routes are enabled only for that run; the normal player app and production bundle do not
+expose them.
 
 ```sh
 cd apps/web
@@ -53,24 +113,26 @@ npm exec playwright install chromium
 npm run test:e2e
 ```
 
-Stop an existing Vite server before the browser test; it owns port 5173 and refuses
-to reuse an unrelated server. First-time dependency/browser installation requires
-internet. Runtime replay does not.
+First-time dependency/browser installation requires internet. Runtime replay does not.
 
 ```sh
 cd apps/host
 .venv/bin/python -m pytest -q
 ```
 
-The host suite includes legacy regression tests; a pass does not establish a new
-duel or physical hardware result. See the checkpoint for the exact evidence.
+Tests include deterministic raw motion, fusion, real game sockets, combat timing, recovery,
+local speech boundaries and legacy regressions. They cannot prove acoustic accuracy, real
+badge axes/radio/feedback, Windows behavior or two-human defendability.
+The latest full browser run passed 21 tests, including real-Chrome startup-loss
+regressions and more than two seconds of production-path fake-microphone capture.
+These are automated capture checks, not evidence from a physical microphone.
 
 ---
 
 # Legacy Phantom Arena reference (superseded)
 
 **Historical only:** the following describes the old entry point and architecture.
-The default web entry point now opens Device Lab, so these instructions are not
+The default web entry point now opens Wandduel, so these instructions are not
 a runnable end-to-end workflow for the new game. Preserve for source archaeology;
 follow the implementation plan and current checkpoint above.
 

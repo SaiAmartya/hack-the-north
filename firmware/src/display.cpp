@@ -15,11 +15,17 @@ bool g_ok = false;
 int g_boot_y = 4;
 uint8_t g_rot = 1;
 
+// Text fields are rendered into a RAM canvas and pushed with one bulk SPI transfer. Printing
+// straight to the panel costs one address-window transaction per pixel (about 60 ms for a
+// size-1 footer line, more for size 3), which stalled the main loop and everything it services.
+constexpr int16_t FIELD_W = 300, FIELD_H_MAX = 24;  // widest field, tallest text (size 3)
+GFXcanvas16 *g_canvas = nullptr;
+
 struct Field {
   int16_t x, y;
   uint8_t size;
   uint16_t color;
-  int16_t w;
+  int16_t w;   // must equal FIELD_W: the canvas row stride is FIELD_W
   char last[44];
   uint16_t last_color;
   void draw(const char *text, uint16_t c = 0xFFFF, bool use_color = false) {
@@ -28,7 +34,18 @@ struct Field {
     strncpy(last, text, sizeof(last) - 1);
     last[sizeof(last) - 1] = 0;
     last_color = col;
-    tft.fillRect(x, y, w, 8 * size, BG);
+    const int16_t h = 8 * size;
+    if (g_canvas && w == FIELD_W && h <= FIELD_H_MAX) {
+      g_canvas->fillScreen(BG);
+      g_canvas->setTextWrap(false);
+      g_canvas->setTextSize(size);
+      g_canvas->setTextColor(col);
+      g_canvas->setCursor(0, 0);
+      g_canvas->print(text);
+      tft.drawRGBBitmap(x, y, g_canvas->getBuffer(), w, h);
+      return;
+    }
+    tft.fillRect(x, y, w, h, BG);
     tft.setTextSize(size);
     tft.setTextColor(col, BG);
     tft.setCursor(x, y);
@@ -92,6 +109,13 @@ bool begin(uint8_t rotation) {
   g_rot = rotation & 3;
   tft.setRotation(g_rot);
   tft.fillScreen(BG);
+  if (!g_canvas) {
+    g_canvas = new GFXcanvas16(FIELD_W, FIELD_H_MAX);  // 14.4 KB; falls back to direct printing if this fails
+    if (g_canvas && !g_canvas->getBuffer()) {
+      delete g_canvas;
+      g_canvas = nullptr;
+    }
+  }
   g_ok = true;
   g_screen = Screen::Boot;
   g_boot_y = 4;

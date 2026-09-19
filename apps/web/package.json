@@ -6,20 +6,25 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:phone": "tsc --noEmit && vite build --config vite.phone.config.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "qrcode-generator": "2.0.4",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "three": "0.186.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.15.30",
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
+    "@types/three": "0.186.0",
     "@types/web-bluetooth": "0.0.21",
-    "@playwright/test": "1.63.0",
     "@vitejs/plugin-react": "4.3.4",
     "typescript": "5.7.2",
     "vite": "6.4.3",

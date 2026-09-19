@@ -58,15 +58,20 @@ void cue(uint8_t effect, uint8_t spell, uint16_t duration_ms, uint8_t phase) {
   g_cue_start = millis();
   g_cue_until = g_cue_start + duration_ms;
 }
+void clear_cue() {
+  g_cue_effect = 0;
+  g_cue_until = 0;
+  g_next = millis();
+}
 
 void tick() {
   const uint32_t now = millis();
-  if (now < g_next) return;
+  if ((int32_t)(now - g_next) < 0) return;
   g_next = now + LED_FRAME_MS;
   g_phase++;
   if (!g_enabled) return;
 
-  if (g_cue_effect && now < g_cue_until) {
+  if (g_cue_effect && (int32_t)(now - g_cue_until) < 0) {
     const float t = (float)(now - g_cue_start) / (float)(g_cue_until - g_cue_start + 1);
     const float k = 1.0f - t;  // fade out
     switch (g_cue_effect) {

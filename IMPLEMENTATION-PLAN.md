@@ -1,8 +1,8 @@
 # Harry Potter Battle Simulator — 0→1 Implementation Plan
 
-**Product:** a two-player live-video duel in which every spell requires a spoken incantation on the player's laptop and a matching motion from that player's hacker badge.
+**Product:** a two-player live-video duel in which every spell requires a spoken incantation on the player's laptop and a matching motion from that player's hacker badge or iPhone.
 
-**Status (September 19, 2026):** the complete 0→1 execution plan is approved. The badge-facing contract and unchanged creator HAL were published at commit `04e315b` on `origin/codex/harry-potter-battle-mvp-outline`. **The Slice 0–1 diagnostic foundation is implemented software-only and its current foundation checks pass; the replay-only human QA card is still pending.** Later game schemas, calibration and Slices 2–9 remain planned and gated. No phone, microphone, Windows or real-badge qualification is claimed.
+**Current direction (September 19, 2026):** Sai requested implementation across the platform, script-driven QA and a minimal game-only UI, with **both real BLE badge and physical iPhone player controls**. Firmware now matches teammate main `6a50929`; Sai explicitly requested discarding our local firmware fixes. Do not silently reapply them. Automated raw replay remains test-only. The internally named `/ws/dev-wand` phone relay is an explicitly enabled physical-input path, not a second badge transport. See [current platform evidence](docs/qa/game-platform.md) and [latest firmware review](docs/qa/firmware-main-6a50929.md) for actual implementation status. Physical badge, iPhone, speech and Windows acceptance remain distinct from software tests and from one another.
 
 This document is the durable end-to-end build order. [MVP-OUTLINE.md](MVP-OUTLINE.md) owns product/gameplay scope, [BADGE-FIRMWARE-CONTRACT.md](BADGE-FIRMWARE-CONTRACT.md) owns the unchanged badge interface, [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md) owns visual and interaction presentation, and [$wand-dev-workflow](.agents/skills/wand-dev-workflow/SKILL.md) owns the development and human-QA procedure. If they conflict on badge bytes, the firmware contract wins; if they conflict on what game to ship, the MVP outline wins. The design system cannot change mechanics, runtime gates or evidence status.
 
@@ -10,11 +10,11 @@ This document is the durable end-to-end build order. [MVP-OUTLINE.md](MVP-OUTLIN
 
 ### 1.1 Finish line
 
-The first playable surrogate checkpoint is one complete exchange:
+The first complete playable checkpoint is one physical exchange with either supported controller:
 
-> Player A says “Stupefy” and makes the coached jab with an iPhone. Both clients receive one authoritative projectile with a future impact time. Player B says “Protego” and raises/tilts an iPhone before that deadline. The server resolves one block, both browsers show the same health/result, and each virtual endpoint previews only its decoded confirmed feedback.
+> Player A says “Stupefy” and makes the coached jab with a selected badge or iPhone. Both clients receive one authoritative projectile with a future impact time. Player B says “Protego” and raises their selected controller before that deadline. The server resolves one block, both browsers show the same health/result, and each controller presents only decoded confirmed feedback.
 
-Real badges later repeat that exchange through BLE and separately qualified hardware; phone success does not close those gates.
+Repeat the exchange with two qualified badges for the prize-track demo. Badge and iPhone evidence remain source-specific: one physical path never certifies the other.
 
 The badge is the wand, not a controller. During combat there are no spell buttons, arming buttons, loadouts or mouse/keyboard shortcuts. Setup, calibration, Ready and Rematch remain laptop controls.
 
@@ -23,10 +23,10 @@ The badge is the wand, not a controller. During combat there are no spell button
 | Area | Decision |
 | --- | --- |
 | Players | One private-LAN room, exactly two players and one round at a time |
-| Initial development | Mac development plus one iPhone Safari motion surrogate and deterministic replay |
-| Human surrogate finish | Two laptops plus two iPhones may exercise two-person motion/speech timing, but remain labelled surrogate evidence |
-| Demo qualification | Separate Windows x64 desktop Chrome qualification on the intended laptops; real badges remain a separate hardware gate |
-| Wand | One custom-firmware BLE badge per player; two other badges are recovery/development spares |
+| Physical input choices | One custom-firmware BLE badge or one paired iPhone per player; source locks for the room |
+| Automated QA | Deterministic replay and scripted speech only through test scripts or explicitly build-gated `/__qa/*` routes |
+| Demo qualification | Windows x64 desktop Chrome on the intended laptops; qualify badge and iPhone paths independently and use badges for the prize-track demonstration |
+| Wand | One custom-firmware BLE badge or one iPhone per player; spare badges are for recovery/development |
 | Speech | Each laptop captures its own microphone and runs its own local `faster-whisper` helper; no cloud or browser-vendor ASR |
 | Input contract | Exact canonical incantation plus compatible fresh motion; neither alone casts |
 | Game | Stupefy, Protego, then Expelliarmus only after the two-spell core passes |
@@ -42,11 +42,11 @@ Out of scope: NFC, computer vision, camera hit detection, gyro features, positio
 Never collapse these into one “working” claim:
 
 1. deterministic replay proves packet, timing, fusion, referee and client behavior;
-2. iPhone Safari plus a real laptop microphone proves measured human interaction with surrogate motion;
+2. iPhone Safari plus a real laptop microphone proves measured human interaction for the iPhone physical-input path, not badge behavior;
 3. Windows laptop tests prove the target browser, microphone, camera, WebRTC and performance setup;
 4. contract H0–H5 proves real badge sensor, BLE, feedback, recovery and endurance behavior.
 
-Every screen, trace and result names its motion source (`REPLAY`, `PHONE SURROGATE`, `REAL BLE`) and speech source (`SCRIPTED SPEECH`, `REAL LOCAL ASR`).
+QA traces/results name their motion and speech sources. Player screens use only a small Badge/iPhone identity and actionable connection state; scripted input, fault injection and diagnostics are never player options.
 
 ## 2. Runtime architecture
 
@@ -68,7 +68,7 @@ Keep the new duel behind an isolated entry path and runtime mode. That mode must
 | Browser ×2 | BLE/virtual transport, packet validation, clock mapping, calibration, gesture evidence, PCM capture/endpointing, fusion, setup, video, HUD/effects and badge-event projection | Damage, cooldown decisions or retroactive shield outcomes |
 | Local speech helper ×2 | One bounded PCM clip → one final English transcript/result | Microphone capture, VAD/endpointing, pairing, match state, non-loopback listening or stored audio |
 | Referee ×1 | Sessions, room/round state, validated cast order, scheduled impacts, health/status, immutable events and signalling authorization | Raw badge samples, raw audio, rendering or client-proposed damage |
-| iPhone page, development only | Raw acceleration beneath the virtual endpoint and decoded command preview | Speech, preclassified gestures, direct casts or game authority |
+| iPhone controller page | Raw acceleration beneath the shared protocol endpoint and decoded command feedback | Speech, preclassified gestures, direct casts or game authority |
 
 Motion path:
 
@@ -91,7 +91,7 @@ Laptop A runs the referee. Each laptop runs its own Vite frontend and local spee
 | Frontend | `http://127.0.0.1:5173` normally | Each laptop has its own instance; preserve this exact default origin |
 | Game API | `/api/game/*` proxied to laptop A port `8000` | Setup/health only; mutations require authenticated player/session context |
 | Game socket | `/ws/game` proxied to laptop A port `8000` | Authenticated first message; game events and WebRTC signalling |
-| Dev wand relay | `/ws/dev-wand` on the game service | Explicit development mode only; never a production badge transport |
+| Phone wand relay | Internally named `/ws/dev-wand` on the game service | Explicit iPhone-input profile; never a badge transport or QA cast bypass |
 | Speech health | `/api/speech/health` proxied to that laptop's `127.0.0.1:8001` | Must report loaded model, settings, warm state, worker availability and generation |
 | Speech transcription | `/api/speech/transcribe` proxied to that laptop's `127.0.0.1:8001` | One bounded clip; no streaming microphone and no queue |
 
@@ -99,7 +99,7 @@ For the two-laptop room, Vite on each machine points game routes to laptop A's s
 
 The Vite speech proxy enforces the raw TCP peer as loopback or that laptop's own selected interface, validates the exact expected Origin and never trusts a forwarded-address header. It rejects the phone/LAN peer before proxying, accepts only bounded 16-bit mono 16 kHz PCM/WAV, caps a 3-second request at 128 KiB, and adds a per-run helper secret server-side. The secret is not bundled into browser JavaScript, logged or committed. Raw audio never goes to the referee, opponent or internet.
 
-For iPhone QA only, an approved profile serves Vite over trusted HTTPS/WSS on the selected private interface at port `5173`; both desktop and phone use that origin. The phone can reach `/ws/dev-wand`, not speech routes. Certificate trust, firewall changes and LAN exposure require explicit approval and are not implied by implementation work.
+For iPhone play, the approved hosted profile keeps the game frontend on laptop loopback and serves only dedicated phone assets/pairing/WSS through the personal Cloudflare account. QR rendezvous requires explicit matching-number laptop approval; the local-only `/api/phone/*` broker mints scoped relay capabilities with a server-side enrollment secret. No game token, audio, transcript or video enters that service. It is internet-dependent and must pass the same physical latency/freshness gates. The optional private-LAN profile still serves Vite over trusted HTTPS/WSS on the selected interface at port `5173`, with both devices on that origin and no phone access to speech. New deployment, trust, firewall and LAN exposure changes require explicit approval. Never publish or tunnel Vite/the referee/speech to implement phone onboarding.
 
 ### 2.4 Core interfaces
 
@@ -120,13 +120,13 @@ Internal evidence is interval-based and generation-scoped:
 
 Referee events include round/state version, immutable action/projectile/effect IDs, server timestamps and deadlines. The same event ID fans out to rendering, sound and badge feedback; each consumer independently deduplicates it. Snapshots update durable state but never recreate historical one-shot effects.
 
-Validate messages at runtime in both TypeScript and Pydantic, with shared cross-language fixtures for the game interface when Stage 4 introduces it. Publish the active ruleset from the referee; the HUD must not keep its own cooldown/flight-duration copy. Use opaque player sessions, server-assigned slots, one active connection per player and session/round/input-generation deduplication. Lock the declared source during play; real-only rooms reject virtual input as an accidental-misconfiguration safeguard, not an anti-cheat guarantee.
+Validate messages at runtime in both TypeScript and Pydantic, with shared cross-language fixtures for the game interface. Publish the active ruleset from the referee; the HUD must not keep its own cooldown/flight-duration copy. Use opaque player sessions, server-assigned slots, one active connection per player and session/round/input-generation deduplication. Lock the declared physical source during play. Player rooms accept Badge or iPhone and reject replay/scripted input as an accidental-misconfiguration safeguard, not an anti-cheat guarantee.
 
 ## 3. Detailed implementation specifications
 
-### 3.1 Device Lab, protocol core and virtual endpoint
+### 3.1 Protocol core, QA diagnostics and physical endpoints
 
-Device Lab is the first UI, not a debug afterthought. It exposes:
+Keep the player UI game-only: Badge/iPhone choice, connection/pairing, actionable permission and calibration prompts, practice, Ready and duel state. Detailed Device Lab diagnostics live only in scripts or explicitly build-gated `/__qa/*` routes and never appear in production navigation. Those QA surfaces may expose:
 
 - input source, device/boot/link identity and contract capabilities;
 - raw and calibrated axes, sample sequence, capture/receipt age, gap/loss and clock uncertainty;
@@ -136,7 +136,7 @@ Device Lab is the first UI, not a debug afterthought. It exposes:
 - outbound badge state/cue command and decoded status/ACK;
 - video, game socket, render quality and source-evidence labels.
 
-The virtual endpoint implements the real packet codec, subscriptions, OPEN/SYNC, status, command expiry/deduplication and disconnect/reboot behavior. Its badge preview is driven by decoding outbound command bytes, never by reading game state directly.
+The virtual endpoint implements the real packet codec, subscriptions, OPEN/SYNC, status, command expiry/deduplication and disconnect/reboot behavior. Its QA-only controller preview is driven by decoding outbound command bytes, never by reading game state directly.
 
 Phone motion uses `accelerationIncludingGravity`, portrait orientation and the contract's axis/units/clipping mapping. Verify all six gravity faces. At each 20 ms output opportunity, select only the newest not-yet-used finite observation. Skip when none exists: never interpolate, repeat or backfill a sample to fake 50 Hz. Preserve a monotonic millisecond observation clock, sequence selected observations, guard old relay generations/callbacks and expose actual callback/output cadence.
 
@@ -259,7 +259,7 @@ Use one video-only `RTCPeerConnection` per client with the perfect-negotiation p
 
 ### 3.7 Visual and audio specification
 
-Use the two related modes in [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md): the warm, card-based **Wizarding Workshop** for setup, Device Lab, calibration and practice, then the dark **Enchanted Mirror** for countdown, combat and results. The duel specification below is unchanged: opponent video remains the dominant surface, and bright Workshop cards never cover it.
+Use the two related modes in [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md): the warm, card-based **Wizarding Workshop** for player setup, calibration and practice, then the dark **Enchanted Mirror** for countdown, combat and results. Any build-gated QA diagnostic keeps the Workshop visual language but is not reachable from player navigation. The duel specification below is unchanged: opponent video remains the dominant surface, and bright Workshop cards never cover it.
 
 Layer order:
 
@@ -270,7 +270,7 @@ Layer order:
 
 Fixed normalized anchors are local cast `(0.18, 0.76)`, opponent target `(0.50, 0.46)`, near impact `(0.50, 0.57)`, and shield center `(0.50, 0.55)` at roughly `0.62 × 0.68`. The attacker view travels local-to-target; the defender view travels target-to-camera with authored scale. No tracking, video texture or inferred body position.
 
-HUD: opponent name/health above the portal, own health lower-left, three original line-art cooldown glyphs bottom-center, and a small `YOU` preview lower-right. Diagnostics stay in training/Device Lab, not the duel. Use near-black `#05070D`, ivory `#F4E7C5`, brass `#C59B5A`; distinguish spells by silhouette and motion as well as color.
+HUD: opponent name/health above the portal, own health lower-left, three original line-art cooldown glyphs bottom-center, and a small `YOU` preview lower-right. Technical diagnostics stay in gated QA surfaces, not player setup or the duel. Use near-black `#05070D`, ivory `#F4E7C5`, brass `#C59B5A`; distinguish spells by silhouette and motion as well as color.
 
 Renderer:
 
@@ -302,50 +302,25 @@ Audio is last. Use only original/licensed nonverbal cues, start SFX after local 
 
 ## 4. Delivery stages and gates
 
-Every stage has three outputs: **Build**, **Automated gate**, and **Your card** for the smallest necessary human check. A stage is not complete because files exist or tests were proposed. Keep changing test counts and the exact current evidence in the [Slice 0–1 checkpoint](docs/qa/device-lab-stage-1.md), not duplicated here. The implemented diagnostic foundation is software-only; its human card remains open.
+Every stage has three outputs: **Build**, **Automated gate**, and **Your card** for the smallest necessary human check. These headings define dependency and acceptance, not current implementation status. Keep current commands, test counts, completed software slices and open physical gates in [docs/qa/game-platform.md](docs/qa/game-platform.md); keep hardware-specific evidence in [docs/qa/firmware-integration-review.md](docs/qa/firmware-integration-review.md). A stage is not complete because files exist or tests were proposed.
 
-### Slice 0 — Isolated runtime shell (**diagnostic foundation implemented; current checks pass; human QA pending**)
+### Slice 0 — Isolated runtime shell
 
-**Implemented foundation**
+**Build:** isolated duel entry/runtime inside the existing Python/FastAPI/Pydantic stack, without deleting or starting the legacy serial, host-camera or AI-director path. Keep new game contracts separate from legacy button/mana rules and expose only the minimal player entry plus build-gated QA seams.
 
-- isolated duel entry/runtime without deleting or starting the legacy serial, vision/camera or AI-director path;
-- a new diagnostic duel service inside the existing Python/FastAPI/Pydantic stack, separate from legacy button/mana rules;
-- frontend route, target dependencies, health surface and test seams for the checkpoint.
+**Automated gate:** service bootstrap, route/schema errors, lifecycle cleanup and an ordinary browser smoke flow pass without legacy capture/device prompts or hardware mutation.
 
-**Current evidence and deferred work**
+**Your card:** identify build/branch, open the minimal player shell, confirm no legacy UI or diagnostic navigation appears, and stop on unplanned network exposure or hardware mutation.
 
-- Use the [current checkpoint](docs/qa/device-lab-stage-1.md) for the recorded Python, web, build and browser-flow results.
-- Cross-language **game/event** schemas and their fixtures belong to Stage 4, when the actual referee/socket contract exists; they are not claimed by this diagnostic slice.
-- The current service is a bootstrap/diagnostic boundary, not a working duel engine.
+### Slice 1 — Protocol core, virtual endpoint and fake BLE
 
-**Your card**
+**Build:** contract codec/golden vectors, `WandTransport`, `WandClient`, `VirtualWandTransport`, fake-Web-Bluetooth lifecycle coverage and gated QA diagnostics for identity, raw motion/timing/loss and decoded feedback.
 
-- identify build/branch and start the isolated duel shell;
-- confirm its source labels and that no legacy capture/device prompt appears;
-- stop if it mutates hardware, requests unplanned network exposure or presents legacy gameplay as the new duel.
+**Automated gate:** deterministic jab replay, feedback expiry, 600 ms outage/reconnect, reboot/generation and stale/duplicate fault coverage pass through production boundaries. Replay entry exists only behind the QA build flag or scripts.
 
-### Slice 1 — Device Lab, byte core and fake BLE (**diagnostic foundation implemented; current checks pass; replay-only human QA pending**)
+**Your card:** use the explicit QA card only when diagnosing the boundary; never count it as physical input evidence or expose it in player navigation.
 
-**Implemented foundation**
-
-- contract codec/golden vectors, `WandTransport`, `WandClient`, `VirtualWandTransport` and fake-Web-Bluetooth lifecycle checks;
-- a Device Lab diagnostic for source/identity, raw motion/timing/loss and decoded feedback preview;
-- deterministic jab replay, feedback expiry, 600 ms outage/reconnect and stale/duplicate fault coverage;
-- a Web Bluetooth chooser entry exists, but real chooser/radio behavior, the live iPhone relay and physical BLE are unqualified and are not part of this replay-only checkpoint.
-
-**Current evidence and deferred work**
-
-- Use the [current checkpoint](docs/qa/device-lab-stage-1.md) for the exact checks and results; do not describe the complete original gate as passed.
-- Gesture calibration UI belongs to Stage 3. Cross-language game/event fixtures belong to Stage 4.
-- There is no Device Lab reboot button in this checkpoint. Reboot/generation behavior remains automated coverage until a later diagnostic exposes it.
-
-**Your card**
-
-- use replay mode only; do not select the BLE chooser or claim physical Bluetooth evidence;
-- inspect one replayed jab, send a feedback cue and verify that its preview expires;
-- inject a 600 ms outage, reconnect, and verify visible source identity, cleared stale state and that no cast exists yet.
-
-### Stage 2 — Local real-speech spike (**planned; first-hour risk gate**)
+### Stage 2 — Local real-speech risk gate
 
 **Build:** mono 16 kHz AudioContext request/verification, AudioWorklet timebase/endpointing with no initial application resampler, loopback speech proxy/helper, model warmup/health, exact vocabulary and privacy/lifecycle controls.
 
@@ -353,7 +328,7 @@ Every stage has three outputs: **Build**, **Automated gate**, and **Your card** 
 
 **Your card:** on each intended laptop, complete quiet calibration, then at least five clean attempts per core incantation plus silence/wrong-word/background negatives. Record final latency and failures. Stop expansion if canonical words or the 1-second deadline are unreliable.
 
-### Stage 3 — Classifier and mandatory fusion (**planned**)
+### Stage 3 — Classifier and mandatory fusion
 
 **Build:** per-source/grip calibration, segmentation/features for jab/guard, optional sweep behind a gate, one-attempt fusion and input-health transitions.
 
@@ -361,31 +336,31 @@ Every stage has three outputs: **Build**, **Automated gate**, and **Your card** 
 
 **Your card:** use replay motion plus the real laptop mic for five Stupefy and five Protego positives; then speech-only, motion-only and mismatched negatives. It is explicitly not real physical-motion evidence.
 
-### Stage 4 — Complete Stupefy/Protego vertical slice (**planned**)
+### Stage 4 — Complete Stupefy/Protego vertical slice
 
-**Build:** authenticated two-player sessions, referee/state writer, ordinary scripted second client through raw virtual inputs, server-timed projectiles, basic DOM HUD and minimal deterministic visual placeholders.
+**Build:** authenticated two-player sessions, referee/state writer, QA-only scripted second client through raw virtual inputs, server-timed projectiles, basic DOM HUD and minimal deterministic visual placeholders.
 
 **Automated gate:** fake-clock combat/cooldowns, ordering/equal-time rules, simultaneous knockout, duplicate attempts/events, slow clients, connection abort and rematch; two browser contexts exercise real sockets and fusion without direct cast injection.
 
 **Your card:** one visible client uses real local speech plus replay motion against a muted scripted ordinary client. Complete an attack, a block, an abort during an incoming attack and a clean rematch.
 
-### Stage 5 — iPhone physical surrogate (**planned; 60–90 minute extension cap**)
+### Stage 5 — iPhone physical input
 
-**Build:** approved HTTPS/WSS phone profile, short-lived pairing, raw-motion endpoint beneath `VirtualWandTransport`, on-phone sensor health and decoded screen/LED preview.
+**Build:** approved phone-only public HTTPS/WSS profile with QR rendezvous, explicit matching-number approval and short-lived pairing; retain the optional trusted private-LAN profile. Raw motion enters beneath `VirtualWandTransport`, with minimal phone connection/health and decoded feedback. The route name and transport reuse are implementation details; the player source is `phone`, not `replay`. No public microphone/referee/dev routes; private-LAN evidence does not qualify hosted timing.
 
 **Automated gate:** relay generation/auth/origin/size limits, opaque 20-byte values, bounded queues, old callbacks, lock/disconnect, cadence/loss reporting and no access to speech/game-admin routes.
 
-**Your card:** after separately approving certificate/network setup, capture 60 seconds of still/movement metrics, six faces, five Stupefy and five Protego positives, then lock/app-switch/network-loss recovery. Stop after 60–90 minutes if setup or cadence is not viable; preserve replay progress and label the live gap.
+**Your card:** after separately approving certificate/network setup, capture 60 seconds of still/movement metrics, six faces, five Stupefy and five Protego positives, then lock/app-switch/network-loss recovery. If setup or cadence is not viable, report the iPhone path blocked without weakening gates or hiding it behind replay.
 
-### Stage 6 — Two humans, two laptops and video (**planned**)
+### Stage 6 — Two humans, two laptops and video
 
-**Build:** authenticated WebRTC perfect negotiation, 720p/30 video-only portal, complete setup/practice/Ready/result flow, and two local speech helpers. Two iPhones may supply explicitly labelled surrogate motion.
+**Build:** authenticated WebRTC perfect negotiation, 720p/30 video-only portal, complete setup/practice/Ready/result flow, two local speech helpers and one locked physical Badge/iPhone source per player.
 
 **Automated gate:** negotiation glare, ICE ordering, stale generation, media stop, game/video independence, heartbeat loss and no audio track. Synthetic media remains labelled.
 
 **Your card:** two people complete the core exchange; test each opponent saying each spell while the local player makes the matching gesture. Run ten nearby-speaker trials per shipped spell/player with zero accepted casts before proceeding.
 
-### Stage 7 — Core Three.js polish and performance (**planned**)
+### Stage 7 — Core Three.js polish and performance
 
 **Build:** final HUD/glyphs, Stupefy and Protego treatments, server-time effects, fixed quality presets and resource instrumentation.
 
@@ -393,7 +368,7 @@ Every stage has three outputs: **Build**, **Automated gate**, and **Your card** 
 
 **Your card:** land at least 8 of 10 intentional defenses before impact. On the actual laptop/video setup, run ten minutes at at least 30 fps with p95 frame interval at most 33.3 ms, p99 at most 50 ms, no warmed frame at least 100 ms and no first-cast shader hitch.
 
-### Stage 8 — Conditional Expelliarmus, portal and sound (**planned**)
+### Stage 8 — Conditional Expelliarmus, portal and sound
 
 **Build:** add sweep/disarm only if classification and core reliability pass; then restrained portal treatment and original/licensed SFX.
 
@@ -401,17 +376,17 @@ Every stage has three outputs: **Build**, **Automated gate**, and **Your card** 
 
 **Your card:** qualify the third gesture independently. Rerun microphone latency, speech-only, nearby-speaker and five-match checks with SFX enabled. Cut the spell before weakening input rules.
 
-### Stage 9 — Windows two-iPhone qualification and demo freeze (**planned**)
+### Stage 9 — Windows physical-input qualification and demo freeze
 
-**Build:** run the complete candidate on two intended Windows x64 Chrome laptops with two explicitly labelled iPhone motion surrogates, each laptop's local ASR, real cameras/WebRTC and the frozen mechanics/quality preset/runbook.
+**Build:** run the complete candidate on two intended Windows x64 Chrome laptops with each laptop's local ASR, real cameras/WebRTC and the frozen mechanics/quality preset/runbook. Exercise iPhone and badge paths independently; select qualified badges for the prize-track demo.
 
-**Automated gate:** all previous replay/regression suites, Windows build/startup checks and held-out phone-trace regressions pass without source-specific gameplay/render branches.
+**Automated gate:** all previous QA replay/regression suites, Windows build/startup checks and held-out phone/badge trace regressions pass without source-specific gameplay/render branches.
 
-**Your card:** two people use two laptops and two iPhones to complete five uninterrupted matches, recovery cases, nearby-speaker checks, performance gates and the judge rehearsal. Every result remains labelled `PHONE SURROGATE`; this freezes the software/demo candidate but does not qualify a badge.
+**Your card:** two people complete five uninterrupted matches, recovery cases, nearby-speaker checks, performance gates and the judge rehearsal with the selected physical controllers. Record source-specific evidence; iPhone results never certify badge hardware, and badge claims require H0–H5.
 
-### Separate badge handoff — after the surrogate software freeze
+### Parallel badge hardware qualification
 
-Real-badge integration is a separate hardware workstream, not a prerequisite for the Stage 9 two-iPhone/Windows surrogate checkpoint. Preserve the frozen platform boundary and swap only `VirtualWandTransport` for `BleWandTransport`.
+Badge integration runs alongside platform delivery. Preserve the shared platform boundary and select `BleWandTransport` without rewriting fusion, combat or rendering.
 
 - Execute contract H0–H4 with the first image: recovery artifacts, signed sensor truth, actual profile, Windows connected GATT, combined load, reconnect and battery evidence.
 - Tune a separate badge/grip calibration from real traces; never import the phone profile.
@@ -428,7 +403,7 @@ Real-badge integration is a separate hardware workstream, not a prerequisite for
 | Speech timing | Canonical final by `voiceEnd + 1000 ms`; missed deadlines are visible/unhealthy, never paired late |
 | Cast responsiveness | From completion of the raw paired capture, `max(voiceEnd, motionEnd)`, to authoritative server acknowledgement aims at p95 ≤ `750 ms`; this includes browser endpointing, ASR, fusion and network time |
 | Defense | At least 8/10 deliberate Protego attempts accepted before impact; flight time may be lengthened only with an explicit retest, never by backdating |
-| Phone surrogate | Actual cadence/age/sync/ACK reported, 60-second qualification plus lock fault and positives, then a stable 10-minute human rehearsal before routine use |
+| iPhone input | Actual cadence/age/sync/ACK reported, 60-second qualification plus lock fault and positives, then a stable 10-minute human rehearsal before routine use |
 | Combat | Deterministic cooldown, shield/disarm, equal-time and simultaneous-impact tests; both clients agree on state |
 | Rendering | At least 30 fps on each demo laptop; p95 ≤33.3 ms, p99 ≤50 ms, no warmed ≥100 ms frame, stable resources across 100 cycles |
 | Recovery | Wand/phone loss, ASR/helper loss, page hide, server loss and old callbacks abort/clear cleanly; no stale cast/effect/cue after Ready returns |
@@ -436,7 +411,7 @@ Real-badge integration is a separate hardware workstream, not a prerequisite for
 | Sustained demo | Five uninterrupted matches and clean rematches with no service restart; source/build versions and known limits recorded |
 | Hardware | Contract H0–H5 evidence remains independent: recovery, sensor truth, Windows GATT, combined load, two-wand soak, feedback and endurance |
 
-No human gate in this document is currently claimed as passed.
+Do not infer current pass/fail status from this durable matrix. Use [current platform evidence](docs/qa/game-platform.md) and the [firmware integration review](docs/qa/firmware-integration-review.md), and distinguish automated, iPhone, badge, microphone, Windows and two-human evidence.
 
 ## 6. Feedback and trace discipline
 
@@ -461,7 +436,7 @@ Trace export is bounded and opt-in. Include build/protocol/profile/source labels
 
 - If Stupefy/Protego speech fails the first-hour real-laptop gate, stop effects expansion and fix/replace only the approved local ASR implementation. Do not add buttons, cloud ASR, fuzzy phonemes or motion-only casts.
 - If built-in microphones fail cross-talk, change seating/separation or use close-talk microphones. Do not claim voice separation from software echo cancellation.
-- If the iPhone extension exceeds 60–90 minutes or fails cadence/freshness, continue with labelled replay and report physical-motion evidence as missing. Do not weaken timing gates or switch platforms silently.
+- If the iPhone path fails cadence/freshness or trusted-LAN setup, keep the badge path and independent work moving while reporting iPhone play blocked. Replay may diagnose software only; it is not a user-facing fallback. Do not weaken timing gates or switch platforms silently.
 - If Expelliarmus is weak, cut it. The complete two-spell counter loop is the shippable core.
 - If graphics miss budget, lock low quality: 480p video, 1280×720 buffer, fewer particles/trail nodes and no ambient portal. Do not change combat timing or hide feedback.
 - If Protego is not defendable because the measured speech path is slower, explicitly lengthen projectile travel and rerun defense/performance tests. Never backdate a shield.
@@ -470,4 +445,4 @@ Trace export is bounded and opt-in. Include build/protocol/profile/source labels
 
 ## 8. Current checkpoint
 
-The full plan is approved and is being executed procedurally. Slices 0–1 now have an implementation and recorded automated software evidence; stop at their first human-QA dependency and return the Slice 1 card without claiming a physical test. After that checkpoint passes, **Stage 2 local ASR is next**. Preserve the published firmware contract/HAL and keep iPhone TLS setup, real BLE, network exposure, Three.js polish and later stages behind their own listed gates.
+The full plan is approved and is being executed procedurally across non-firmware work and physical-input integration. [docs/qa/game-platform.md](docs/qa/game-platform.md) is the single current checkpoint for implemented surfaces, exact checks and the next unmet gate; [docs/qa/firmware-integration-review.md](docs/qa/firmware-integration-review.md) owns badge-specific evidence. Continue from those reports rather than obsolete slice-order claims. Replay/fault tools remain scripts or build-gated QA only; the player experience remains the minimal Badge/iPhone setup, practice and duel. Preserve separate approval for certificate trust/network exposure, firmware flashing, commits and remote writes.

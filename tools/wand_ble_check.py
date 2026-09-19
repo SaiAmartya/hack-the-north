@@ -44,7 +44,7 @@ def check(cond: bool, what: str, detail: str = "") -> None:
 class Link:
     def __init__(self, client) -> None:
         self.client = client
-        self.seq = random.randrange(0, 65536)
+        self.seq = 65535  # next_seq() makes the initial OPEN exactly zero.
         self.nonce = random.randrange(1, 2**32)
         self.results: dict[int, tuple[wp.Status, float]] = {}
         self.health: list[wp.Status] = []
@@ -105,6 +105,8 @@ async def main() -> int:
     ap.add_argument("--seconds", type=float, default=4.0, help="how long to stream motion")
     ap.add_argument("--scan", type=float, default=8.0, help="scan timeout")
     a = ap.parse_args()
+    if not 1 <= a.seconds <= 600:
+        ap.error("--seconds must be between 1 and 600")
 
     from bleak import BleakClient, BleakScanner
 
@@ -118,8 +120,6 @@ async def main() -> int:
             break
     check(target is not None, "badge advertising", f"{len(found)} BLE devices seen")
     if target is None:
-        for dev, adv in list(found.values())[:15]:
-            print(f"  seen {dev.address} {adv.local_name or dev.name!r} rssi={adv.rssi}")
         return 1
     dev, adv, name = target
     print(f"found {name} {dev.address} rssi={adv.rssi} services={adv.service_uuids}")
@@ -163,7 +163,7 @@ async def main() -> int:
             link.offset_ms = samples[0][1]
             rtts = [s[0] for s in samples]
             print(f"SYNC rtt min/median/max = {min(rtts):.0f}/{statistics.median(rtts):.0f}/{max(rtts):.0f} ms, offset {link.offset_ms:.0f} ms, uncertainty +/-{samples[0][0] / 2:.0f} ms")
-            check(min(rtts) < 400, "SYNC round trip under 400 ms")
+            check(min(rtts) <= 100, "SYNC round trip meets 100 ms setup limit")
 
         epoch = 7
         st, _ = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
@@ -175,16 +175,46 @@ async def main() -> int:
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_DAMAGE, wp.SP_NONE, 500), epoch, link.device_now() - 50)
         check(st is not None and st.detail1 == wp.R_EXPIRED, "CUE already due rejected (4)", f"{st}")
 
-        # keep the lease alive while streaming
-        t_end = time.monotonic() + a.seconds
+        # keep the lease alive while streaming, and measure command round trips under load
+        stream_started = time.monotonic()
+        t_end = stream_started + a.seconds
         first = len(link.motion)
+        load_rtts = []
+        load_failures = 0
+        load_commands = 0
         while time.monotonic() < t_end:
-            await asyncio.sleep(0.9)
-            await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
+            await asyncio.sleep(0.45)
+            st, rtt = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
+            load_commands += 1
+            if st is None or st.detail1 != wp.R_OK:
+                load_failures += 1
+            if st is not None:
+                load_rtts.append(rtt)
+            st, rtt = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 180), epoch, link.device_now() + 300)
+            load_commands += 1
+            if st is None or st.detail1 != wp.R_OK:
+                load_failures += 1
+            if st is not None:
+                load_rtts.append(rtt)
+            await asyncio.sleep(0.45)
+            st, rtt = await link.command(wp.OP_SYNC)
+            load_commands += 1
+            if st is None or st.detail1 != wp.R_OK:
+                load_failures += 1
+            if st is not None:
+                load_rtts.append(rtt)
+        check(load_failures == 0, "all loaded state/cue/SYNC commands accepted", f"{load_failures} failures / {load_commands} commands")
+        if load_rtts:
+            load_rtts.sort()
+            p95 = load_rtts[max(0, (95 * len(load_rtts) + 99) // 100 - 1)]
+            print(f"command RTT while streaming: min {load_rtts[0]:.0f} median {statistics.median(load_rtts):.0f} p95 {p95:.0f} max {load_rtts[-1]:.0f} ms over {len(load_rtts)} commands")
+            check(statistics.median(load_rtts) < 100, "command RTT under load stays under 100 ms (browser sync policy)", f"median {statistics.median(load_rtts):.0f} ms")
+            check(p95 <= 150, "loaded command ACK p95 meets 150 ms target", f"p95 {p95:.0f} ms")
         frames = [m for m, _ in link.motion[first:]]
-        elapsed = a.seconds
+        elapsed = time.monotonic() - stream_started
         rate = len(frames) / elapsed if elapsed else 0
         check(len(frames) > 0, "MOTION notifications arrive", f"{len(frames)} frames, {link.raw_motion_bad} undecodable")
+        check(link.raw_motion_bad == 0, "no malformed MOTION records")
         if frames:
             gaps = sum(1 for p, n in zip(frames, frames[1:]) if (n.seq - p.seq) % 65536 != 1)
             disc = sum(1 for m in frames if m.discontinuity)
@@ -208,6 +238,7 @@ async def main() -> int:
             check(boot_ok, "MOTION boot_id matches INFO")
             check(40 <= rate <= 60, "MOTION rate about 50 Hz", f"{rate:.1f} Hz")
             check(gaps <= max(2, len(frames) // 50), "MOTION sequence mostly contiguous", f"{gaps} gaps")
+            check(disc <= max(2, len(frames) // 20), "continuous sensor evidence for at least 95% of frames", f"{disc} discontinuities / {len(frames)} frames")
             check(all(m.valid for m in frames), "MOTION frames flagged valid")
 
         st, _ = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_WON, 100, 0, 100), epoch, link.device_now() + 1200)
