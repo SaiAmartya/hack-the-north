@@ -1,5 +1,9 @@
 # Hardware and Environment Verification
 
+> Historical record from the stock-firmware (Lua) prototype. The board identification below still
+> applies; the Lua apps, serial gateway and tools it names (`badge_monitor.py`, `fake_gateway.py`,
+> `check_camera.py`, `badge-app-guide.md`) were removed on September 19, 2026 and live in git history.
+
 Date: 2026-09-19. Machine: macOS 26.6.2, arm64.
 
 ## Can we use the board?

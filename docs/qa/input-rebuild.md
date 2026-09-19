@@ -103,7 +103,7 @@ node tools/qa_input_rebuild.mjs https://wandduel-phone.saiamartya19.workers.dev 
 node tools/qa_input_rebuild.mjs https://wandduel-phone.saiamartya19.workers.dev 60 relay
 ```
 
-This script uses real public pairing/carriers and injected movement/audio+ASR fixtures. It must complete explicit stillness, six training examples and two fused practice spells. It is not real Safari, a human voice or badge evidence. The older `qa_public_phone.mjs` targets protocol v1 and is historical; use the new script for v2.
+This script uses real public pairing/carriers and injected movement/audio+ASR fixtures. It must complete explicit stillness, six training examples and two fused practice spells. It is not real Safari, a human voice or badge evidence.
 
 ## Next physical QA card
 

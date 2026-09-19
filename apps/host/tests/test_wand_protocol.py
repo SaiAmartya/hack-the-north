@@ -1,5 +1,5 @@
 """Golden vectors from BADGE-FIRMWARE-CONTRACT.md section 7, shared with the firmware self-test
-(firmware/src/proto.cpp) and the browser decoder (apps/web/src/lib/wandProtocol.test.ts)."""
+(firmware/src/proto.cpp) and the browser decoder (apps/web/src/wand/protocol.test.ts)."""
 
 from phantom_host.wand_protocol import (
     CAP_ALL,

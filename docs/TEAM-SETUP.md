@@ -68,8 +68,8 @@ $wandModel = Join-Path $env:USERPROFILE '.cache/wand-speech/faster-whisper-base.
 ```
 
 No virtual-environment activation or PowerShell execution-policy change is required.
-The host package still installs some legacy dependencies, but this launcher does not start
-legacy serial, camera/director or OpenAI workers. Do not use `phantom_host.main` for this game.
+The launcher starts only the referee, the local speech helper and the frontend; there are no
+other workers.
 
 `setup_speech.py` downloads pinned `faster-whisper base.en` weights once, outside the repo.
 The runtime loads only local files, uses CPU INT8 and keeps audio in memory. If you choose
@@ -203,7 +203,7 @@ from `apps/web` to generate its ignored `apps/phone-relay/public` assets. Then, 
 `apps/phone-relay`, run `npm ci`, `npm test`, and `npm run typecheck` (`npm.cmd` on Windows).
 No deployment or account login is needed to run those checks.
 For an explicitly approved live-service rehearsal, use the v2 script and its evidence limits
-in [the input rebuild report](qa/input-rebuild.md); the older `qa_public_phone.mjs` is historical.
+in [the input rebuild report](qa/input-rebuild.md).
 
 | Symptom | Next check |
 | --- | --- |

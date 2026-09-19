@@ -43,8 +43,7 @@ pinned local `base.en` model; the referee reported `multiplayerReady=true` and
 `allowReplay=false`. The served asset is `index-tiw-GQSK.js` (no HMR). Physical
 microphone/phone retries remain distinct from these health checks.
 
-After restart, `node tools/qa_public_phone.mjs
-https://wandduel-phone.saiamartya19.workers.dev` passed public-route isolation, pairing,
+After restart, the (since removed) v1 public-phone script passed public-route isolation, pairing,
 matching-number approval, byte-protocol handshake, 10 seconds at 50.0 Hz with 100%
 delivery, and disconnect teardown. This used injected browser motion over the real
 HTTPS/WSS service, not a physical iPhone or real speech. No public redeployment was needed.

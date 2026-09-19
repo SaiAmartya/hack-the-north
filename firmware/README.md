@@ -502,4 +502,4 @@ src/main.cpp        boot diagnostics, session/connection lifecycle, main loop
 ```
 
 Mirrors of the codec: `apps/host/phantom_host/wand_protocol.py` and
-`apps/web/src/lib/wandProtocol.ts`, both pinned to the same golden vectors.
+`apps/web/src/wand/protocol.ts`, both pinned to the same golden vectors.

@@ -213,17 +213,10 @@ No recording by default. Show when the microphone is listening and that transcri
 
 The existing Phantom Arena uses local radio badges, a gateway, a Python referee and a passive browser viewer. Reuse useful infrastructure, not its control model.
 
-| Existing source | Revision |
-| --- | --- |
-| [badges/phantom_player.lua](badges/phantom_player.lua), [phantom_gateway.lua](badges/phantom_gateway.lua) | Legacy reference only; no new Lua work. Firmware team owns replacement image; platform does not depend on these apps |
-| [game.py](apps/host/phantom_host/game.py) and [contracts.py](apps/host/phantom_host/contracts.py) | Reference deterministic/testable patterns only. Build a new isolated duel engine/contracts; do not adapt the legacy button/mana rules |
-| [main.py](apps/host/phantom_host/main.py) and [broadcaster.py](apps/host/phantom_host/broadcaster.py) | Keep the legacy viewer path separate; add isolated duel routes/session handling and bounded state delivery in the existing Python/FastAPI stack |
-| [App.tsx](apps/web/src/App.tsx) and [ArenaStage.tsx](apps/web/src/components/ArenaStage.tsx) | Add BLE/virtual transport seam, explicit wand binding, motion classification, mandatory speech fusion, setup/practice and the Three.js stage |
-| [vision.py](apps/host/phantom_host/vision.py) | Remove host-camera/base64-JPEG snapshots from the new mode; browsers own camera capture and WebRTC |
-| [badge_monitor.py](tools/badge_monitor.py) | Historical USB bring-up reference, not a runtime dependency or direct BLE validator |
-| [apps/host/tests](apps/host/tests/) and [fake_gateway.py](tools/fake_gateway.py) | Reuse deterministic/replay testing patterns, not the old preclassified cast packets or macOS/POSIX PTY simulator. Add browser-native byte fixtures and fault injection |
-
-Leave unrelated legacy files intact while the new path is built. Disable the old serial gateway, camera worker and AI director for this mode; each browser owns its BLE device and camera. Do not turn existing legacy tests green by preserving obsolete button-cast behavior in the new duel.
+The Phantom Arena prototype that preceded this platform (Lua badge apps, serial gateway, camera
+markers, AI director, the old React arena) was removed from the tree on September 19, 2026 once
+nothing current depended on it; it stays in git history. The duel referee, speech helper, wand
+transports, recognizer and Three.js presentation are the only runtime paths.
 
 The [hardware report](docs/hardware-verification.md) records one badge's identification, USB bring-up and stock-firmware BLE memory failures. Its Lua limits, test counts and pre-flight checklist are historical, not custom-firmware acceptance results. Direct GATT, battery endurance and the voice-and-motion duel remain unverified.
 

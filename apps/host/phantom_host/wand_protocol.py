@@ -1,7 +1,7 @@
 """Wire codec for BADGE-FIRMWARE-CONTRACT.md v1 (the badge's GATT records).
 
 Every record is exactly 20 bytes, little-endian, version 1. This module mirrors the badge
-firmware (firmware/src/proto.cpp) and the browser decoder (apps/web/src/lib/wandProtocol.ts);
+firmware (firmware/src/proto.cpp) and the browser decoder (apps/web/src/wand/protocol.ts);
 ``tests/test_wand_protocol.py`` pins all three to the contract's golden vectors.
 
 The referee never talks to a badge directly (the browser does), so this module exists for
