@@ -15,7 +15,7 @@
 
 namespace console {
 namespace {
-Settings g_settings = {1, true, {0, 1, 2}, {1, 1, 1}};
+Settings g_settings = default_settings();
 Preferences g_prefs;
 char g_line[96];
 size_t g_len = 0;
@@ -140,7 +140,7 @@ void handle(char *line) {
 
 void load_settings() {
   g_prefs.begin("hpwand", true);
-  g_settings.rot = g_prefs.getUChar("rot", 1);
+  g_settings.rot = g_prefs.getUChar("rot", kDefaultDisplayRotation);
   g_settings.leds = g_prefs.getBool("leds", true);
   const int8_t dmap[3] = {0, 1, 2}, dsign[3] = {1, 1, 1};
   if (g_prefs.getBytesLength("amap") != 3 || g_prefs.getBytes("amap", g_settings.axis_map, 3) != 3) memcpy(g_settings.axis_map, dmap, 3);
