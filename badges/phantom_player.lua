@@ -30,16 +30,29 @@ wake_lock=1
 -- safely change its own mapping based on it. The host ignores a READY outside
 -- the lobby and a cast outside play, so a mistimed press is harmless.
 --
--- The mana and cooldown numbers here are a LOCAL ESTIMATE for feedback only. The
--- laptop is the only authority, and radio.send reports that a frame was queued,
--- never that it arrived or that a hit landed.
+-- This badge deliberately knows NOTHING about game rules.
+--
+-- It used to keep its own mana and cooldown counters and refuse to send when they
+-- said no. That is a bug, not a feature: the radio is one way, so those counters
+-- can never be corrected. After the judge fires Mana Rain the host grants +40
+-- mana, the badge never hears about it, and the player's Ultimate is silently
+-- swallowed at the exact moment the projector says MANA RAIN.
+--
+-- What is left is a flat send-rate cap. That is radio hygiene, not a rule: it
+-- stops a mashed button flooding a channel shared with every other badge in the
+-- room, and it cannot disagree with the laptop because it does not model mana,
+-- cooldowns, phases or damage at all.
+--
+-- radio.send reports that a frame was QUEUED, never that it arrived or landed.
+-- The LEDs therefore mean "cast sent", and the projector is the only truth.
 
-local MANA_MAX = 100
-local MANA_REGEN_PER_SECOND = 8
 local SEND_REPEATS = 3
 local SEND_SPACING_MS = 40
 local QUEUE_MAX = 8
-local UI_REFRESH_MS = 100
+-- One packet per this long, whatever the button. Three copies of each packet is
+-- already 3 frames; at 4 casts/second that is 12 frames/second from one badge.
+local SEND_RATE_LIMIT_MS = 250
+local UI_REFRESH_MS = 250
 local ACCEL_SAMPLE_MS = 40
 -- The LED strip is latched on a timer, not every tick. On pre-2026-09-16
 -- firmware a tick only gets 6 ms, and a full clear/set/show every tick would
@@ -48,19 +61,23 @@ local LED_REFRESH_MS = 50
 
 -- ---------------------------------------------------------------------------
 -- Gesture tuning. These are the ONLY numbers that need changing on hardware.
--- Sample the live readout at the bottom of the duel screen while holding the
--- badge in the orientation you will use on stage, then set the threshold just
--- below the peak of a deliberate motion.
+--
+-- To tune: plug THIS badge into the laptop, open the app, and run
+--     python tools/badge_monitor.py
+-- Every gesture logs its peak magnitude, e.g. "gesture slash peak=820mg". Swing
+-- the badge the way you will on stage, read the real numbers, then set the
+-- threshold just under the peak of a deliberate motion. Reading exact values off
+-- serial beats squinting at a 320x240 screen mid-swing.
 -- ---------------------------------------------------------------------------
 local GESTURE_THRESHOLD_MG = 700
 local GESTURE_LOCKOUT_MS = 450
 local BASELINE_SMOOTHING = 0.10
 
 local SPELLS = {
-  F = { name = "Fireball", cost = 20, cooldown = 900, r = 255, g = 90, b = 0 },
-  S = { name = "Shield", cost = 15, cooldown = 1400, r = 0, g = 200, b = 255 },
-  A = { name = "Arc Slash", cost = 10, cooldown = 500, r = 170, g = 0, b = 255 },
-  U = { name = "Ultimate", cost = 60, cooldown = 5000, r = 255, g = 255, b = 255 },
+  F = { name = "Fireball", r = 255, g = 90, b = 0 },
+  S = { name = "Shield", r = 0, g = 200, b = 255 },
+  A = { name = "Arc Slash", r = 170, g = 0, b = 255 },
+  U = { name = "Ultimate", r = 255, g = 255, b = 255 },
 }
 
 local CHASE_ORDER = { 1, 2, 3, 4, 5, 6 }
@@ -71,19 +88,18 @@ local mode = "select"
 local side = "P1"
 local radio_ok = false
 
-local mana = MANA_MAX
-local cooldown_until = { F = 0, S = 0, A = 0, U = 0 }
+local next_send_allowed = 0
 local sequence = 0
 local queue = {}
 local send_failures = 0
 local casts_sent = 0
+local rate_limited = 0
 
 local accel_ok = true
 local base_x, base_y, base_z = 0, 0, 0
 local baseline_ready = false
 local next_accel = 0
 local gesture_locked_until = 0
-local last_gesture = "-"
 
 local effect_spell = nil
 local effect_until = 0
@@ -93,7 +109,7 @@ local last_tick_ms = 0
 
 local ui_root
 local select_label, select_hint
-local side_label, mana_label, spell_label, status_label, accel_label
+local side_label, status_label
 
 -- ---------------------------------------------------------------------------
 -- radio
@@ -227,6 +243,13 @@ end
 -- casting
 -- ---------------------------------------------------------------------------
 
+local function set_status(text, color)
+  if status_label then
+    status_label:set_text(text)
+    status_label:set_color(color)
+  end
+end
+
 local function cast(spell_key)
   local spell = SPELLS[spell_key]
   if not spell then
@@ -234,28 +257,21 @@ local function cast(spell_key)
   end
 
   if not radio_ok then
-    if status_label then
-      status_label:set_text("Radio unavailable")
-      status_label:set_color(0xff6666)
-    end
+    set_status("Radio unavailable", 0xff6666)
     return
   end
 
   local now = badge.sys.ms()
-  if now < cooldown_until[spell_key] then
-    status_label:set_text(spell.name .. " cooling down")
-    status_label:set_color(0xffcc55)
-    return
-  end
-  if mana < spell.cost then
-    status_label:set_text("Not enough mana for " .. spell.name)
-    status_label:set_color(0xffcc55)
-    return
-  end
 
-  mana = mana - spell.cost
-  cooldown_until[spell_key] = now + spell.cooldown
-  gesture_locked_until = now + GESTURE_LOCKOUT_MS
+  -- The ONLY gate on this badge. Not a cooldown, not a mana check: purely a cap
+  -- on how fast we are allowed to occupy a shared radio channel. Whether the
+  -- spell is legal is the laptop's decision, and it will reject it there.
+  if now < next_send_allowed then
+    rate_limited = rate_limited + 1
+    set_status("Easy - too fast", 0xffcc55)
+    return
+  end
+  next_send_allowed = now + SEND_RATE_LIMIT_MS
 
   local payload = "PA1|" .. side .. "|CAST|" .. spell_key .. "|" .. next_sequence()
   if queue_send(payload) then
@@ -263,13 +279,10 @@ local function cast(spell_key)
     effect_spell = spell_key
     effect_until = now + 500
     -- "Sent", not "hit": the laptop decides whether anything landed.
-    status_label:set_text(spell.name .. " sent")
-    status_label:set_color(0x66ff99)
-    spell_label:set_text(spell.name)
+    set_status(spell.name .. " sent", 0x66ff99)
     badge.sys.log("phantom_player queued " .. payload)
   else
-    status_label:set_text("Queue full")
-    status_label:set_color(0xffcc55)
+    set_status("Queue full", 0xffcc55)
   end
 end
 
@@ -277,10 +290,15 @@ local function send_ready()
   if not radio_ok then
     return
   end
+  local now = badge.sys.ms()
+  if now < next_send_allowed then
+    return
+  end
+  next_send_allowed = now + SEND_RATE_LIMIT_MS
+
   local payload = "PA1|" .. side .. "|READY|1|" .. next_sequence()
   if queue_send(payload) then
-    status_label:set_text("Ready sent - waiting for host")
-    status_label:set_color(0x66ff99)
+    set_status("Ready sent - waiting for host", 0x66ff99)
     badge.sys.log("phantom_player queued " .. payload)
   end
 end
@@ -288,6 +306,16 @@ end
 -- ---------------------------------------------------------------------------
 -- gestures
 -- ---------------------------------------------------------------------------
+
+-- Tuning channel. Plug this badge into the laptop and run
+-- tools/badge_monitor.py to read real peak magnitudes while you swing it.
+local function log_gesture(name, peak_mg)
+  badge.sys.log(
+    "phantom_player gesture " .. name ..
+    " peak=" .. math.floor(peak_mg) .. "mg" ..
+    " threshold=" .. GESTURE_THRESHOLD_MG
+  )
+end
 
 local function sample_accel()
   local now = badge.sys.ms()
@@ -301,15 +329,14 @@ local function sample_accel()
   if not x then
     if accel_ok then
       accel_ok = false
-      accel_label:set_text("Accelerometer unavailable - use buttons")
-      accel_label:set_color(0xffcc55)
+      set_status("No accelerometer - use buttons", 0xffcc55)
+      badge.sys.log("phantom_player accel_unavailable")
     end
     return
   end
 
   if not accel_ok then
     accel_ok = true
-    accel_label:set_color(0xffffff)
   end
 
   if not baseline_ready then
@@ -326,42 +353,37 @@ local function sample_accel()
   -- A shake energetic enough to trip shake() also crosses every axis threshold,
   -- so per-gesture refractory alone would fire two spells from one motion.
   if now >= gesture_locked_until then
-    if badge.sensor.shake() then
-      last_gesture = "shake"
-      -- Consume the shake even when it cannot pay for the Ultimate, otherwise it
-      -- falls through and triggers a cheaper spell from the same motion.
-      gesture_locked_until = now + GESTURE_LOCKOUT_MS
-      if mana >= SPELLS.U.cost then
-        cast("U")
-      elseif status_label then
-        status_label:set_text("Not enough mana for Ultimate")
-        status_label:set_color(0xffcc55)
-      end
-      return
-    end
-
     local ax, ay, az = dx, dy, dz
     if ax < 0 then ax = -ax end
     if ay < 0 then ay = -ay end
     if az < 0 then az = -az end
 
-    if ax >= GESTURE_THRESHOLD_MG or ay >= GESTURE_THRESHOLD_MG
-        or az >= GESTURE_THRESHOLD_MG then
-      -- Consume the lockout on DETECTION, not on a successful cast. Otherwise a
-      -- gesture aimed at a cooling spell keeps re-firing every sample and spams
-      -- the status line for the whole cooldown.
+    local peak = ax
+    if ay > peak then peak = ay end
+    if az > peak then peak = az end
+
+    if badge.sensor.shake() then
+      gesture_locked_until = now + GESTURE_LOCKOUT_MS
+      log_gesture("shake", peak)
+      cast("U")
+      return
+    end
+
+    if peak >= GESTURE_THRESHOLD_MG then
+      -- Consume the lockout on DETECTION, not on a successful send, so a gesture
+      -- during the rate limit does not re-fire on every later sample.
       gesture_locked_until = now + GESTURE_LOCKOUT_MS
 
       if ay >= ax and ay >= az and dy > 0 then
-        last_gesture = "thrust"
+        log_gesture("thrust", peak)
         cast("F")
         return
       elseif az >= ax and az >= ay and dz > 0 then
-        last_gesture = "raise"
+        log_gesture("raise", peak)
         cast("S")
         return
       elseif ax >= ay and ax >= az then
-        last_gesture = "slash"
+        log_gesture("slash", peak)
         cast("A")
         return
       end
@@ -403,32 +425,19 @@ local function refresh_select()
 end
 
 local function build_duel_ui(root)
+  -- Two widgets. Nobody reads a 320x240 panel with their arm extended mid-duel,
+  -- and the projector shows everything that matters. The status line exists for
+  -- exactly one job the radio cannot do: telling you the radio is broken.
   side_label = badge.ui.label(root, "")
   side_label:style({ text_font = 24 })
-  side_label:align("top_mid", 0, 8)
+  side_label:align("top_mid", 0, 20)
 
-  mana_label = badge.ui.label(root, "mana 100")
-  mana_label:style({ text_font = 20 })
-  mana_label:align("top_mid", 0, 42)
-
-  spell_label = badge.ui.label(root, "no cast yet")
-  spell_label:style({ text_font = 18 })
-  spell_label:align("top_mid", 0, 70)
-
-  status_label = badge.ui.label(root, "DOWN sends ready")
-  status_label:style({ text_font = 14 })
-  status_label:align("top_mid", 0, 96)
-
-  local hint = badge.ui.label(
+  status_label = badge.ui.label(
     root,
-    "A fire   B shield   START slash   UP ult   DOWN ready"
+    "DOWN ready   A fire   B shield\nSTART slash   UP ult"
   )
-  hint:style({ text_font = 14 })
-  hint:align("bottom_mid", 0, -30)
-
-  accel_label = badge.ui.label(root, "reading sensor")
-  accel_label:style({ text_font = 14 })
-  accel_label:align("bottom_mid", 0, -12)
+  status_label:style({ text_font = 16 })
+  status_label:align("center", 0, 20)
 end
 
 function on_enter(root)
@@ -503,12 +512,6 @@ function on_tick()
   pump_queue()
 
   if mode == "duel" then
-    -- Local estimate only. Fractional regeneration is kept so 8 mana/second
-    -- still accumulates on a short tick.
-    mana = mana + MANA_REGEN_PER_SECOND * elapsed / 1000
-    if mana > MANA_MAX then
-      mana = MANA_MAX
-    end
     sample_accel()
   end
 
@@ -526,14 +529,9 @@ function on_tick()
     return
   end
 
-  mana_label:set_text("mana " .. math.floor(mana) .. "   sent " .. casts_sent)
-  if accel_ok then
-    accel_label:set_text(
-      "gesture " .. last_gesture ..
-      "   queue " .. #queue ..
-      "   fail " .. send_failures
-    )
-  end
+  -- Side plus a send counter is all the on-badge telemetry anyone needs. The
+  -- detailed numbers go to serial, where they can actually be read.
+  side_label:set_text(side .. "   sent " .. casts_sent)
 end
 
 function on_button(button, kind)

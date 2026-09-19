@@ -142,6 +142,24 @@ If the radio still fails to start:
    against synthesized ArUco frames; `tools/check_camera.py` is the pre-flight for the
    live webcam.
 
+### The badge models no game rules
+
+Originally the player badge kept its own mana and cooldown counters and refused to
+send when they said no. Because the radio is one way those counters can never be
+corrected, so after the judge fired Mana Rain the host granted +40 mana, the badge
+never heard, and a legal Ultimate was silently swallowed at the exact moment the
+projector read MANA RAIN. It always failed closed, so it was not exploitable, only
+embarrassing.
+
+The badge now models nothing: no mana, no cooldowns, no phase, no damage. What
+remains is a flat `SEND_RATE_LIMIT_MS` cap, which is radio hygiene rather than a
+rule and therefore cannot disagree with the laptop. Enforced by
+`tests/test_badge_apps.py::test_the_player_app_does_not_duplicate_host_game_rules`.
+
+Side selection deliberately stayed on the badge rather than moving to a host-side
+MAC map: a MAC map needs a config edit the moment a badge is swapped or its battery
+dies, which would break the "no manual code edit" requirement mid-event.
+
 ## Pre-flight checklist for demo day
 
 - [ ] Power cycle each badge, then go straight into its Phantom app from the

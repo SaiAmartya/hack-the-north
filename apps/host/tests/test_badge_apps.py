@@ -178,6 +178,32 @@ def test_widget_count_stays_modest(path: Path) -> None:
     assert widgets <= 10, f"{path.name} creates {widgets} widgets"
 
 
+def test_the_player_app_does_not_duplicate_host_game_rules() -> None:
+    """The badge must not simulate rules it can never have corrected.
+
+    The radio is one way, so a local mana counter never learns about Mana Rain.
+    It used to refuse to send when its private counter said no, which silently
+    swallowed a legal Ultimate at the exact moment the projector said MANA RAIN.
+    A flat send-rate cap is fine: that is radio hygiene, not a game rule.
+    """
+    body = (BADGES_DIR / "phantom_player.lua").read_text()
+    code = strip_comments(body)
+
+    for banned in ("cooldown_until", "MANA_MAX", "MANA_REGEN", "spell.cost"):
+        assert banned not in code, f"badge must not model {banned}"
+
+    assert "SEND_RATE_LIMIT_MS" in code, "keep a flat rate cap for radio hygiene"
+    assert "next_send_allowed" in code
+
+
+def test_gesture_peaks_are_logged_for_tuning() -> None:
+    """Thresholds are unmeasured, so the badge must report real magnitudes."""
+    body = (BADGES_DIR / "phantom_player.lua").read_text()
+    assert "log_gesture" in body
+    assert "peak=" in body
+    assert "threshold=" in body
+
+
 @pytest.mark.parametrize("path", badge_apps(), ids=lambda p: p.name)
 def test_never_maps_the_home_button(path: Path) -> None:
     """HOME's press is swallowed by the launcher intercept and it exits the app."""

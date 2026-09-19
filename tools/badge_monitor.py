@@ -43,6 +43,8 @@ DATE_IN_VERSION = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # The badge's own boot log carries the build date, which the semver-ish version
 # string does not: "I (473) app_init: Compile time:     Sep 17 2026 17:39:16"
 COMPILE_TIME = re.compile(r"Compile time:\s+(\w{3})\s+(\d{1,2})\s+(\d{4})")
+# "phantom_player gesture slash peak=820mg threshold=700"
+GESTURE_LINE = re.compile(r"gesture (\w+) peak=(\d+)mg threshold=(\d+)")
 MONTHS = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
@@ -120,6 +122,8 @@ def main() -> int:
     radio_state: str | None = None
     radio_failure: str | None = None
     low_heap: int | None = None
+    gestures: dict[str, list[int]] = {}
+    threshold: int | None = None
     senders: Counter[str] = Counter()
     kinds: Counter[str] = Counter()
     macs: dict[str, str] = {}
@@ -147,6 +151,11 @@ def main() -> int:
                 month = MONTHS.get(stamp.group(1))
                 if month:
                     build_date = f"{stamp.group(3)}-{month:02d}-{int(stamp.group(2)):02d}"
+
+            gesture = GESTURE_LINE.search(line)
+            if gesture:
+                gestures.setdefault(gesture.group(1), []).append(int(gesture.group(2)))
+                threshold = int(gesture.group(3))
 
             heap = re.search(r"free heap (\d+)", line)
             if heap:
@@ -241,6 +250,30 @@ def main() -> int:
 
     if low_heap is not None:
         print(f"lowest free heap  {low_heap} bytes")
+
+    if gestures:
+        print()
+        print("gesture tuning    (threshold currently "
+              f"{threshold} mg)")
+        every: list[int] = []
+        for name in sorted(gestures):
+            peaks = gestures[name]
+            every.extend(peaks)
+            print(
+                f"  {name:<8} n={len(peaks):<3} min={min(peaks):<5} "
+                f"max={max(peaks):<5} mg"
+            )
+        weakest = min(every)
+        print()
+        print(f"  weakest deliberate motion seen: {weakest} mg")
+        if threshold is not None:
+            if weakest <= threshold:
+                print(f"  Some motions barely cleared {threshold}. Consider lowering")
+                print(f"  GESTURE_THRESHOLD_MG to about {int(weakest * 0.8)}.")
+            else:
+                headroom = weakest - threshold
+                print(f"  {headroom} mg of headroom. Raise the threshold toward")
+                print(f"  {int(weakest * 0.8)} if resting movement is false-firing.")
 
     if radio_state == "FAILED" or radio_failure:
         print("radio             ENABLE FAILED")

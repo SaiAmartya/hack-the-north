@@ -122,6 +122,10 @@ app in the IDE's single-file format, manifest header included.
 | --- | --- | --- |
 | `phantom_gateway.lua` | the bridge, stays plugged into the laptop | `A` resets counters |
 | `phantom_player.lua` | both player badges | `LEFT`/`RIGHT` pick side, `A` confirm; then `A` fire, `B` shield, `START` slash, `UP` ultimate, `DOWN` ready |
+
+The player badge models **no game rules at all** — no mana, no cooldowns, no phase.
+It reads input, rate-limits the radio, sends, and blinks. The laptop decides
+everything, so the two can never disagree. Its LEDs mean "cast sent", never "hit".
 | `phantom_chaos.lua` | the judge | `A` Meteor, `B` Mana Rain, `START` Double Damage, `UP` reset match |
 
 Four things that will bite you:
@@ -136,9 +140,19 @@ Four things that will bite you:
 - **`radio.enable()` can fail even after a successful push.** Each app says so on
   screen; if it does, reboot the badge.
 
-Gesture thresholds live in one clearly marked block at the top of
-`phantom_player.lua`. Tune them against the live readout at the bottom of the duel
-screen, holding the badge the way you will hold it on stage.
+### Tuning gestures
+
+Thresholds live in one marked block at the top of `phantom_player.lua`. To set them,
+plug the **player** badge into the laptop, open the app, and run:
+
+```bash
+python tools/badge_monitor.py
+```
+
+Every gesture logs its peak magnitude. Swing the badge the way you will on stage,
+then read the summary: it reports min/max per gesture and suggests a threshold from
+your weakest deliberate motion. Reading real numbers off serial beats squinting at a
+320x240 screen mid-swing.
 
 ## Tests
 
