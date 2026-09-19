@@ -2,7 +2,7 @@
 
 September 19, 2026 (evening). Source in `firmware/`; image `.pio/build/badge/firmware.bin`,
 655,961 bytes flash / 26,304 bytes static RAM, SHA-256
-`3cce4f3c3658e526413387ecf17f0d4491698a34e725ecd44eae4571e54cbc1e`. **Built, not flashed.**
+`3cce4f3c3658e526413387ecf17f0d4491698a34e725ecd44eae4571e54cbc1e`. **Flashed to WAND-B602 on September 19 evening** (see the flash record below).
 
 ## Why the badge was "broken"
 
@@ -54,12 +54,32 @@ Mac-side Bleak checks cannot be run from inside the Claude session on this machi
 Python that touches CoreBluetooth without a usage description), so the radio numbers below must come
 from a normal Terminal.
 
-## Physical QA card (after the separately approved app-only flash)
+## Flash record (WAND-B602, approved by Sai)
 
-Flash command, from the repository root with the badge on USB and no other program on the port:
+- The first attempt used `tools/badge_flash.py flash`, which at the time ran `pio run -t upload`.
+  PlatformIO's bundled esptool crashed in its progress logger (`EsptoolLogger` has no
+  `_get_progress_print_file`) **while writing the pioarduino bootloader at 0x0**, leaving
+  10,578 of 18,688 bootloader bytes changed. Nothing else was touched; the badge stayed in the ROM
+  download mode. The tool has been rewritten: app slot only, a consistent `esptool` from `uv`,
+  `--no-progress`, readback verification, and a `restore-boot` command.
+- Recovery: read 0x0–0x9000, confirmed the partition table still matched the stock backup, rewrote
+  0x0–0x8000 from the verified two-read stock backup (`fc5d6fe3…`), read back: 0x0–0x9000 byte-identical
+  to stock.
+- App: wrote 685,600 bytes at 0x10000, read back, SHA-256 identical (`3cce4f3c…`). Watchdog reset out of
+  the bootloader.
+- First boot after a plain USB reset (reset reason 11, not a software reset):
+  `HPDIAG|reset=11|profile=range|ble=on|caps=0F|accel=1|who=11|ctrl1=47|ctrl4=A0`,
+  `radio enabled=1 advertising=1`, `gaps=0 dropped=0 lost=0 overrun_flags=225`, 228 fresh reads in
+  4.65 s (49.0 Hz) with 1,246 status polls (paced acquisition), `heap_free=159348`. This is USB-powered
+  console evidence only; radio, Chrome, battery and reconnect evidence come from the QA card.
+
+## Physical QA card (after the app-only flash above)
+
+For any later reflash, from the repository root with the badge on USB and no other program on the port
+(the tool verifies the stock backup, refuses to touch the bootloader region, and reads the app back):
 
 ```sh
-uv run --with pyserial python tools/badge_flash.py flash
+uv run --with pyserial --with esptool python tools/badge_flash.py flash
 ```
 
 Then, in order, and please report each line's result verbatim:

@@ -53,9 +53,10 @@ gameplay profile and advertises after **every** kind of reset:
 test, the boot-profile/RTC test, axis-mapping and console-default tests all pass; PlatformIO build
 succeeds (655,961 bytes flash, 26,304 bytes static RAM). The application image is
 `.pio/build/badge/firmware.bin`, SHA-256 `3cce4f3c3658e526413387ecf17f0d4491698a34e725ecd44eae4571e54cbc1e`.
-**Not yet flashed.** Hardware results (Chrome chooser after a power cycle, stream rate, discontinuity
-count, reconnects) belong in [the 0.2.0 change record](../docs/qa/firmware-0.2.0.md) once the QA card
-there has been run. Battery-only boot, six faces, 20 reconnects, endurance and Windows remain H-gates.
+**Flashed to WAND-B602** (app slot only, readback verified; the stock bootloader region was restored
+from the verified backup after a failed PlatformIO upload attempt, see [the 0.2.0 change record](../docs/qa/firmware-0.2.0.md)).
+Hardware results (Chrome chooser after a power cycle, stream rate, discontinuity count, reconnects)
+belong in that record once the QA card has been run. Battery-only boot, six faces, 20 reconnects, endurance and Windows remain H-gates.
 
 **Build.** The bundled `~/.platformio/penv` core (6.1.19) is too old for the pinned pioarduino platform
 and will *uninstall* it; build with a current core instead:
@@ -225,11 +226,14 @@ and ST7735/ST7789 **1.11.0**. No stock Lua IDE is needed. Generated `.pio/` and 
 are ignored, not release artifacts to commit. The application is
 `firmware/.pio/build/badge/firmware.bin`; the generated table is `partitions.bin` beside it.
 
-**Do not use `badge_flash.py flash` or `pio run -t upload` for the app-only procedure below.**
-The existing helper's `flash` subcommand verifies a prior device-bound backup, but then invokes
-PlatformIO's multi-artifact uploader. It does **not** check the live partition table against the
-build or independently read back the whole application. Its `restore` command writes the entire
-4 MiB image at offset zero. Neither belongs in the normal installation path.
+**Never use `pio run -t upload` on a badge.** It writes the bootloader and partition table as well as
+the app, and PlatformIO's bundled esptool crashed mid-write on this Mac on September 19, leaving a
+partially written bootloader that had to be restored from the stock backup. Since that day,
+`badge_flash.py flash` is the app-only procedure: it verifies the device-bound stock backup, refuses to
+write if the bootloader/partition region no longer matches that backup (`restore-boot` fixes it),
+writes only the app slot with a consistent `esptool` and `--no-progress`, and reads the whole
+application back before rebooting. Its `restore` command still writes the entire 4 MiB stock image at
+offset zero and is for full recovery only.
 
 ### 2. Identify and preserve one explicitly approved badge
 

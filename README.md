@@ -11,14 +11,14 @@ player-started grip calibration. The gesture detector is now **v3**: a Wii-remot
 ended up) with per-player jab/guard templates; it calibrates and recognizes the recorded iPhone jabs
 that v2 rejected. Badge firmware **0.2.0** is the first gameplay image: 50 Hz/±8 g by default, radio
 on after every reset, and the sensor overwrite flag no longer marks every sample discontinuous.
-It is built but **not yet flashed**; see [the 0.2.0 change record and QA card](docs/qa/firmware-0.2.0.md).
+It is flashed on WAND-B602 (readback verified) and awaiting the physical QA card; see [the 0.2.0 change record](docs/qa/firmware-0.2.0.md).
 The browser reconnects a dropped badge link automatically (bounded) and no longer drops the wand on a
 short page stall. An intermittent Internet-relay freshness failure remains open.
 See [current implementation and measured evidence](docs/qa/input-rebuild.md).
 
 - **[Start here: teammate setup](docs/TEAM-SETUP.md)** — fresh-clone macOS/Windows install,
   local speech, iPhone connection, two laptops, checks and troubleshooting.
-- **[Badge build, backup and flash instructions](firmware/README.md)** — 0.2.0 gameplay image, awaiting flash and QA.
+- **[Badge build, backup and flash instructions](firmware/README.md)** — 0.2.0 gameplay image, flashed, physical QA pending.
 - [MVP](MVP-OUTLINE.md) · [Implementation plan](IMPLEMENTATION-PLAN.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
 - [Design system](DESIGN_SYSTEMS.md) · [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
 

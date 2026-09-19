@@ -14,7 +14,7 @@ not necessarily stock. `restore` writes all 4 MiB and is a separately approved
 recovery action. Follow firmware/README.md for guarded app-only installation;
 this helper's legacy `flash` action does not perform that procedure.
 
-Requirements: `esptool` and `pio` on PATH (install each tool separately; see firmware/README.md).
+Requirements: `esptool` on PATH (`uv run --with esptool`); build the image first with PlatformIO.
 The badge IDE tab must be closed: only one program can hold the serial port.
 """
 from __future__ import annotations
@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -519,7 +520,25 @@ def boot_app(port: str) -> bool:
     return app_is_up(pick_port(None) if port else port)
 
 
+APP_OFFSET = 0x10000
+APP_PARTITION_SIZE = 0x2A0000
+BOOT_REGION_SIZE = 0x9000  # bootloader + partition table: must stay byte-identical to the stock backup
+
+
+def esptool_cmd(port: str, *args: str, before: str = "no-reset", after: str = "no-reset") -> list[str]:
+    return [tool("esptool"), "--chip", CHIP, "--port", port, "--before", before, "--after", after, *args]
+
+
 def cmd_flash(a: argparse.Namespace) -> int:
+    """App-slot-only flash. Never `pio run -t upload`: that writes the bootloader and partition table
+    too, and PlatformIO's bundled esptool has crashed mid-write on this Mac (2026-09-19), leaving a
+    partially written bootloader that had to be restored from the stock backup."""
+    image = FIRMWARE / ".pio" / "build" / "badge" / "firmware.bin"
+    if not image.is_file():
+        sys.exit(f"{image} not found. Build first: cd firmware && uv run --python 3.12 --with 'platformio>=6.2.0' pio run -e badge")
+    if image.stat().st_size > APP_PARTITION_SIZE:
+        sys.exit("application image is larger than the factory app partition; refusing to write")
+    image_hash = sha256_file(image)
     port = pick_port(a.port)
     enter_download_mode(port)
     port = pick_port(a.port)
@@ -532,16 +551,58 @@ def cmd_flash(a: argparse.Namespace) -> int:
         f"verified recovery backup for selected device {device_mac}: "
         f"{backup.name} sha256={payload['sha256']}"
     )
-    cmd = [tool("pio"), "run", "-d", str(FIRMWARE), "-t", "upload", "--upload-port", port]
-    rc = run(cmd)
-    if rc != 0:
-        print(DOWNLOAD_MODE_HINT)
-        return rc
-    if boot_app(port):
+    stock = backup.read_bytes()
+    with tempfile.TemporaryDirectory() as scratch:
+        before = Path(scratch) / "boot-region.bin"
+        if run(esptool_cmd(port, "read-flash", "--no-progress", "0x0", hex(BOOT_REGION_SIZE), str(before))) != 0:
+            print(DOWNLOAD_MODE_HINT)
+            return 1
+        if before.read_bytes() != stock[:BOOT_REGION_SIZE]:
+            sys.exit("bootloader/partition region differs from the verified stock backup; run `restore-boot` first, nothing was written")
+        print(f"bootloader and partition table match the stock backup; writing {image.stat().st_size} bytes at {APP_OFFSET:#x} (sha256 {image_hash})")
+        if run(esptool_cmd(port, "--baud", "921600", "write-flash", "--no-progress", hex(APP_OFFSET), str(image))) != 0:
+            print(DOWNLOAD_MODE_HINT)
+            return 1
+        readback = Path(scratch) / "app-readback.bin"
+        if run(esptool_cmd(port, "--baud", "921600", "read-flash", "--no-progress", hex(APP_OFFSET), str(image.stat().st_size), str(readback))) != 0:
+            return 1
+        if sha256_file(readback) != image_hash:
+            sys.exit("readback does not match the image; do not power off, flash again")
+        print("readback identical to the image")
+    # Leave the ROM bootloader: the RTS-emulated reset does not work on native USB, a watchdog reset does.
+    subprocess.run(esptool_cmd(port, "chip-id", after="watchdog-reset"), capture_output=True, text=True)
+    time.sleep(3.0)
+    if app_is_up(port):
         print("flashed and running:", console_query(port, "id").strip())
         return 0
     print("flashed, but the application did not answer on the console. Unplug and replug the badge (without START), then run `monitor`.")
     return 2
+
+
+def cmd_restore_boot(a: argparse.Namespace) -> int:
+    """Rewrite only the bootloader region (0x0-0x8000) from the verified stock backup."""
+    port = pick_port(a.port)
+    enter_download_mode(port)
+    port = pick_port(a.port)
+    device_mac = probe_device_mac(port)
+    try:
+        backup, payload = find_verified_backup(device_mac)
+    except BackupVerificationError as error:
+        sys.exit(f"refusing: {error}")
+    stock = backup.read_bytes()
+    with tempfile.TemporaryDirectory() as scratch:
+        region = Path(scratch) / "stock-boot-0x0-0x8000.bin"
+        region.write_bytes(stock[:0x8000])
+        print(f"restoring bootloader region from {backup.name} (sha256 {payload['sha256']})")
+        if run(esptool_cmd(port, "--baud", "921600", "write-flash", "--no-progress", "0x0", str(region))) != 0:
+            return 1
+        check = Path(scratch) / "boot-readback.bin"
+        if run(esptool_cmd(port, "read-flash", "--no-progress", "0x0", hex(BOOT_REGION_SIZE), str(check))) != 0:
+            return 1
+        if check.read_bytes() != stock[:BOOT_REGION_SIZE]:
+            sys.exit("bootloader region still differs after restore")
+    print("bootloader and partition table match the stock backup; the badge stays in download mode (run `flash` next or replug)")
+    return 0
 
 
 def cmd_restore(a: argparse.Namespace) -> int:
@@ -619,6 +680,8 @@ def main() -> int:
     register.add_argument("read1")
     register.add_argument("read2")
     register.set_defaults(fn=cmd_register_backup)
+    rb = sub.add_parser("restore-boot", help="rewrite only the bootloader region from the verified stock backup")
+    rb.set_defaults(fn=cmd_restore_boot)
     f = sub.add_parser("flash")
     f.set_defaults(fn=cmd_flash)
     r = sub.add_parser("restore")
