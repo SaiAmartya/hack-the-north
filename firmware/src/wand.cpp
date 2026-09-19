@@ -26,18 +26,9 @@ TaskHandle_t g_task = nullptr;
 void process(uint32_t capture_ms, int16_t cx, int16_t cy, int16_t cz, bool saturated) {
   g_stats.sensor_ok = true;
   const int16_t chip[3] = {cx, cy, cz};
-  int32_t v[3];
-  for (int i = 0; i < 3; i++) {
-    v[i] = (int32_t)g_sign[i] * chip[g_map[i]];
-    if (v[i] > RANGE_G * 1000) {
-      v[i] = RANGE_G * 1000;
-      saturated = true;
-    }
-    if (v[i] < -RANGE_G * 1000) {
-      v[i] = -RANGE_G * 1000;
-      saturated = true;
-    }
-  }
+  const MappedSample mapped = map_and_clip(chip, g_map, g_sign, RANGE_G * 1000);
+  const int16_t v[3] = {mapped.x, mapped.y, mapped.z};
+  saturated = saturated || mapped.saturated;
   g_stats.acquired++;
   g_stats.seq++;
   g_stats.x = (int16_t)v[0];
