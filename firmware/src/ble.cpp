@@ -17,6 +17,7 @@ ControlHandler g_handler = nullptr;
 LinkHandler g_link_handler = nullptr;
 std::atomic<bool> g_enabled{false}, g_connected{false}, g_motion_sub{false}, g_status_sub{false};
 std::atomic<uint32_t> g_gen{0}, g_notify_failures{0}, g_connections{0}, g_adv_restarts{0}, g_conn_interval_units{0};
+std::atomic<int8_t> g_tx_dbm{TX_POWER_DBM};
 uint16_t g_handle = BLE_HS_CONN_HANDLE_NONE;
 StaticSemaphore_t g_send_lock_storage;
 SemaphoreHandle_t g_send_lock = nullptr;
@@ -96,13 +97,18 @@ SubscribeCB g_subscribe_cb;
 void set_control_handler(ControlHandler handler) { g_handler = handler; }
 void set_link_handler(LinkHandler handler) { g_link_handler = handler; }
 
-void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20], bool enabled) {
+void identify(const uint8_t device_id[6]) {
   snprintf(g_name, sizeof(g_name), "%s%02X%02X", DEVICE_NAME_PREFIX, device_id[4], device_id[5]);
+}
+
+void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20], bool enabled, int8_t tx_dbm) {
+  identify(device_id);
   if (!enabled) return;
   g_send_lock = xSemaphoreCreateMutexStatic(&g_send_lock_storage);
 
   NimBLEDevice::init(g_name);
-  NimBLEDevice::setPower(TX_POWER_DBM);
+  g_tx_dbm = tx_dbm;
+  NimBLEDevice::setPower(tx_dbm);
   NimBLEDevice::setSecurityAuth(false, false, false);  // no bonding/pairing in v1 (contract section 3)
   g_server = NimBLEDevice::createServer();
   g_server->setCallbacks(&g_server_cb);
@@ -139,6 +145,12 @@ void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t
 
 const char *name() { return g_name; }
 bool enabled() { return g_enabled; }
+void set_tx_power(int8_t tx_dbm) {
+  if (!g_enabled) return;
+  g_tx_dbm = tx_dbm;
+  NimBLEDevice::setPower(tx_dbm);
+}
+int8_t tx_power() { return g_tx_dbm; }
 bool connected() { return g_connected; }
 bool advertising() { return g_enabled && !g_connected && NimBLEDevice::getAdvertising()->isAdvertising(); }
 void ensure_advertising() {

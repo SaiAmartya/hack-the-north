@@ -74,7 +74,8 @@ type Burst = {
   peak: number;
   peakAt: number;
   peakIndex: number;
-  settled: boolean;        // an impulse was already evaluated; the rest of the burst is ignored
+  earlyEvaluated: boolean; // the fast impulse path already looked at this movement
+  settled: boolean;        // a spell was resolved early; the rest of the burst is ignored
 };
 type Features = {
   startMs: number;
@@ -87,6 +88,7 @@ type Features = {
   tiltDeg: number;         // orientation change from the starting pose to the held end pose
   tiltDirection: Vector;   // device-frame direction of that orientation change
   startPose: Vector;       // resting pose the movement started from
+  endPose: Vector;         // pose held (or reached) at the end
   endQuiet: boolean;       // the movement ended in a still hold (guards need this)
 };
 type ImpulseTemplate = { kind: "impulse"; direction: Vector; peak: number };
@@ -124,6 +126,10 @@ const GUARD_MIN_TILT_DEG = 22;
 const GUARD_MIN_PEAK_MG = 200;
 const DIRECTION_TOLERANCE_DEG = 40;
 const GUARD_TOLERANCE_DEG = 45;
+const LOWERING_DEG = 120;           // a tilt this far from the guard template is the guard being lowered
+const REORIENTATION_SLACK = 1.3;    // a stroke no stronger than its own gravity change is a re-orientation, not a jab
+const GUARD_PREFER_PEAK_MG = 1_500; // below this a matching guard beats a matching impulse
+const AWAY_FROM_GRIP_DEG = 8;       // guard examples must move the hand away from the resting grip on average
 const CONSISTENCY_DEG = 50;
 const SEPARATION_DEG = 50;
 const AMBIGUITY_MARGIN_DEG = 15;
@@ -172,6 +178,7 @@ export class MotionRecognizer {
   private quietSince?: number;
   private armed = false;   // latched once the hand has been still for ARM_MS; cleared when a movement starts
   private burst?: Burst;
+  private rejectedGuardReturn?: Vector;  // after a rejected raise, the lowering that undoes it is expected next
   private evidenceSequence = 0;
   private lastIssue = "";
   private reason?: MotionRejectionReason;
@@ -452,7 +459,7 @@ export class MotionRecognizer {
         const rest = this.rest!;
         const previous = this.window[this.window.length - 2];
         const lead = previous && current.t - previous.t <= MAX_GAP_MS ? [previous, current] : [current];
-        this.burst = { startMs: lead[0].t, rest, samples: lead, peak: 0, peakAt: lead[0].t, peakIndex: 0, settled: false };
+        this.burst = { startMs: lead[0].t, rest, samples: lead, peak: 0, peakAt: lead[0].t, peakIndex: 0, earlyEvaluated: false, settled: false };
         this.quietSince = undefined;
         this.armed = false;
         for (let index = 0; index < lead.length; index++) this.trackPeak(this.burst, index);
@@ -472,9 +479,11 @@ export class MotionRecognizer {
     if (quiet) this.setProgress("settling", QUIET_WINDOW_MS, QUIET_WINDOW_MS);
     else this.setProgress("moving", elapsed, MOVEMENT_MAX_MS);
 
-    if (!burst.settled && this.calibratingSpell !== "protego" && this.impulseComplete(burst, current)) {
-      burst.settled = true;
-      this.complete(this.features(burst, current.t, false), "early");
+    if (!burst.earlyEvaluated && this.calibratingSpell !== "protego" && this.impulseComplete(burst, current)) {
+      // Fast path for strong strokes. A stroke that is not a spell yet (e.g. a brisk guard raise) is
+      // left for the still end, where tilt and hold can be judged.
+      burst.earlyEvaluated = true;
+      if (this.complete(this.features(burst, current.t, false), "early")) burst.settled = true;
     }
     if (quiet) {
       const features = this.features(burst, slice![0].t, true);
@@ -560,6 +569,7 @@ export class MotionRecognizer {
       tiltDeg: angleDegrees(burst.rest, endPose),
       tiltDirection: normalized(subtract(endPose, burst.rest)),
       startPose: burst.rest,
+      endPose,
       endQuiet,
     };
   }
@@ -567,26 +577,29 @@ export class MotionRecognizer {
   // ---------------------------------------------------------------------------------------------
   // Completion, calibration and classification
 
-  private complete(features: Features, how: "early" | "quiet"): void {
+  /** Returns true when the movement was resolved (spell emitted or calibration example judged). */
+  private complete(features: Features, how: "early" | "quiet"): boolean {
     if (features.peak < CANDIDATE_MIN_PEAK_MG) {
       this.setProgress("armed", 0, ARM_MS);
-      return;  // the hand drifted; not a movement anyone meant
+      return how === "quiet";  // the hand drifted; not a movement anyone meant
     }
-    this.recordCandidate(features, how === "early" ? "opposite" : "release", "candidate");
     if (this.calibratingSpell) {
+      this.recordCandidate(features, how === "early" ? "opposite" : "release", "candidate");
       this.acceptCalibrationExample(this.calibratingSpell, features, how);
-      return;
+      return true;
     }
-    if (this.phase !== "ready" || this.generation === undefined) return;
+    if (this.phase !== "ready" || this.generation === undefined) return true;
     const match = this.classify(features);
     if (!match.spell) {
+      if (how === "early") return false;  // not a jab or sweep; judge it as a possible guard when it settles
+      this.recordCandidate(features, "release", "candidate");
       if (match.reason !== undefined) {
         this.reason = match.reason;
         this.lastIssue = match.message;
-        this.recordCandidate(features, how === "early" ? "opposite" : "release", match.reason);
+        this.recordCandidate(features, "release", match.reason);
       }
       this.setProgress("armed", 0, ARM_MS);
-      return;
+      return true;
     }
     this.lastIssue = "";
     this.reason = undefined;
@@ -600,6 +613,7 @@ export class MotionRecognizer {
       endMs: features.endMs,
       quality: match.quality,
     });
+    return true;
   }
 
   private acceptCalibrationExample(spell: SpellName, features: Features, how: "early" | "quiet"): void {
@@ -613,8 +627,11 @@ export class MotionRecognizer {
       this.reason = issue.reason;
       this.recordCandidate(features, how === "early" ? "opposite" : "release", issue.reason);
       this.setProgress("armed", 0, ARM_MS);
+      if (spell === "protego" && features.tiltDeg >= ONSET_TILT_DEG)
+        this.rejectedGuardReturn = scale(features.tiltDirection, -1);
       return;
     }
+    this.rejectedGuardReturn = undefined;
     const examples = this.examples.get(spell) ?? [];
     examples.push(features);
     this.examples.set(spell, examples);
@@ -626,6 +643,18 @@ export class MotionRecognizer {
       return;
     }
     if (spell === "protego") {
+      // Three "raises" that on average bring the hand back toward the resting grip were lowerings
+      // (the wand was already up when calibration started): start again from the grip.
+      const neutral = this.neutral;
+      if (neutral) {
+        const away = examples.reduce((sum, example) => sum + angleDegrees(example.endPose, neutral) - angleDegrees(example.startPose, neutral), 0) / examples.length;
+        if (away < -AWAY_FROM_GRIP_DEG) {
+          this.examples.set(spell, []);
+          this.lastIssue = "Start from your resting grip, then raise and hold.";
+          this.reason = "return-neutral";
+          return;
+        }
+      }
       this.templates.set(spell, {
         kind: "guard",
         direction: normalized(mean(examples.map((example) => example.tiltDirection))),
@@ -650,11 +679,16 @@ export class MotionRecognizer {
     if (spell === "protego") {
       if (how === "early" || !features.endQuiet) return "ignore";
       // The first held tilt defines the raise, wherever the hand happens to rest; each lowering
-      // afterwards points the opposite way and is ignored rather than coached.
-      if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > 120)
+      // afterwards points the opposite way and is ignored rather than coached. The lowering that
+      // undoes a *rejected* raise is expected too, so it can never seed the template.
+      if (this.rejectedGuardReturn && angleDegrees(features.tiltDirection, this.rejectedGuardReturn) <= 60) {
+        this.rejectedGuardReturn = undefined;
+        return "ignore";
+      }
+      if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > LOWERING_DEG)
         return "ignore";
       const stupefy = this.templates.get("stupefy");
-      if (stupefy?.kind === "impulse" && angleDegrees(features.direction, stupefy.direction) <= 30 && features.peak >= stupefy.peak * 0.5)
+      if (stupefy?.kind === "impulse" && angleDegrees(features.direction, stupefy.direction) <= DIRECTION_TOLERANCE_DEG && features.peak >= stupefy.peak * 0.5)
         return { message: "That looked like a jab. Raise your wand into a guard and hold it.", reason: "unclear-direction" };
       if (features.peak < GUARD_MIN_PEAK_MG) {
         if (features.tiltDeg < GUARD_MIN_TILT_DEG) return "ignore";  // the hand drifting, not an attempt
@@ -683,27 +717,36 @@ export class MotionRecognizer {
 
   private classify(features: Features): { spell?: SpellName; quality: number; reason?: MotionRejectionReason; message: string } {
     const impulses: { spell: SpellName; angle: number; template: ImpulseTemplate }[] = [];
-    let guard: { spell: SpellName; quality: number } | undefined;
+    let guard: { spell: SpellName; quality: number; template: GuardTemplate } | undefined;
+    // A held tilt whose stroke is no stronger than its own gravity change is the wand being
+    // re-oriented (raised or lowered), never a jab or sweep, whatever direction it points.
+    const gravityChange = 2_000 * Math.sin((features.tiltDeg * Math.PI) / 360);
+    const reorientation = features.endQuiet && features.tiltDeg >= GUARD_MIN_TILT_DEG && features.peak <= gravityChange * REORIENTATION_SLACK + 100;
+    let lowering = false;
     for (const spell of this.enabledSpells) {
       const template = this.templates.get(spell);
       if (!template) continue;
       if (template.kind === "impulse") {
+        if (reorientation) continue;
         const angle = angleDegrees(features.direction, template.direction);
         if (angle <= DIRECTION_TOLERANCE_DEG && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
           features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35))
           impulses.push({ spell, angle, template });
       } else if (features.endQuiet) {
         const angle = angleDegrees(features.tiltDirection, template.direction);
+        if (features.tiltDeg >= GUARD_MIN_TILT_DEG && angle >= LOWERING_DEG) lowering = true;
         if (features.tiltDeg >= Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) && angle <= GUARD_TOLERANCE_DEG &&
           features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) && features.peak <= Math.max(template.peak * 4, 1_500))
-          guard = { spell, quality: clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
+          guard = { spell, template, quality: clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
       }
     }
+    if (lowering && !guard) return { quality: 0, message: "" };  // lowering the guard is never a cast
     impulses.sort((a, b) => a.angle - b.angle);
     const best = impulses[0];
     if (best && impulses[1] && impulses[1].angle - best.angle < AMBIGUITY_MARGIN_DEG)
       return { quality: 0, reason: "ambiguous", message: "That movement matched two spells. Make it clearer." };
-    if (best && (!guard || features.peak >= best.template.peak * 0.6)) {
+    // A matching guard wins unless the stroke is far too strong to be a raise.
+    if (best && (!guard || features.peak > Math.max(guard.template.peak * 2, GUARD_PREFER_PEAK_MG))) {
       const quality = clamp01(0.5 + (DIRECTION_TOLERANCE_DEG - best.angle) / (2 * DIRECTION_TOLERANCE_DEG) + Math.min(0.25, features.peak / best.template.peak / 4));
       return { spell: best.spell, quality, message: "" };
     }
@@ -755,5 +798,6 @@ export class MotionRecognizer {
     this.quietSince = undefined;
     this.armed = false;
     this.burst = undefined;
+    this.rejectedGuardReturn = undefined;
   }
 }

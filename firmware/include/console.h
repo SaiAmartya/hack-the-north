@@ -1,4 +1,5 @@
 #pragma once
+#include "config.h"
 #include <stdint.h>
 
 // Persistent settings (NVS) and the USB serial command line (diagnostics only; not used in play).
@@ -7,12 +8,13 @@ struct Settings {
   bool leds;
   int8_t axis_map[3]; // contract axis i = axis_sign[i] * chip axis axis_map[i]
   int8_t axis_sign[3];
+  int8_t tx_dbm;      // configured radio power; brownouts cap it per boot
 };
 
 constexpr uint8_t kDefaultDisplayRotation = 3;
 
 constexpr Settings default_settings() {
-  return {kDefaultDisplayRotation, true, {0, 1, 2}, {1, 1, 1}};
+  return {kDefaultDisplayRotation, true, {0, 1, 2}, {1, 1, 1}, TX_POWER_DBM};
 }
 
 namespace console {

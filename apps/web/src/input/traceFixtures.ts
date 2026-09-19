@@ -79,7 +79,7 @@ export class RawMotionTraceBuilder {
     });
   }
 
-  guard(degrees = 35, holdMs = 320, movementMs = 320): readonly CapturedMotion[] {
+  guard(degrees = 35, holdMs = 320, movementMs = 320, pushMg = 220): readonly CapturedMotion[] {
     return this.capture(() => {
       this.rest(300);
       const start = this.pose;
@@ -88,7 +88,7 @@ export class RawMotionTraceBuilder {
       for (let step = 1; step <= steps; step++) {
         const k = step / steps;
         const eased = 0.5 - Math.cos(k * Math.PI) / 2;
-        const push = Math.sin(k * Math.PI) * 220;  // the arm accelerates the wand while raising it
+        const push = Math.sin(k * Math.PI) * pushMg;  // the arm accelerates the wand while raising it
         this.point([start[0] + (raised[0] - start[0]) * eased, start[1] + (raised[1] - start[1]) * eased + push, start[2] + (raised[2] - start[2]) * eased]);
       }
       this.pose = raised;

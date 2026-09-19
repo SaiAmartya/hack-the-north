@@ -107,14 +107,14 @@ macOS, from the root:
 ```sh
 wandPhoneSecret="$HOME/.config/wandduel/phone-enrollment-secret"
 chmod 600 "$wandPhoneSecret"
-apps/host/.venv/bin/python tools/run_game.py --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file "$wandPhoneSecret"
+apps/host/.venv/bin/python tools/run_game.py --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file "$wandPhoneSecret"
 ```
 
 Windows PowerShell, from the root:
 
 ```powershell
 $wandPhoneSecret = Join-Path $env:USERPROFILE '.config/wandduel/phone-enrollment-secret'
-.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file $wandPhoneSecret
+.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file $wandPhoneSecret
 ```
 
 1. On the laptop choose **Connect iPhone**. Scan its fresh QR with the phone camera and open

@@ -15,7 +15,7 @@ firmware route, and the organizers now publish an official
 **Teammate starting point:** build/backup/install instructions are in [Safe teammate setup](#safe-teammate-setup).
 For the laptop game and iPhone setup, start at the [repository README](../README.md).
 
-## 0.2.0 — gameplay image (current source)
+## 0.2.x — gameplay image (current source: 0.2.1)
 
 **What changed from the 0.1.x diagnostic images.** The badge boots straight into the contract's
 gameplay profile and advertises after **every** kind of reset:
@@ -48,6 +48,10 @@ gameplay profile and advertises after **every** kind of reset:
   sample (anchored to the capture time, so processing and notify time never eat the margin), then
   polls once per tick; no 1 kHz busy-polling of the shared I²C bus between samples.
 - **Bounded I²C recovery back-off:** a wedged bus is re-initialised at most every 250 ms.
+- **0.2.1 battery soft start:** radio 1.2 s after boot, LEDs 2 s after the radio, 0 dBm default TX power
+  (`txpower` persists another), 40–80 ms advertising, and an RTC-retained brownout count that delays
+  the radio and lowers power after each brownout reset (reason 9). See
+  [the change record](../docs/qa/firmware-0.2.0.md#021--battery-brownout-fix-flashed).
 
 **Evidence so far (source-level, this Mac):** portable protocol golden vectors, the new continuity-policy
 test, the boot-profile/RTC test, axis-mapping and console-default tests all pass; PlatformIO build

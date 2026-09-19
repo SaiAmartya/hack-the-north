@@ -293,6 +293,97 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     expect(h.recognizer.getState()).toMatchObject({ phase: "ready", lastIssue: "round ended" });
   });
 
+  it("never lets a lowering seed the guard template, even when the first raise was rejected", () => {
+    const h = new MotionHarness();
+    h.still();
+    h.calibrate("stupefy");
+    h.recognizer.beginGestureCalibration("protego");
+    // Raise too little: rejected with coaching. Lowering it must not become example 1.
+    h.feed(h.builder.guard(19));
+    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { protego: 0 }, reason: "guard-tilt" });
+    h.feed(h.builder.lower(19));
+    expect(h.recognizer.getState().examplesBySpell.protego).toBe(0);
+    for (const degrees of [34, 36, 38]) {
+      h.feed(h.builder.guard(degrees));
+      h.feed(h.builder.lower(degrees));
+    }
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { protego: 3 } });
+    h.feed(h.builder.guard(35));
+    expect(h.spells()).toEqual(["protego"]);
+  });
+
+  it("restarts guard examples when the wand was already raised at the start", () => {
+    const h = new MotionHarness();
+    h.still();
+    h.calibrate("stupefy");
+    // The player is already holding the wand up (and still) when protego calibration begins, so the
+    // first movements the recognizer sees are lowerings: they must not become the template.
+    h.builder.guard(35, 1_000);
+    h.recognizer.beginGestureCalibration("protego");
+    h.feed(h.builder.stillness(500));
+    for (let index = 0; index < 2; index++) {
+      h.feed(h.builder.lower(35));
+      h.feed(h.builder.guard(35));
+    }
+    expect(h.recognizer.getState().examplesBySpell.protego).toBe(2);
+    h.feed(h.builder.lower(35));
+    // Three "raises" that all ended nearer the resting grip were lowerings: start over with a hint.
+    expect(h.recognizer.getState()).toMatchObject({ phase: "gesture-calibration", reason: "return-neutral" });
+    expect(h.recognizer.getState().examplesBySpell.protego).toBe(0);
+    for (const degrees of [34, 36, 38]) {
+      h.feed(h.builder.guard(degrees));
+      h.feed(h.builder.lower(degrees));
+    }
+    expect(h.recognizer.getState().phase).toBe("ready");
+  });
+
+  it("recognizes a brisk guard raise whose arm push exceeds the fast jab threshold", () => {
+    const h = new MotionHarness();
+    h.ready();
+    for (const [degrees, push] of [[35, 500], [45, 400], [30, 700]] as const) {
+      h.feed(h.builder.guard(degrees, 320, 320, push));
+      h.feed(h.builder.lower(degrees));
+    }
+    expect(h.spells()).toEqual(["protego", "protego", "protego"]);
+  });
+
+  it("never casts a jab from lowering a guard, even when the tilt is anti-parallel to the jab", () => {
+    const h = new MotionHarness();
+    h.still();
+    h.recognizer.beginGestureCalibration("stupefy");
+    // A jab direction opposite to the guard's tilt delta (the natural geometry for a horizontal wand).
+    const antiParallel: Pose = [0, -0.82, 0.57];
+    for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, antiParallel));
+    expect(h.recognizer.getState().examplesBySpell.stupefy).toBe(3);
+    h.calibrate("protego");
+    expect(h.recognizer.getState().phase).toBe("ready");
+    // Lowering right after the third calibration guard, then normal play.
+    h.feed(h.builder.guard(39));
+    h.feed(h.builder.lower(39));
+    h.feed(h.builder.guard(33));
+    h.feed(h.builder.lower(33));
+    expect(h.spells()).toEqual(["protego", "protego"]);
+    h.feed(h.builder.jab(900, 0, antiParallel));
+    expect(h.spells()).toEqual(["protego", "protego", "stupefy"]);
+  });
+
+  it("prefers the guard when a raise's stroke lies near the jab direction", () => {
+    const h = new MotionHarness();
+    h.still();
+    h.recognizer.beginGestureCalibration("stupefy");
+    const nearGuard: Pose = [0, 0.94, 0.34];
+    for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, nearGuard));
+    expect(h.recognizer.getState().examplesBySpell.stupefy).toBe(3);
+    h.recognizer.beginGestureCalibration("protego");
+    for (const degrees of [33, 36, 39]) {
+      h.feed(h.builder.guard(degrees));
+      h.feed(h.builder.lower(degrees));
+    }
+    if (h.recognizer.getState().phase !== "ready") return;  // the raise itself read as a jab: coached, acceptable
+    h.feed(h.builder.guard(36));
+    expect(h.spells()).toEqual(["protego"]);
+  });
+
   it("recognizes the core fixtures in any grip orientation", () => {
     const base = createCoreMotionFixtures();
     const rotations: Rotation[] = [

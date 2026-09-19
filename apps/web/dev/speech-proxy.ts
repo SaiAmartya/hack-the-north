@@ -2,6 +2,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { request } from "node:http";
 
 export const AUDIO_LIMIT = 96_000;
+/** The loopback game origin, spelled either way the player may have typed it. */
+export function approvedOrigins(approvedOrigin: string): string[] {
+  if (approvedOrigin === "http://127.0.0.1:5173") return [approvedOrigin, "http://localhost:5173"];
+  if (approvedOrigin === "http://localhost:5173") return [approvedOrigin, "http://127.0.0.1:5173"];
+  return [approvedOrigin];
+}
 export function localSpeechAllowed(
   origin: string | undefined,
   peer: string | undefined,
@@ -10,7 +16,8 @@ export function localSpeechAllowed(
 ): boolean {
   const address = peer?.replace(/^::ffff:/, "");
   return (
-    origin === approvedOrigin &&
+    origin !== undefined &&
+    approvedOrigins(approvedOrigin).includes(origin) &&
     !!address &&
     ["127.0.0.1", "::1", interfaceAddress].includes(address)
   );

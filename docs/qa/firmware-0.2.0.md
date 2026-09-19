@@ -73,6 +73,25 @@ from a normal Terminal.
   4.65 s (49.0 Hz) with 1,246 status polls (paced acquisition), `heap_free=159348`. This is USB-powered
   console evidence only; radio, Chrome, battery and reconnect evidence come from the QA card.
 
+## 0.2.1 — battery brownout fix (flashed)
+
+Sai's first battery test of 0.2.0 boot-looped with **reset reason 9 (brownout)**; on USB the same
+image ran. 0.1.8 never showed this only because it never turned the radio on when on battery, and the
+earlier "0.1.2 battery boot loop" was the same mechanism: the radio's current steps on a sagging AA
+rail. 0.2.1 (SHA-256 `492bf8e42f423ee8bdbdc12338b810e71470fefdc7441c55b9fd911381f9d577`, app slot only,
+readback verified) stages the load and adapts:
+
+- Display and sensor first; the radio starts 1.2 s after boot; the LEDs 2 s after the radio.
+- Default TX power 0 dBm (was +3); console `txpower <-12..9>` persists another level.
+- Advertising 40–80 ms instead of 20–40 ms (Chrome still lists the badge in about a second).
+- Each brownout reset since the batteries went in (RTC-retained count, cleared by a power-on reset or
+  30 s of stable running) delays the radio a further 1.5 s (max +4.5 s), lowers TX power 3 dB (floor
+  −12 dBm) and, from the second brownout, keeps the LEDs off for that boot. `HPDIAG` and `status`
+  report `brownouts`, the applied `tx_dbm` and the radio delay.
+
+Sai reported that fresh batteries also fixed the loop on their own; 0.2.1 keeps the margin for tired
+ones. Battery run time and the 30-minute endurance gate remain to be measured.
+
 ## Physical QA card (after the app-only flash above)
 
 For any later reflash, from the repository root with the badge on USB and no other program on the port

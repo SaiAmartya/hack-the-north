@@ -37,6 +37,11 @@ uint32_t g_session_gen = 0, g_seen_gen = 0, g_present_revision = 0;
 uint32_t g_next_health = 0, g_last_health_bits = 0xFFFFFFFF;
 uint32_t g_rate_window_start = 0, g_rate_hz = 0, g_last_acquired = 0, g_next_adv_check = 0;
 bool g_streaming = false;
+// Battery soft start: the radio and LEDs come up in stages after the boost converter has settled.
+uint8_t g_device_id[6], g_info_rec[proto::REC], g_health_rec[proto::REC];
+diagnostic::RadioPolicy g_policy{};
+uint32_t g_radio_start_at = 0, g_radio_started_at = 0;
+bool g_radio_started = false, g_leds_released = false, g_boot_stable = false;
 
 uint32_t health_bits() {
   const wand::Stats &w = wand::stats();
@@ -108,9 +113,11 @@ void boot_diag() {
   present::boot_line(b);
   snprintf(b, sizeof(b), "reset reason %d", (int)esp_reset_reason());
   present::boot_line(b);
-  if (Serial) Serial.printf("HPDIAG|reset=%d|profile=%s|ble=%s|caps=%02X|accel=%d|who=%02X|ctrl0=%02X|ctrl1=%02X|ctrl4=%02X\n",
+  if (Serial) Serial.printf("HPDIAG|reset=%d|profile=%s|ble=%s|caps=%02X|accel=%d|who=%02X|ctrl0=%02X|ctrl1=%02X|ctrl4=%02X|brownouts=%lu|radio_delay_ms=%lu|tx_dbm=%d|leds=%s\n",
                             (int)esp_reset_reason(), p.name, diagnostic::selection().ble ? "on" : "off", diagnostic::capabilities_for(p),
-                            accel::present() ? 1 : 0, accel::who_am_i(), accel::diagnostics().ctrl0, accel::ctrl1(), accel::ctrl4());
+                            accel::present() ? 1 : 0, accel::who_am_i(), accel::diagnostics().ctrl0, accel::ctrl1(), accel::ctrl4(),
+                            (unsigned long)diagnostic::brownouts(), (unsigned long)g_policy.radio_delay_ms, (int)g_policy.tx_dbm_cap,
+                            g_policy.leds_off ? "off-after-brownouts" : "staged");
 }
 }  // namespace
 
@@ -122,29 +129,35 @@ void setup() {
   btn::begin();
   console::load_settings();
   const Settings &s = console::settings();
+  g_policy = diagnostic::radio_policy(diagnostic::brownouts(), s.tx_dbm);
   present::begin(s.rot);
-  leds::set_enabled(s.leds);
+  leds::set_enabled(false);  // LEDs join after the radio is up (staged battery load)
   accel::begin();
   boot_diag();
 
   g_boot_id = esp_random();
   if (g_boot_id == 0) g_boot_id = 1;
-  uint8_t device_id[6];
-  esp_read_mac(device_id, ESP_MAC_BT);
+  esp_read_mac(g_device_id, ESP_MAC_BT);
+  ble::identify(g_device_id);
 
   proto::Info info = diagnostic::info_for(diagnostic::profile(), g_boot_id);
-  memcpy(info.device_id, device_id, 6);
-  uint8_t info_rec[proto::REC], health_rec[proto::REC];
-  proto::encode_info(info, info_rec);
+  memcpy(info.device_id, g_device_id, 6);
+  proto::encode_info(info, g_info_rec);
   wand::begin(g_boot_id);
   wand::set_axes(s.axis_map, s.axis_sign);
-  proto::encode_status(g_session.health(millis(), 0, health_bits()), health_rec);
+  proto::encode_status(g_session.health(millis(), 0, health_bits()), g_health_rec);
   ble::set_control_handler(on_control);
   ble::set_link_handler(on_link);
-  ble::begin(device_id, info_rec, health_rec, diagnostic::selection().ble);
+  g_radio_start_at = millis() + g_policy.radio_delay_ms;
+  if (!diagnostic::selection().ble) {
+    ble::begin(g_device_id, g_info_rec, g_health_rec, false, g_policy.tx_dbm_cap);
+    g_radio_started = true;
+    g_radio_started_at = millis();
+  }
 
   char b[64];
-  snprintf(b, sizeof(b), "BLE %s %s  boot %08lX", ble::name(), diagnostic::selection().ble ? "advertising" : "OFF", (unsigned long)g_boot_id);
+  snprintf(b, sizeof(b), "BLE %s %s  boot %08lX", ble::name(),
+           diagnostic::selection().ble ? (diagnostic::brownouts() ? "after brownout" : "starting") : "OFF", (unsigned long)g_boot_id);
   present::boot_line(b);
   console::begin();
   console::hello();
@@ -190,6 +203,22 @@ void loop() {
     g_rate_hz = (w.acquired - g_last_acquired) * 1000 / (now - g_rate_window_start);
     g_last_acquired = w.acquired;
     g_rate_window_start = now;
+  }
+
+  // Staged battery load: radio after the boot inrush, LEDs after the radio, and the brownout
+  // count is forgotten once the boot has proven stable.
+  if (!g_radio_started && (int32_t)(now - g_radio_start_at) >= 0) {
+    ble::begin(g_device_id, g_info_rec, g_health_rec, true, g_policy.tx_dbm_cap);
+    g_radio_started = true;
+    g_radio_started_at = now;
+  }
+  if (g_radio_started && !g_leds_released && now - g_radio_started_at >= LED_START_AFTER_RADIO_MS) {
+    g_leds_released = true;
+    leds::set_enabled(console::settings().leds && !g_policy.leds_off);
+  }
+  if (!g_boot_stable && now >= STABLE_BOOT_MS) {
+    g_boot_stable = true;
+    if (diagnostic::brownouts()) diagnostic::clear_brownouts();
   }
 
   // Advertising watchdog: an idle wand must always be discoverable (contract section 6).

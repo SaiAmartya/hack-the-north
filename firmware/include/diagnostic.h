@@ -53,6 +53,16 @@ constexpr uint8_t capabilities_for(const Profile &p) { return p.qualified ? (uin
 constexpr proto::Info info_for(const Profile &p, uint32_t boot_id) {
   return {capabilities_for(p), p.sample_hz, p.range_g, {0}, boot_id, FW_MAJOR, FW_MINOR, FW_PATCH, AXIS_CONVENTION};
 }
+// Consecutive brownout resets since the batteries went in (power-on reset clears it, a stable
+// boot clears it). Pure policy for host tests: later radio start, lower power, LEDs off.
+struct RadioPolicy { uint32_t radio_delay_ms; int8_t tx_dbm_cap; bool leds_off; };
+constexpr RadioPolicy radio_policy(uint32_t brownouts, int8_t configured_dbm) {
+  const int8_t cap = (int8_t)(configured_dbm - 3 * (int)(brownouts > 4 ? 4 : brownouts));
+  return {RADIO_START_DELAY_MS + RADIO_BROWNOUT_DELAY_MS * (brownouts > 3 ? 3 : brownouts),
+          cap < TX_POWER_MIN_DBM ? (int8_t)TX_POWER_MIN_DBM : cap, brownouts >= 2};
+}
+uint32_t brownouts();
+void clear_brownouts(); // call once the boot has proven stable
 void begin(); // once at setup, before sensor/BLE initialization
 Selection selection();
 const Profile &profile(); // immutable for this boot, including during I2C recovery

@@ -250,3 +250,68 @@ def test_readiness_failure_never_prints_game_ready(
     output = capsys.readouterr()
     assert "Game ready:" not in output.out
     assert "Startup failed: speech cold" in output.err
+
+
+def test_saved_defaults_only_carry_the_phone_fields(tmp_path: Path) -> None:
+    path = tmp_path / "launcher.json"
+    assert run_game._load_defaults(path) == {}
+    path.write_text('{"phone_service": "https://wands.example", "phone_secret_file": "/tmp/x", "extra": "no", "phone_secret": "never"}')
+    assert run_game._load_defaults(path) == {"phone_service": "https://wands.example", "phone_secret_file": "/tmp/x"}
+    path.write_text("not json")
+    assert run_game._load_defaults(path) == {}
+    run_game._save_defaults("https://wands.example", tmp_path / "secret", path)
+    saved = json.loads(path.read_text())
+    assert saved == {"phone_service": "https://wands.example", "phone_secret_file": str((tmp_path / "secret").resolve())}
+    assert "secret" not in saved["phone_service"]
+
+
+def test_previous_stack_is_only_stopped_when_the_pid_is_this_launcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pidfile = tmp_path / "launcher.pid"
+    assert run_game._stop_previous(pidfile) is False
+    pidfile.write_text("4242\n")
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(run_game.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(run_game.os, "name", "posix")
+    # A recycled PID belonging to something else is left alone and the stale file is removed.
+    monkeypatch.setattr(run_game.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="/usr/bin/vim notes.txt\n"))
+    assert run_game._stop_previous(pidfile) is False
+    assert killed == [(4242, 0)] and not pidfile.exists()
+    # A live launcher is interrupted and waited for.
+    pidfile.write_text("4243\n")
+    alive = {"value": True}
+    def fake_kill(pid, sig):
+        killed.append((pid, sig))
+        if sig != 0:
+            alive["value"] = False
+        elif not alive["value"]:
+            raise OSError("gone")
+    monkeypatch.setattr(run_game.os, "kill", fake_kill)
+    monkeypatch.setattr(run_game.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="python3 tools/run_game.py\n"))
+    assert run_game._stop_previous(pidfile, wait_seconds=1.0) is True
+    assert (4243, run_game.signal.SIGINT) in killed if hasattr(run_game, "signal") else True
+    assert not pidfile.exists()
+
+
+def test_missing_speech_model_is_provisioned_once_and_verified(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append([str(part) for part in command])
+        model.mkdir(parents=True, exist_ok=True)
+        for name in run_game.SPEECH_MODEL_FILES:
+            (model / name).write_text("x")
+        return SimpleNamespace(returncode=0)
+
+    run_game._ensure_speech_model(model, Path("/venv/bin/python"), run=fake_run)
+    assert calls == [["/venv/bin/python", str(run_game.ROOT / "tools" / "setup_speech.py"), "--model-dir", str(model)]]
+    run_game._ensure_speech_model(model, Path("/venv/bin/python"), run=fake_run)
+    assert len(calls) == 1  # already complete: no second download
+
+
+def test_failed_speech_model_download_blocks_startup(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    with pytest.raises(run_game.StartupError, match="speech model"):
+        run_game._ensure_speech_model(model, Path("/venv/bin/python"), run=lambda *a, **k: SimpleNamespace(returncode=1))
+    with pytest.raises(run_game.StartupError, match="speech model"):
+        run_game._ensure_speech_model(model, Path("/venv/bin/python"), run=lambda *a, **k: SimpleNamespace(returncode=0))

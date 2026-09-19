@@ -42,7 +42,7 @@ void axes_text(char *out, size_t n) {
 }
 
 void help() {
-  Serial.println("HPOK|commands: help status trace id selftest axes [+x -y +z] btn rot <0-3> leds on|off echo on|off recal reboot flashmode");
+  Serial.println("HPOK|commands: help status trace id selftest axes [+x -y +z] btn rot <0-3> leds on|off txpower <-12..9> echo on|off recal reboot flashmode");
   Serial.println("HPOK|boot profile: profile creator|rate|range|high on|off (sensor row + radio; reboots; range on is the gameplay default); trace reset (capture next 16 bursts)");
 }
 
@@ -82,9 +82,9 @@ void handle(char *line) {
           FW_VERSION_STR, ble::name(), ble::connected() ? 1 : 0, ble::motion_subscribed() ? 1 : 0, ble::status_subscribed() ? 1 : 0, w.sensor_ok ? 1 : 0,
           accel::ctrl1(), accel::ctrl4(), (unsigned long)accel::recoveries(), w.seq, (unsigned long)w.acquired, (unsigned long)w.notified,
           (unsigned long)w.dropped, (unsigned long)w.gaps, (unsigned long)w.lost, (unsigned long)w.overrun_flags, w.x, w.y, w.z, ax);
-    reply("radio enabled=%d advertising=%d connections=%lu adv_restarts=%lu conn_interval_us=%lu",
+    reply("radio enabled=%d advertising=%d connections=%lu adv_restarts=%lu conn_interval_us=%lu tx_dbm=%d configured_tx_dbm=%d brownouts=%lu",
           ble::enabled() ? 1 : 0, ble::advertising() ? 1 : 0, (unsigned long)ble::connections(), (unsigned long)ble::advertising_restarts(),
-          (unsigned long)ble::conn_interval_us());
+          (unsigned long)ble::conn_interval_us(), (int)ble::tx_power(), (int)g_settings.tx_dbm, (unsigned long)diagnostic::brownouts());
     reply("resources reset=%d heap_free=%lu heap_min=%lu heap_largest=%lu acq_stack_hwm_bytes=%lu notify_failures=%lu",
           (int)esp_reset_reason(), (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
           (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)wand::stack_headroom(),
@@ -164,6 +164,14 @@ void handle(char *line) {
     display::set_rotation(g_settings.rot);
     save_settings();
     reply("rot=%u", g_settings.rot);
+  } else if (!strcmp(cmd, "txpower") && arg) {
+    int dbm = atoi(arg);
+    if (dbm < TX_POWER_MIN_DBM) dbm = TX_POWER_MIN_DBM;
+    if (dbm > TX_POWER_MAX_DBM) dbm = TX_POWER_MAX_DBM;
+    g_settings.tx_dbm = (int8_t)dbm;
+    save_settings();
+    ble::set_tx_power((int8_t)dbm);
+    reply("tx_dbm=%d saved; brownout resets still cap it per boot", dbm);
   } else if (!strcmp(cmd, "leds") && arg) {
     g_settings.leds = !strcmp(arg, "on");
     leds::set_enabled(g_settings.leds);
@@ -207,6 +215,8 @@ void load_settings() {
   g_prefs.begin("hpwand", true);
   g_settings.rot = g_prefs.getUChar("rot", kDefaultDisplayRotation);
   g_settings.leds = g_prefs.getBool("leds", true);
+  g_settings.tx_dbm = (int8_t)g_prefs.getChar("txdbm", TX_POWER_DBM);
+  if (g_settings.tx_dbm < TX_POWER_MIN_DBM || g_settings.tx_dbm > TX_POWER_MAX_DBM) g_settings.tx_dbm = TX_POWER_DBM;
   const int8_t dmap[3] = {0, 1, 2}, dsign[3] = {1, 1, 1};
   if (g_prefs.getBytesLength("amap") != 3 || g_prefs.getBytes("amap", g_settings.axis_map, 3) != 3) memcpy(g_settings.axis_map, dmap, 3);
   if (g_prefs.getBytesLength("asign") != 3 || g_prefs.getBytes("asign", g_settings.axis_sign, 3) != 3) memcpy(g_settings.axis_sign, dsign, 3);
@@ -223,6 +233,7 @@ void save_settings() {
   g_prefs.begin("hpwand", false);
   g_prefs.putUChar("rot", g_settings.rot);
   g_prefs.putBool("leds", g_settings.leds);
+  g_prefs.putChar("txdbm", g_settings.tx_dbm);
   g_prefs.putBytes("amap", g_settings.axis_map, 3);
   g_prefs.putBytes("asign", g_settings.axis_sign, 3);
   g_prefs.end();

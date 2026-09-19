@@ -1,7 +1,16 @@
-"""Start the isolated game stack. No installs, downloads, trust changes or flashing."""
+"""Start the isolated game stack. No installs, downloads, trust changes or flashing.
+
+    python3 tools/run_game.py                      # full stack with the saved phone defaults
+    python3 tools/run_game.py --save-defaults --phone-service https://... --phone-secret-file <file>
+    python3 tools/run_game.py --no-phone           # badge/replay only, ignore saved phone defaults
+
+A previous stack started by this launcher is stopped automatically before the new one starts;
+ports held by anything else still block startup.
+"""
 from __future__ import annotations
 
 import argparse
+import signal
 import ipaddress
 import json
 import os
@@ -24,6 +33,9 @@ from urllib.request import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local") if os.name == "nt" else os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "wandduel"
+DEFAULTS_FILE = STATE_DIR / "launcher.json"
+PID_FILE = STATE_DIR / "launcher.pid"
 FRONTEND_PORT = 5173
 REFEREE_PORT = 8000
 SPEECH_PORT = 8001
@@ -34,6 +46,96 @@ MAX_HEALTH_BYTES = 64 * 1024
 
 class StartupError(RuntimeError):
     pass
+
+
+def _load_defaults(path: Path = DEFAULTS_FILE) -> dict[str, str]:
+    """Saved launcher defaults: only the phone service origin and the secret file's path."""
+    try:
+        payload = json.loads(path.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    allowed = {"phone_service", "phone_secret_file"}
+    return {key: value for key, value in payload.items() if key in allowed and isinstance(value, str) and value}
+
+
+def _save_defaults(phone_service: str, phone_secret_file: Path, path: Path = DEFAULTS_FILE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_suffix(".json.pending")
+    pending.write_text(json.dumps({"phone_service": phone_service, "phone_secret_file": str(phone_secret_file.resolve())}, indent=2) + "\n")
+    if os.name != "nt":
+        os.chmod(pending, 0o600)
+    pending.replace(path)
+
+
+SPEECH_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt", ".wand-speech-model.json")
+
+
+def _speech_model_complete(model_dir: Path) -> bool:
+    return all((model_dir / name).is_file() for name in SPEECH_MODEL_FILES)
+
+
+def _ensure_speech_model(model_dir: Path, python: Path, run=subprocess.run) -> None:
+    """Download the pinned transcription model on first use so the speech helper can start."""
+    if _speech_model_complete(model_dir):
+        return
+    print(f"Local speech model is missing at {model_dir}; downloading the pinned faster-whisper base.en model ...", flush=True)
+    result = run([str(python), str(ROOT / "tools" / "setup_speech.py"), "--model-dir", str(model_dir)], cwd=ROOT)
+    if getattr(result, "returncode", 1) != 0 or not _speech_model_complete(model_dir):
+        raise StartupError("the local speech model could not be provisioned; check the network and rerun")
+
+
+def _launcher_pid(path: Path = PID_FILE) -> int | None:
+    """PID of a live stack started by this launcher, or None. Never trusts a recycled PID."""
+    try:
+        pid = int(path.read_text().strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if pid <= 0 or pid == os.getpid():
+        return None
+    if os.name == "nt":
+        return pid
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    try:
+        args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return pid if "run_game.py" in args else None
+
+
+def _stop_previous(path: Path = PID_FILE, wait_seconds: float = 15.0) -> bool:
+    """Stop a previous stack started by this launcher so a fresh one can take its ports."""
+    pid = _launcher_pid(path)
+    if pid is None:
+        try:
+            path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+        return False
+    print(f"Stopping the previous game stack (pid {pid}) ...", flush=True)
+
+    try:
+        os.kill(pid, signal.SIGINT if os.name != "nt" else signal.SIGTERM)
+    except OSError:
+        return False
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline and _launcher_pid(path) is not None:
+        time.sleep(0.25)
+    if _launcher_pid(path) is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        time.sleep(1.0)
+    try:
+        path.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+    return True
 
 
 def _required_listeners(
@@ -216,8 +318,18 @@ def main() -> int:
     parser.add_argument("--speech-model", type=Path, help="Previously downloaded local faster-whisper model directory")
     parser.add_argument("--phone-service", help="Approved public HTTPS phone-only service origin")
     parser.add_argument("--phone-secret-file", type=Path, help="Private enrollment secret outside the repository")
+    parser.add_argument("--save-defaults", action="store_true", help="Remember --phone-service/--phone-secret-file for plain runs")
+    parser.add_argument("--no-phone", action="store_true", help="Ignore saved phone defaults for this run")
     parser.add_argument("--dev", action="store_true", help="Opt into hot reload; default is a stable build for human QA")
     args = parser.parse_args()
+    if args.save_defaults:
+        if not (args.phone_service and args.phone_secret_file): parser.error("--save-defaults needs --phone-service and --phone-secret-file")
+    elif not args.no_phone and not args.phone_service and not args.phone_secret_file and not args.badge_only:
+        saved = _load_defaults()
+        if saved.get("phone_service") and saved.get("phone_secret_file"):
+            args.phone_service = saved["phone_service"]
+            args.phone_secret_file = Path(saved["phone_secret_file"])
+            print(f"Using saved phone defaults from {DEFAULTS_FILE}", flush=True)
     phone_secret = None
     if bool(args.phone_service) != bool(args.phone_secret_file):
         parser.error("Hosted phone needs --phone-service and --phone-secret-file")
@@ -234,6 +346,9 @@ def main() -> int:
         if len(phone_secret) != 64 or any(c not in "0123456789abcdef" for c in phone_secret):
             parser.error("Enrollment secret must be 32 random bytes encoded as lowercase hex")
         if args.badge_only: parser.error("Badge-only qualification cannot enable hosted phone")
+        if args.save_defaults:
+            _save_defaults(args.phone_service, args.phone_secret_file)
+            print(f"Saved phone defaults to {DEFAULTS_FILE}; plain `python3 tools/run_game.py` now uses them.", flush=True)
     if bool(args.cert) != bool(args.key): parser.error("Both --cert and --key are required")
     if args.phone_host:
         address = ipaddress.ip_address(args.phone_host)
@@ -259,7 +374,9 @@ def main() -> int:
     env["WAND_DEV_RELAY"] = "false" if args.badge_only else "true"
     if args.badge_only: env["WAND_ALLOW_REPLAY"] = "false"
     origin = f"{'https' if args.cert else 'http'}://{env['WAND_FRONTEND_HOST']}:5173"
-    env["WAND_ALLOWED_ORIGINS"] = ",".join([origin, *args.allow_origin])
+    # Both loopback spellings are the same laptop: a page opened at localhost must pair too.
+    loopback = ["http://localhost:5173"] if env["WAND_FRONTEND_HOST"] == "127.0.0.1" and not args.cert else []
+    env["WAND_ALLOWED_ORIGINS"] = ",".join([origin, *loopback, *args.allow_origin])
     if args.cert and args.key:
         env["WAND_TLS_CERT"] = str(args.cert.resolve())
         env["WAND_TLS_KEY"] = str(args.key.resolve())
@@ -269,8 +386,13 @@ def main() -> int:
         env["WAND_REFEREE_URL"] = f"http://{args.referee_bind}:8000"
     if args.referee: env["WAND_REFEREE_URL"] = args.referee
     if args.qa: env["VITE_WAND_QA"] = "1"
-    model = args.speech_model or Path.home()/".cache/wand-speech/faster-whisper-base.en"
-    env["WAND_SPEECH_MODEL_DIR"] = str(model.resolve())
+    model = (args.speech_model or Path.home()/".cache/wand-speech/faster-whisper-base.en").expanduser().resolve()
+    env["WAND_SPEECH_MODEL_DIR"] = str(model)
+    try:
+        _ensure_speech_model(model, python)
+    except StartupError as error:
+        print(f"Startup blocked: {error}", file=sys.stderr, flush=True)
+        return 1
     local_referee_host = None if args.referee else env.get("WAND_HOST", "127.0.0.1")
     referee_url = (args.referee or f"http://{local_referee_host}:{REFEREE_PORT}").rstrip("/")
     try:
@@ -280,6 +402,7 @@ def main() -> int:
     except StartupError as error:
         print(f"Startup blocked: {error}", file=sys.stderr, flush=True)
         return 1
+    _stop_previous()
     try:
         _preflight_ports(
             _required_listeners(env["WAND_FRONTEND_HOST"], local_referee_host)
@@ -287,6 +410,11 @@ def main() -> int:
     except StartupError as error:
         print(f"Startup blocked: {error}", file=sys.stderr, flush=True)
         return 1
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(f"{os.getpid()}\n")
+    except OSError:
+        pass
     frontend_env = env.copy()
     if phone_secret:
         frontend_env["WAND_PHONE_SERVICE"] = args.phone_service.rstrip("/")
@@ -327,6 +455,10 @@ def main() -> int:
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired: process.kill(); process.wait()
         if snapshot: snapshot.cleanup()
+        try:
+            if PID_FILE.read_text().strip() == str(os.getpid()): PID_FILE.unlink()
+        except (FileNotFoundError, OSError, ValueError):
+            pass
 
 if __name__ == "__main__":
     sys.exit(main())

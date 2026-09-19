@@ -9,8 +9,11 @@ typedef void (*LinkHandler)(uint32_t generation);
 
 void set_control_handler(ControlHandler handler);   // call before begin()
 void set_link_handler(LinkHandler handler);
+void identify(const uint8_t device_id[6]);   // sets name() before the radio is started
 // Once per boot; disabled mode sets the identity only, without initializing NimBLE.
-void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20], bool enabled);
+void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20], bool enabled, int8_t tx_dbm);
+void set_tx_power(int8_t tx_dbm);   // live change; no-op before begin()
+int8_t tx_power();
 const char *name();                 // "WAND-46BA"
 bool enabled();
 bool connected();

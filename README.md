@@ -25,7 +25,7 @@ See [current implementation and measured evidence](docs/qa/input-rebuild.md).
 ## Run an already installed checkout
 
 From the repository root, with Node **26.5.0** on PATH and the Python **3.11** environment
-and pinned speech model installed:
+installed:
 
 ```sh
 apps/host/.venv/bin/python tools/run_game.py
@@ -37,14 +37,20 @@ Windows PowerShell:
 .\apps\host\.venv\Scripts\python.exe .\tools\run_game.py
 ```
 
-Open **http://127.0.0.1:5173** in desktop Chrome. Wait for **Game ready** in the terminal;
-this verifies the frontend, referee and warmed local speech helper, not physical gameplay.
-The default stable build does not hot-reload; restart after changing source. **Ctrl+C** stops
-this stack. Phone onboarding additionally needs the hosted-service flags and approved private
-enrollment file in [the setup guide](docs/TEAM-SETUP.md#3-connect-an-iphone).
+That one command starts everything: the referee, the local speech helper (the pinned
+transcription model is downloaded on first use if it is missing) and the game frontend, plus
+iPhone pairing once the phone defaults have been saved with
+`tools/run_game.py --save-defaults --phone-service <origin> --phone-secret-file <file>`
+(`--no-phone` skips them for a run). A previous stack started by the launcher is stopped
+automatically before the new one comes up; a port held by anything else still blocks startup.
 
-The current diagnostic badge image is intentionally blocked from casting. Use the iPhone
-path for the next physical calibration test; neither physical path is qualified for a demo yet.
+Open **http://127.0.0.1:5173** (or `localhost:5173`) in desktop Chrome. Wait for **Game ready**
+in the terminal; this verifies the frontend, referee and warmed local speech helper, not physical
+gameplay. The default stable build does not hot-reload; restart after changing source. **Ctrl+C**
+stops this stack. First-time phone setup is in [the setup guide](docs/TEAM-SETUP.md#3-connect-an-iphone).
+
+Badge firmware 0.2.1 is flashed on WAND-B602 and awaiting its physical QA card; the iPhone
+path is the parallel physical option. Neither physical path is qualified for a demo yet.
 
 ## Scripted QA
 

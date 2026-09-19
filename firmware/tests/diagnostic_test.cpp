@@ -100,5 +100,19 @@ int main() {
   assert(select_next_boot(0, false));
   reset_reason = ESP_RST_TASK_WDT;
   begin(); expect_selection(GAMEPLAY_PROFILE, true); // any unexpected reset boots the discoverable gameplay profile
-  puts("PASS: gameplay default, four profiles, eight boot modes, signed decoding, INFO, RTC corruption and immutable live selection");
+  // Battery soft start: each brownout since the batteries went in delays the radio and lowers its power.
+  static_assert(radio_policy(0, 0).radio_delay_ms == RADIO_START_DELAY_MS && radio_policy(0, 0).tx_dbm_cap == 0 && !radio_policy(0, 0).leds_off, "clean boot");
+  static_assert(radio_policy(1, 0).radio_delay_ms == RADIO_START_DELAY_MS + RADIO_BROWNOUT_DELAY_MS && radio_policy(1, 0).tx_dbm_cap == -3 && !radio_policy(1, 0).leds_off, "one brownout");
+  static_assert(radio_policy(2, 3).tx_dbm_cap == -3 && radio_policy(2, 3).leds_off, "two brownouts: LEDs off");
+  static_assert(radio_policy(9, 9).tx_dbm_cap == -3 && radio_policy(9, 0).tx_dbm_cap == TX_POWER_MIN_DBM, "capped at four steps and the floor");
+  static_assert(radio_policy(9, 0).radio_delay_ms == RADIO_START_DELAY_MS + 3 * RADIO_BROWNOUT_DELAY_MS, "delay capped at three steps");
+  // Brownout counting through the real begin(): brownouts accumulate, power-on clears, software reboot keeps.
+  reset_reason = ESP_RST_POWERON; begin(); assert(brownouts() == 0);
+  reset_reason = ESP_RST_BROWNOUT; begin(); assert(brownouts() == 1);
+  begin(); assert(brownouts() == 2);
+  reset_reason = ESP_RST_SW; begin(); assert(brownouts() == 2);
+  clear_brownouts(); assert(brownouts() == 0);
+  reset_reason = ESP_RST_BROWNOUT; begin(); assert(brownouts() == 1);
+  reset_reason = ESP_RST_POWERON; begin(); assert(brownouts() == 0);
+  puts("PASS: gameplay default, four profiles, eight boot modes, signed decoding, INFO, RTC corruption, brownout policy and immutable live selection");
 }
