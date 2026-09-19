@@ -42,6 +42,7 @@ export type ArenaState = {
   modifierUntilMs: number;
   countdownEndsMs: number;
   startedAtMs: number;
+  lastTickMs: number;
   winner?: PlayerId | null;
 };
 

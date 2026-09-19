@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 PlayerId = Literal["P1", "P2"]
@@ -50,13 +50,18 @@ class RadioEvent(WireModel):
 class PlayerState(WireModel):
     id: PlayerId
     health: int = Field(ge=0, le=100)
-    # Exposed as an int; the engine keeps a float accumulator internally because
-    # 8 mana/second on a 10 Hz tick is 0.8 and would floor to zero every tick.
-    mana: int = Field(ge=0, le=100)
+    # Stored as a float so fractional regeneration accumulates, serialized as an
+    # int for display. 8 mana/second on a 10 Hz tick is 0.8, which would floor to
+    # zero every tick and never regenerate at all if this were an int.
+    mana: float = Field(ge=0, le=100)
     cooldown_until_ms: dict[str, int] = Field(default_factory=dict)
     shield_until_ms: int = 0
     ready: bool = False
     last_spell: str | None = None
+
+    @field_serializer("mana")
+    def _serialize_mana(self, mana: float) -> int:
+        return int(mana)
 
 
 class Effect(WireModel):
@@ -85,6 +90,9 @@ class ArenaState(WireModel):
     modifier_until_ms: int = 0
     countdown_ends_ms: int = 0
     started_at_ms: int = 0
+    # Host clock at the last tick, so regeneration can integrate real elapsed time
+    # instead of assuming a fixed frame rate.
+    last_tick_ms: int = 0
     winner: PlayerId | None = None
 
 
