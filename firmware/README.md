@@ -173,7 +173,7 @@ firmware uses: the organizers' identity record and the RF calibration data are l
 
 1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.1.7|name=WAND-xxxx|...|sensor=1`. The screen
    shows boot diagnostics (accelerometer id 11, reset reason) then the wand screen;
-   LEDs breathe blue. If the screen is upside down or sideways: `rot 3` (or 0/2), saved in NVS.
+   LEDs breathe blue. Fresh badges default to `rot 3`; use `rot 0`, `rot 1`, or `rot 2` if the panel differs. The selected rotation is saved in NVS.
 2. `selftest` runs the contract's golden vectors on the badge. Expect `selftest failures=0`.
 3. Axis check: lay the badge face up on a table and type `axes`. The contract wants about
    `0, 0, +1000` mg. If not, remap without reflashing, e.g. `axes -y +x +z` means contract X = −chip Y,
