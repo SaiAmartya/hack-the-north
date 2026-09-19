@@ -48,7 +48,6 @@ export function phoneMiddleware(
       if (!remote || !secret) { send(503, { issue: "Phone hosting is not configured" }); return; }
       if (busy || Date.now() < nextPairAt) { send(429, { issue: "Wait a moment, then reconnect" }); return; }
       busy = true;
-      nextPairAt = Date.now() + 10_000;
       const abort = new AbortController();
       const timeout = setTimeout(() => abort.abort(), 5_000);
       res.on("close", () => abort.abort());
@@ -73,6 +72,9 @@ export function phoneMiddleware(
           const pair = parseHostedPair(JSON.parse(Buffer.concat(chunks).toString("utf8")));
           if (new URL(pair.phoneUrl).origin !== remote || pair.expiresAtMs > Date.now() + 125_000)
             throw new Error("wrong service");
+          // Only a successful pair starts a short cooldown; a failed or cancelled attempt may be
+          // retried at once instead of surfacing as "unavailable".
+          nextPairAt = Date.now() + 2_000;
           send(200, pair);
         } catch {
           send(503, { issue: "Phone connection unavailable. Try again." });

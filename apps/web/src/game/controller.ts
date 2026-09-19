@@ -619,13 +619,25 @@ export class DuelController {
   }
 }
 
+/** The local broker explains refusals in a small JSON body; show that instead of a generic line. */
+async function brokerIssue(response: Response, fallback: string): Promise<string> {
+  try {
+    const value: unknown = await response.json();
+    const issue = value && typeof value === "object" ? (value as { issue?: unknown }).issue : undefined;
+    if (typeof issue === "string" && issue.length > 0 && issue.length <= 120) return issue;
+  } catch {
+    // no usable body
+  }
+  return fallback;
+}
+
 async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
   const response = await fetch("/api/phone/config", {
     cache: "no-store",
     method: "POST",
     signal,
   });
-  if (!response.ok) throw new Error("Phone pairing is unavailable.");
+  if (!response.ok) throw new Error(await brokerIssue(response, "Phone pairing is unavailable."));
   const value: unknown = await response.json();
   if (
     !value ||
@@ -640,7 +652,7 @@ async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
 
 async function createHostedPair(signal: AbortSignal): Promise<HostedPair> {
   const response = await fetch("/api/phone/pair", { method: "POST", signal });
-  if (!response.ok) throw new Error("Phone pairing is unavailable.");
+  if (!response.ok) throw new Error(await brokerIssue(response, "Phone pairing is unavailable."));
   return parseHostedPair(await response.json());
 }
 export const nameOf = (spell: SpellName) =>

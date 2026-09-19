@@ -45,6 +45,17 @@ describe("local hosted-phone broker", () => {
     const again = await fetch(`${base}/api/phone/pair`, { method: "POST", headers: { Origin: origin } });
     expect(again.status).toBe(429);
   });
+  it("lets a failed pairing attempt be retried at once", async () => {
+    const upstream = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("upstream down", { status: 503 }))
+      .mockResolvedValue(new Response(JSON.stringify(pair())));
+    const base = await start(upstream);
+    const failed = await fetch(`${base}/api/phone/pair`, { method: "POST", headers: { Origin: origin } });
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ issue: "Phone connection unavailable. Try again." });
+    const retry = await fetch(`${base}/api/phone/pair`, { method: "POST", headers: { Origin: origin } });
+    expect(retry.status).toBe(200);
+  });
   it("refuses foreign origins, arbitrary bodies and non-POST without remote traffic", async () => {
     const upstream = vi.fn<typeof fetch>();
     const base = await start(upstream);
