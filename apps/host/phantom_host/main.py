@@ -23,9 +23,11 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from phantom_host import game
+from phantom_host.arena_director import ArenaDirector
 from phantom_host.broadcaster import ArenaBroadcaster
 from phantom_host.config import Settings
 from phantom_host.contracts import (
+    ArenaDirective,
     ArenaEnvelope,
     ArenaState,
     Effect,
@@ -71,6 +73,8 @@ class ArenaHost:
 
         self.gateway: SerialGateway | None = None
         self.camera: CameraWorker | None = None
+        self.director: ArenaDirector | None = None
+        self.director_task: asyncio.Task[None] | None = None
         self.packets_applied = 0
         self.duplicates_dropped = 0
         self.lines_rejected = 0
@@ -135,7 +139,17 @@ class ArenaHost:
         effects = game.reset_match(self.state, self.now_ms())
         self._deduper.reset()
         self.director_commentary = None
+        if self.director is not None:
+            self.director.reset()
         self._record(effects)
+        return effects
+
+    def apply_directive(self, directive: ArenaDirective) -> list[Effect]:
+        """Route a Director proposal through the engine, which is authoritative."""
+        effects = game.apply_directive(self.state, directive, self.now_ms())
+        if effects:
+            self.director_commentary = directive.commentary
+            self._record(effects)
         return effects
 
     def tick(self) -> list[Effect]:
@@ -204,6 +218,9 @@ class ArenaHost:
             "packetsApplied": self.packets_applied,
             "duplicatesDropped": self.duplicates_dropped,
             "linesRejected": self.lines_rejected,
+            "directorLive": bool(self.director and self.director.live),
+            "directorRequests": self.director.requests_made if self.director else 0,
+            "directorFallbacks": self.director.fallbacks_used if self.director else 0,
             "winner": self.state.winner,
         }
 
@@ -239,6 +256,14 @@ def create_app(
             _camera_thread, stop_camera = arena.camera.start()
             logger.info("camera thread started")
 
+        if arena.director is None:
+            # Pre-set by tests to inject a fake OpenAI client.
+            arena.director = ArenaDirector(settings)
+        logger.info(
+            "arena director %s",
+            "live" if arena.director.live else "fallback only (no API key)",
+        )
+
         tick_task = asyncio.create_task(_tick_loop(arena, broadcaster, settings))
 
         try:
@@ -247,6 +272,10 @@ def create_app(
             tick_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await tick_task
+            if arena.director_task is not None:
+                arena.director_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await arena.director_task
             if stop_serial is not None:
                 stop_serial.set()
             if stop_camera is not None:
@@ -299,12 +328,46 @@ async def _tick_loop(
             arena.drain_serial_queue()
             arena.sync_camera()
             arena.tick()
+            _pump_director(arena)
             await broadcaster.publish(arena.envelope_payload())
         except asyncio.CancelledError:
             raise
         except Exception as error:  # pragma: no cover - keep the match alive
             logger.exception("tick failed: %s", error)
         await asyncio.sleep(interval)
+
+
+def _pump_director(arena: ArenaHost) -> None:
+    """Start a Director request if one is due and none is already in flight.
+
+    The OpenAI call is synchronous and can take seconds, so it runs in a worker
+    thread. Blocking the tick loop would freeze the whole arena for every
+    spectator, which is a far worse failure than a late modifier.
+    """
+    director = arena.director
+    if director is None:
+        return
+    if arena.director_task is not None and not arena.director_task.done():
+        return
+    if not director.should_request(arena.state, arena.now_ms()):
+        return
+
+    director.schedule_next(arena.now_ms())
+    arena.director_task = asyncio.create_task(_request_directive(arena, director))
+
+
+async def _request_directive(arena: ArenaHost, director: ArenaDirector) -> None:
+    try:
+        directive = await asyncio.to_thread(
+            director.request_directive, arena.state, arena.markers
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:  # pragma: no cover - request_directive never raises
+        logger.warning("director task failed: %s", error)
+        return
+
+    arena.apply_directive(directive)
 
 
 # Module level app for `uvicorn phantom_host.main:app`. Construction is cheap and

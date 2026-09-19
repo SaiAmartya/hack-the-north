@@ -3,11 +3,14 @@ through ArenaHost.handle_line, which is the same path real serial input takes.""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from phantom_host.arena_director import ArenaDirector
 from phantom_host.config import Settings
 from phantom_host.main import ArenaHost, create_app
 
@@ -215,3 +218,112 @@ def test_websocket_mana_is_an_integer_on_the_wire(client: TestClient) -> None:
     with client.websocket_connect("/ws/arena") as socket:
         envelope = socket.receive_json()
     assert isinstance(envelope["state"]["players"]["P1"]["mana"], int)
+
+
+# ---------------------------------------------------------------------------
+# director wiring
+# ---------------------------------------------------------------------------
+
+
+class FakeChatClient:
+    """Minimal stand-in for the OpenAI SDK surface the Director uses."""
+
+    def __init__(self, content: str) -> None:
+        self.calls = 0
+        outer = self
+
+        class Completions:
+            def create(self, **_kwargs: object) -> object:
+                outer.calls += 1
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+                )
+
+        self.chat = SimpleNamespace(completions=Completions())
+
+
+def test_the_director_reaches_the_match_through_the_tick_loop() -> None:
+    """End to end wiring: due -> worker thread -> engine -> envelope."""
+    settings = Settings(
+        serial_enabled=False,
+        camera_enabled=False,
+        director_enabled=True,
+        director_first_request_ms=0,
+        openai_api_key="test",
+    )
+    host = ArenaHost(settings)
+    host.director = ArenaDirector(
+        settings,
+        client=FakeChatClient(
+            json.dumps(
+                {
+                    "modifier": "double_damage",
+                    "duration_ms": 5000,
+                    "commentary": "Gloves off",
+                }
+            )
+        ),
+    )
+
+    with TestClient(create_app(settings=settings, host=host)) as client:
+        start_match(host)
+        with client.websocket_connect("/ws/arena") as socket:
+            for _ in range(60):
+                envelope = socket.receive_json()
+                if envelope["directorCommentary"]:
+                    break
+            else:
+                pytest.fail("director commentary never reached the client")
+
+    assert envelope["directorCommentary"] == "Gloves off"
+    assert envelope["state"]["modifier"] == "double_damage"
+    assert host.director.requests_made == 1
+
+
+def test_a_failing_director_leaves_the_match_playable() -> None:
+    """No API key must behave like a timeout: deterministic Mana Rain, no crash."""
+    settings = Settings(
+        serial_enabled=False,
+        camera_enabled=False,
+        director_enabled=True,
+        director_first_request_ms=0,
+        openai_api_key=None,
+    )
+    host = ArenaHost(settings)
+
+    with TestClient(create_app(settings=settings, host=host)) as client:
+        start_match(host)
+        with client.websocket_connect("/ws/arena") as socket:
+            for _ in range(60):
+                envelope = socket.receive_json()
+                if envelope["state"]["modifier"] != "none":
+                    break
+            else:
+                pytest.fail("fallback modifier never applied")
+
+        # And the match still responds to real play afterwards.
+        host.handle_line("PA1|P1|CAST|F|21")
+        assert host.state.players["P2"].health < 100
+        assert client.get("/health").json()["directorFallbacks"] >= 1
+
+    assert envelope["state"]["modifier"] == "mana_rain"
+
+
+def test_resetting_a_match_rearms_the_director() -> None:
+    settings = Settings(
+        serial_enabled=False,
+        camera_enabled=False,
+        director_enabled=True,
+        openai_api_key=None,
+    )
+    host = ArenaHost(settings)
+    host.director = ArenaDirector(settings, client=None)
+
+    start_match(host)
+    host.director.schedule_next(host.now_ms())
+    assert host.director.should_request(host.state, host.now_ms() + 1000) is False
+
+    host.reset_match()
+    start_match(host)
+    due = host.state.started_at_ms + settings.director_first_request_ms
+    assert host.director.should_request(host.state, due) is True
