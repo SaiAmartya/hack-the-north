@@ -15,6 +15,14 @@ run_game = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_game)
 
 
+@pytest.fixture(autouse=True)
+def isolated_launcher_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Never read this machine's saved phone defaults or a live stack's pid file."""
+    monkeypatch.setattr(run_game, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(run_game, "DEFAULTS_FILE", tmp_path / "launcher.json")
+    monkeypatch.setattr(run_game, "PID_FILE", tmp_path / "launcher.pid")
+
+
 def test_required_listeners_use_the_actual_selected_hosts() -> None:
     assert run_game._required_listeners("127.0.0.1", "127.0.0.1") == [
         ("frontend", "127.0.0.1", 5173),
