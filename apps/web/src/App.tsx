@@ -1,6 +1,7 @@
 import { ArenaStage } from "./components/ArenaStage";
 import { EventBanner } from "./components/EventBanner";
 import { Hud } from "./components/Hud";
+import { WandPanel } from "./components/WandPanel";
 import { useArenaSocket } from "./hooks/useArenaSocket";
 import type { ArenaState, ConnectionState } from "./types";
 import { PLAYER_COLORS } from "./types";
@@ -20,6 +21,8 @@ export function App() {
         <span className="spacer" />
         <span className="pill">{state?.phase ?? "offline"}</span>
       </div>
+
+      <WandPanel onEvidence={(e) => console.info("motion evidence", e)} />
 
       <div className="stage">
         <ArenaStage envelope={envelope} effectsRef={effectsRef} />

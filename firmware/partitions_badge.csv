@@ -1,0 +1,8 @@
+# Mirrors the stock badge partition table (read back from a full flash dump), so our app lives in the
+# factory slot and never touches the organizers' NVS identity record, the RF calibration data or the
+# stock littlefs storage. subtype 0x83 = littlefs.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x4000,
+phy_init,   data, phy,      0xd000,   0x1000,
+factory,    app,  factory,  0x10000,  0x2a0000,
+storage,    data, 0x83,     0x2b0000, 0x140000,

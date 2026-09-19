@@ -30,9 +30,10 @@ Web arena (open this on the projector):
 cd apps/web && npm install && npm run dev
 ```
 
-Badge apps: there is no CLI flashing path. Paste each file in `badges/` into the
-[Badge IDE](https://badge.hackthenorth.com/ide/) via **Import app**, then
-**Connect → Push**. See [Badge apps](#badge-apps) below.
+Badge firmware (the wand): `firmware/` is a native image implementing
+[BADGE-FIRMWARE-CONTRACT.md](BADGE-FIRMWARE-CONTRACT.md). Back up, flash and bring up a badge
+with `tools/badge_flash.py`; see [firmware/README.md](firmware/README.md). The Lua apps in
+`badges/` are the earlier stock-firmware prototype and are no longer the play path.
 
 No badges handy? Run the whole thing against a simulated gateway:
 
@@ -105,7 +106,22 @@ cd apps/web && npm run dev
 
 The simulator plays a full duel on a loop, reset included.
 
-## Badge apps
+## Badge firmware
+
+The wand is custom firmware, not a Lua app: the stock sandbox cannot run a radio game (Bluetooth
+takes the whole shared heap), which the badge's designer confirmed. `firmware/` holds the
+PlatformIO project (ESP32-C3, Arduino core 3.x, NimBLE). It implements the GATT service, records,
+session rules and feedback defined in [BADGE-FIRMWARE-CONTRACT.md](BADGE-FIRMWARE-CONTRACT.md),
+carries an on-badge self-test against the contract's golden vectors (`selftest` on the serial
+console), and is flashed and restored with `tools/badge_flash.py`. It runs on hardware: the
+first badge was flashed on 2026-09-19 and `tools/wand_ble_check.py` (laptop + `bleak`) walks the
+full contract session over real BLE and passes. The browser side lives in
+`apps/web/src/lib/wandProtocol.ts` (codec), `wandBle.ts` (Web Bluetooth session client),
+`wandSim.ts` (labelled virtual wand) and `motion.ts` (segmentation and calibrated gesture
+classification); the **Wand** panel at the top of the web app connects, syncs and exercises
+feedback. Full details and the bring-up checklist: [firmware/README.md](firmware/README.md).
+
+## Badge apps (legacy Lua prototype)
 
 There is no CLI flashing path for the badge. Each file in `badges/` is a complete
 app in the IDE's single-file format, manifest header included.

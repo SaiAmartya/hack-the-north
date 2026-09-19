@@ -22,5 +22,9 @@ dist/
 !assets/**/*.jpg
 captures/
 
+# badge firmware build output and per-badge flash backups (4 MB each, keep them locally)
+firmware/.pio/
+firmware/backups/
+
 # os
 .DS_Store
