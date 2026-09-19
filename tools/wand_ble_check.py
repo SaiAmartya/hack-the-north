@@ -175,12 +175,23 @@ async def main() -> int:
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_DAMAGE, wp.SP_NONE, 500), epoch, link.device_now() - 50)
         check(st is not None and st.detail1 == wp.R_EXPIRED, "CUE already due rejected (4)", f"{st}")
 
-        # keep the lease alive while streaming
+        # keep the lease alive while streaming, and measure command round trips under load
         t_end = time.monotonic() + a.seconds
         first = len(link.motion)
+        load_rtts = []
         while time.monotonic() < t_end:
-            await asyncio.sleep(0.9)
-            await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
+            await asyncio.sleep(0.45)
+            st, rtt = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
+            if st is not None:
+                load_rtts.append(rtt)
+            await asyncio.sleep(0.45)
+            st, rtt = await link.command(wp.OP_SYNC)
+            if st is not None:
+                load_rtts.append(rtt)
+        if load_rtts:
+            load_rtts.sort()
+            print(f"command RTT while streaming: min {load_rtts[0]:.0f} median {statistics.median(load_rtts):.0f} max {load_rtts[-1]:.0f} ms over {len(load_rtts)} commands")
+            check(statistics.median(load_rtts) < 100, "command RTT under load stays under 100 ms (browser sync policy)", f"median {statistics.median(load_rtts):.0f} ms")
         frames = [m for m, _ in link.motion[first:]]
         elapsed = a.seconds
         rate = len(frames) / elapsed if elapsed else 0

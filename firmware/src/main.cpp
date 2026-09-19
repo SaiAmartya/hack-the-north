@@ -1,9 +1,16 @@
 // Harry Potter Battle Simulator wand firmware for the Hack the North 2026 Hacker Badge.
 // Implements BADGE-FIRMWARE-CONTRACT.md v1: BLE GATT peripheral, 50 Hz raw acceleration, session
 // commands (OPEN/SYNC/SET_STATE/CUE) and on-badge feedback. See README.md in this folder.
+//
+// Tasks: the NimBLE host task answers CONTROL writes (on_control), the acquisition task in wand.cpp
+// samples and notifies MOTION, and the Arduino loop does everything else (buttons, console, leases,
+// cues, health, screen and LEDs). g_session and the STATUS characteristic are shared between the
+// host task and the loop and are only touched under g_lock; the loop never holds it while drawing.
 #include <Arduino.h>
 #include <esp_mac.h>
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "accel.h"
 #include "ble.h"
 #include "buttons.h"
@@ -16,10 +23,16 @@
 
 namespace {
 proto::Session g_session;
+SemaphoreHandle_t g_lock = nullptr;
+struct Lock {
+  Lock() { xSemaphoreTake(g_lock, portMAX_DELAY); }
+  ~Lock() { xSemaphoreGive(g_lock); }
+};
+volatile bool g_health_dirty = false;   // set by the host task when a command changed the stale bit
 uint32_t g_boot_id = 0;
 uint32_t g_seen_gen = 0;
 uint32_t g_next_health = 0, g_last_health_bits = 0xFFFFFFFF;
-uint32_t g_rate_window_start = 0, g_rate_window_count = 0, g_rate_hz = 0, g_last_acquired = 0;
+uint32_t g_rate_window_start = 0, g_rate_hz = 0, g_last_acquired = 0;
 bool g_streaming = false;
 
 uint32_t health_bits() {
@@ -27,7 +40,9 @@ uint32_t health_bits() {
   return (w.sensor_ok ? proto::H_SENSOR : 0) | (g_streaming ? proto::H_STREAM : 0) | (present::healthy() ? proto::H_PRESENTATION : 0);
 }
 
+// Loop only. Health is notified at 1 Hz and immediately when its bits change.
 void publish_health(uint32_t now, bool force) {
+  Lock lock;
   const uint32_t bits = health_bits() | (g_session.state_stale() ? proto::H_STATE_STALE : 0);
   if (!force && bits == g_last_health_bits && now < g_next_health) return;
   g_last_health_bits = bits;
@@ -37,6 +52,25 @@ void publish_health(uint32_t now, bool force) {
   proto::encode_status(h, rec);
   ble::set_health(rec);
   ble::notify_status(rec);
+}
+
+// Runs on the NimBLE host task the moment a CONTROL write lands, so a command result never waits
+// for the loop: with results sent from the loop, a screen redraw added up to ~100 ms to the
+// browser's round trip and its clock-sync policy gave up. One result per identifiable frame.
+void on_control(const uint8_t *raw, size_t len, uint32_t received_ms) {
+  bool stale_changed = false;
+  {
+    Lock lock;
+    const bool stale_before = g_session.state_stale();
+    proto::Status result;
+    if (g_session.handle_control(raw, len, received_ms, result)) {
+      uint8_t rec[proto::REC];
+      proto::encode_status(result, rec);
+      ble::notify_status(rec);
+    }
+    stale_changed = stale_before != g_session.state_stale();
+  }
+  if (stale_changed) g_health_dirty = true;
 }
 
 void boot_diag() {
@@ -62,6 +96,7 @@ void boot_diag() {
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(5);  // a stalled USB host must never block acquisition
+  g_lock = xSemaphoreCreateMutex();
   btn::begin();
   console::load_settings();
   const Settings &s = console::settings();
@@ -82,6 +117,7 @@ void setup() {
   wand::begin(g_boot_id);
   wand::set_axes(s.axis_map, s.axis_sign);
   proto::encode_status(g_session.health(millis(), 0, health_bits()), health_rec);
+  ble::set_control_handler(on_control);
   ble::begin(device_id, info_rec, health_rec);
 
   char b[64];
@@ -108,32 +144,33 @@ void loop() {
   const uint32_t gen = ble::generation();
   if (gen != g_seen_gen) {
     g_seen_gen = gen;
-    g_session.reset();
+    {
+      Lock lock;
+      g_session.reset();
+    }
     present::link_changed();
     publish_health(now, true);
   }
-
-  // Commands arrive on the BLE task and are processed here, one result per identifiable frame.
-  uint8_t raw[proto::REC];
-  size_t len;
-  uint32_t received;
-  while (ble::pop_control(raw, len, received)) {
-    proto::Status result;
-    const bool stale_before = g_session.state_stale();
-    if (g_session.handle_control(raw, len, received, result)) {
-      uint8_t rec[proto::REC];
-      proto::encode_status(result, rec);
-      ble::notify_status(rec);
-    }
-    if (stale_before != g_session.state_stale()) publish_health(now, true);
+  if (g_health_dirty) {
+    g_health_dirty = false;
+    publish_health(now, true);
   }
-  g_session.tick(now);
 
-  g_streaming = ble::connected() && g_session.is_open() && ble::motion_subscribed();
+  // Lease expiry, stream gate and due cues, then a snapshot of the state for presentation.
+  proto::Cue cues[proto::MAX_CUES];
+  int n_cues = 0;
+  proto::DisplayState st;
+  bool stale;
+  {
+    Lock lock;
+    g_session.tick(now);
+    g_streaming = ble::connected() && g_session.is_open() && ble::motion_subscribed();
+    while (n_cues < proto::MAX_CUES && g_session.take_cue(now, cues[n_cues])) n_cues++;
+    st = g_session.state();
+    stale = g_session.state_stale();
+  }
   wand::set_streaming(g_streaming);  // sampling + MOTION notifications run on the acquisition task
-
-  proto::Cue cue;
-  while (g_session.take_cue(now, cue)) present::play_cue(cue, g_session.state().phase);
+  for (int i = 0; i < n_cues; i++) present::play_cue(cues[i], st.phase);
 
   // effective acquisition rate, for the footer
   const wand::Stats &w = wand::stats();
@@ -142,9 +179,8 @@ void loop() {
     g_last_acquired = w.acquired;
     g_rate_window_start = now;
   }
-  (void)g_rate_window_count;
 
   publish_health(now, false);
-  present::tick(g_session, now, ble::connected(), g_streaming, g_rate_hz, w.dropped);
+  present::tick(st, stale, now, ble::connected(), g_streaming, g_rate_hz, w.dropped);
   delay(1);
 }

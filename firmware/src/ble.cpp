@@ -4,20 +4,12 @@
 #include <NimBLEDevice.h>
 #include <esp_mac.h>
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 
 namespace ble {
 namespace {
-struct CtrlMsg {
-  uint8_t data[20];
-  uint8_t len;
-  uint32_t at_ms;
-};
-
 NimBLEServer *g_server = nullptr;
 NimBLECharacteristic *g_info = nullptr, *g_motion = nullptr, *g_control = nullptr, *g_status = nullptr;
-QueueHandle_t g_ctrl = nullptr;
+ControlHandler g_handler = nullptr;
 volatile bool g_connected = false, g_motion_sub = false, g_status_sub = false;
 volatile uint32_t g_gen = 0;
 uint8_t g_health[20];
@@ -40,14 +32,13 @@ class ServerCB : public NimBLEServerCallbacks {
 };
 
 class ControlCB : public NimBLECharacteristicCallbacks {
+  // Runs on the NimBLE host task without the host lock held, so the handler may notify from here.
   void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
     NimBLEAttValue v = c->getValue();
-    CtrlMsg m;
-    m.len = (uint8_t)(v.size() > 255 ? 255 : v.size());
-    memset(m.data, 0, sizeof(m.data));
-    memcpy(m.data, v.data(), v.size() < 20 ? v.size() : 20);
-    m.at_ms = millis();
-    if (g_ctrl) xQueueSend(g_ctrl, &m, 0);
+    uint8_t raw[20];
+    memset(raw, 0, sizeof(raw));
+    memcpy(raw, v.data(), v.size() < 20 ? v.size() : 20);
+    if (g_handler) g_handler(raw, v.size(), millis());
   }
 };
 
@@ -64,10 +55,11 @@ ControlCB g_control_cb;
 SubscribeCB g_subscribe_cb;
 }  // namespace
 
+void set_control_handler(ControlHandler handler) { g_handler = handler; }
+
 void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20]) {
   snprintf(g_name, sizeof(g_name), "%s%02X%02X", DEVICE_NAME_PREFIX, device_id[4], device_id[5]);
   memcpy(g_health, health_rec, 20);
-  g_ctrl = xQueueCreate(8, sizeof(CtrlMsg));
 
   NimBLEDevice::init(g_name);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
@@ -122,14 +114,5 @@ void notify_status(const uint8_t rec[20]) {
     g_status->notify();
   }
   g_status->setValue(g_health, 20);  // a read always returns current health
-}
-
-bool pop_control(uint8_t out[20], size_t &len, uint32_t &received_ms) {
-  CtrlMsg m;
-  if (!g_ctrl || xQueueReceive(g_ctrl, &m, 0) != pdTRUE) return false;
-  memcpy(out, m.data, 20);
-  len = m.len;
-  received_ms = m.at_ms;
-  return true;
 }
 }  // namespace ble

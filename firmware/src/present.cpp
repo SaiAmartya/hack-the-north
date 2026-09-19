@@ -64,13 +64,12 @@ void play_cue(const proto::Cue &c, uint8_t phase) {
   leds::cue(c.effect, c.spell, c.duration_ms, phase);
 }
 
-void tick(const proto::Session &s, uint32_t now_ms, bool connected, bool streaming, uint32_t rate_hz, uint32_t dropped) {
+void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool connected, bool streaming, uint32_t rate_hz, uint32_t dropped) {
   const wand::Stats &w = wand::stats();
-  const proto::DisplayState &st = s.state();
   leds::set_base(!w.sensor_ok ? leds::Base::Error : connected ? leds::Base::Connected : leds::Base::Advertising);
   leds::set_activity(w.activity);
   leds::set_shield(st.valid && (st.status & proto::ST_SHIELD));
-  leds::set_stale(connected && s.state_stale());
+  leds::set_stale(connected && stale);
   leds::tick();
 
   if (now_ms < g_next_screen) return;
@@ -85,7 +84,7 @@ void tick(const proto::Session &s, uint32_t now_ms, bool connected, bool streami
   v.link = streaming ? "streaming" : connected ? "connected" : "advertising";
   v.sensor_ok = w.sensor_ok;
   v.state_valid = st.valid;
-  v.stale = s.state_stale();
+  v.stale = stale;
   v.phase = st.phase;
   v.hp = st.hp;
   v.status = st.status;
