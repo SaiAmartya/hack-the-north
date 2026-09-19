@@ -282,8 +282,9 @@ def test_the_gateway_filters_on_the_packet_prefix() -> None:
     """The Lua radio channel is shared with every other app at the venue."""
     body = (BADGES_DIR / "phantom_gateway.lua").read_text()
     code = strip_comments(body)
-    assert 'string.sub(payload, 1, PREFIX_LEN) ~= PREFIX' in code
-    assert 'PREFIX = "PA1|"' in code
+    assert 'string.sub(payload, 1, 4) == "PA1|"' in code, (
+        "the receive handler must reject foreign traffic by prefix"
+    )
 
 
 def test_the_gateway_surfaces_the_dropped_frame_counter() -> None:
