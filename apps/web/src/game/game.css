@@ -665,3 +665,4 @@ progress {
   font-size: 13px;
   font-weight: 800;
 }
+.grip-guide { width: 160px; height: 120px; color: var(--purple, #7655ce); }

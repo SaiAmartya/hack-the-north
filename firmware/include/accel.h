@@ -6,6 +6,7 @@ struct ReadyTrace {
   uint32_t last_not_ready_us, ready_us, burst_start_us, burst_end_us, after_status_us;
   uint8_t last_not_ready_status, before, after;
   bool have_not_ready;
+  int16_t counts[3], mg[3]; // native chip axes, before remap/clamping; same burst as timings
 };
 struct Diagnostics {
   uint8_t ctrl0, ctrl2, ctrl3, ctrl5, ctrl6, fifo_ctrl, revision;
@@ -21,8 +22,9 @@ struct Diagnostics {
   bool reset_readback_ok;
 };
 Diagnostics diagnostics();
-bool ready_trace(uint8_t index, ReadyTrace &out); // first 16 successful bursts, immutable until reboot
-bool begin();                 // SC7A20H configured for 50 Hz, +/-8 g; native cadence unqualified
+bool ready_trace(uint8_t index, ReadyTrace &out); // first 16 successful bursts after boot/trace reset
+void reset_trace(); // re-arm bounded capture; does not change configuration or health counters
+bool begin();                 // boot-selected SC7A20H diagnostic profile; cadence unqualified
 bool present();
 uint8_t who_am_i();
 uint8_t ctrl1();

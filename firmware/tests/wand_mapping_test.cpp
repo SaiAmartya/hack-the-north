@@ -15,5 +15,7 @@ int main() {
   const int8_t identity[3] = {0, 1, 2};
   const int8_t positive[3] = {1, 1, 1};
   const wand::MappedSample clipped = wand::map_and_clip(rail, identity, positive, 8000);
-  return clipped.x == 8000 && clipped.y == -8000 && clipped.z == 10 && clipped.saturated ? 0 : 1;
+  if (clipped.x != 8000 || clipped.y != -8000 || clipped.z != 10 || !clipped.saturated) return 1;
+  const wand::MappedSample two_g = wand::map_and_clip(rail, identity, positive, 2000);
+  return two_g.x == 2000 && two_g.y == -2000 && two_g.z == 10 && two_g.saturated ? 0 : 1;
 }

@@ -268,6 +268,13 @@ describe("wand protocol validation", () => {
     expect(info).toMatchObject({ sampleHz: 100, rangeG: 2 });
     expect(isSupportedDuelProfile(info)).toBe(false);
   });
+  it("supports an honestly advertised 50 Hz ±2 g profile but not diagnostic capability bits", () => {
+    const bytes = GOLDEN_INFO.slice();
+    bytes[3] = 2;
+    expect(isSupportedDuelProfile(decodeInfo(bytes))).toBe(true);
+    bytes[1] = 0;
+    expect(isSupportedDuelProfile(decodeInfo(bytes))).toBe(false);
+  });
 });
 
 describe("modular ordering helpers", () => {

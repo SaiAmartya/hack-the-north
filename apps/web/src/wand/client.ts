@@ -18,7 +18,7 @@ import {
   type SetStateCommand,
   type CueCommand,
 } from "./protocol";
-import type { WandTransport } from "./transport";
+import type { WandTransport, TransportFailure } from "./transport";
 
 type Ack = Extract<StatusRecord, { kind: StatusKind.CommandResult }>;
 type Header = "version" | "commandSeq" | "linkNonce";
@@ -51,12 +51,16 @@ export type WandSnapshot = {
     | "disconnected"
     | "connecting"
     | "synchronizing"
+    | "recovering"
+    | "validating"
     | "streaming"
     | "unsupported"
     | "fault";
   generation: number;
   info?: InfoRecord;
   issue: string;
+  failureCode?: string;
+  canRetry?: boolean;
   feedbackWarning: string;
   accepted: number;
   rejected: number;
@@ -104,6 +108,8 @@ export class WandClient {
   private syncDue = 0;
   private cues: (FeedbackCue & { expiresAt: number })[] = [];
   private pumping = false;
+  private recovering = false;
+  private validation?: { startedAt: number; since?: number; resolve: () => void; reject: (error: Error) => void };
 
   constructor(
     private readonly transport: WandTransport,
@@ -139,10 +145,23 @@ export class WandClient {
     const generation = this.generation;
     this.snapshot = this.emptySnapshot("connecting");
     try {
-      await this.transport.connect(() => {
-        if (generation === this.generation)
-          this.fail("Device disconnected; reconnect for a fresh session");
-      });
+      await this.transport.connect(this.disconnected(generation));
+      await this.handshake(generation);
+    } catch (error) {
+      if (generation === this.generation)
+        this.fail(error instanceof Error ? error.message : "Connection failed", false);
+    }
+  }
+
+  private disconnected(generation: number) {
+    return (failure?: TransportFailure) => {
+      if (generation !== this.generation) return;
+      this.fail(failure?.message ?? "Device connection ended", failure?.recoverable ?? false,
+        failure?.code ?? "device_disconnected");
+    };
+  }
+
+  private async handshake(generation: number): Promise<void> {
       this.assertGeneration(generation);
       const info = decodeInfo(await this.transport.readInfo());
       this.assertGeneration(generation);
@@ -150,7 +169,9 @@ export class WandClient {
       if (!isSupportedDuelProfile(info)) {
         this.snapshot.phase = "unsupported";
         this.snapshot.issue =
-          "Diagnostic INFO only: casting requires capabilities 0x0F, 50 Hz, ±8 g and axes 1";
+          this.transport.source === "REAL BLE"
+            ? "This badge’s firmware needs repair. Use your iPhone while it is qualified."
+            : "This input does not report a supported sensor profile.";
         return;
       }
       await this.transport.subscribe("status", (bytes) => {
@@ -181,23 +202,30 @@ export class WandClient {
       this.status(health);
       const inputFault = this.inputFault(this.snapshot.healthFlags);
       if (inputFault) throw new Error(inputFault);
-      this.snapshot.phase = "streaming";
+      this.snapshot.phase = this.transport.recover ? "validating" : "streaming";
       this.lastTick = this.lastValid = this.now();
       this.syncDue = this.now() + 5000;
       this.timer = setInterval(() => this.tick(), 25);
-    } catch (error) {
-      if (generation === this.generation)
-        this.fail(error instanceof Error ? error.message : "Connection failed");
-    }
+      if (this.transport.recover) {
+        await new Promise<void>((resolve, reject) => { this.validation = { startedAt: this.now(), resolve, reject }; });
+        this.assertGeneration(generation);
+      }
   }
 
   disconnect(): void {
+    this.clearProtocol();
+    this.recovering = false;
+    this.transport.disconnect();
+  }
+
+  private clearProtocol(): void {
     this.generation++;
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
     this.pending?.reject(new Error("Session ended"));
     this.pending = undefined;
-    this.transport.disconnect();
+    this.validation?.reject(new Error("Input validation interrupted"));
+    this.validation = undefined;
     this.sync = this.previous = this.desired = this.acknowledged = undefined;
     this.samples = [];
     this.cues = [];
@@ -210,7 +238,14 @@ export class WandClient {
   suspend(): void {
     this.fail(
       "Page hidden or suspended; reconnect and establish a fresh baseline",
+      false, "page_hidden",
     );
+  }
+
+  /** Explicit retry after bounded automatic carrier recovery. Never resumes combat. */
+  async retryRecovery(): Promise<void> {
+    if (!this.transport.recover || this.recovering) return;
+    await this.recover(this.snapshot.issue || "Restoring phone connection", this.snapshot.failureCode);
   }
 
   setState(state: FeedbackState): void {
@@ -256,16 +291,47 @@ export class WandClient {
     };
   }
 
-  private fail(reason: string): void {
+  private fail(reason: string, recoverable = true, code = "input_interrupted"): void {
+    if (this.snapshot.phase === "fault" && this.snapshot.issue) return;
+    if (recoverable && this.transport.recover && !this.recovering &&
+        this.snapshot.phase === "streaming") {
+      void this.recover(reason, code);
+      return;
+    }
     const last = this.snapshot;
-    this.disconnect();
+    // Keep an approved phone pair available for an explicit retry; BLE/replay
+    // have no resume credential and continue to close immediately.
+    this.clearProtocol();
+    if (!this.transport.recover) this.transport.disconnect();
     this.snapshot = {
       ...last,
       generation: this.generation,
       phase: "fault",
       issue: reason,
+      failureCode: code,
+      canRetry: Boolean(this.transport.recover),
       lastSample: undefined,
     };
+  }
+
+  private async recover(reason: string, code?: string): Promise<void> {
+    const info = this.snapshot.info;
+    this.clearProtocol();
+    const generation = this.generation;
+    this.recovering = true;
+    this.snapshot = { ...this.snapshot, phase: "recovering", info, issue: reason,
+      failureCode: code, canRetry: false };
+    try {
+      await this.transport.recover!(this.disconnected(generation));
+      this.assertGeneration(generation);
+      await this.handshake(generation);
+    } catch (error) {
+      if (generation === this.generation) {
+        this.fail(error instanceof Error ? error.message : reason, false, code);
+      }
+    } finally {
+      if (generation === this.generation || this.snapshot.phase === "fault") this.recovering = false;
+    }
   }
 
   private assertGeneration(generation: number): void {
@@ -386,7 +452,7 @@ export class WandClient {
         ? ""
         : "Device presentation unhealthy";
     const inputFault = this.inputFault(record.healthFlags);
-    if (this.snapshot.phase === "streaming" && inputFault)
+    if (["streaming", "validating"].includes(this.snapshot.phase) && inputFault)
       this.fail(inputFault);
   }
 
@@ -400,10 +466,11 @@ export class WandClient {
     this.snapshot.issue = reason;
     this.broken = true;
     this.samples = [];
+    if (this.validation) this.validation.since = undefined;
   }
 
   private motion(bytes: Uint8Array): void {
-    if (!this.sync || this.snapshot.phase !== "streaming") return;
+    if (!this.sync || !["streaming", "validating"].includes(this.snapshot.phase)) return;
     if (!this.checkTiming(this.now())) return;
     let record: MotionRecord;
     try {
@@ -433,6 +500,11 @@ export class WandClient {
       if (delta > 150) this.broken = true;
     }
     this.previous = record;
+    const bound = (this.snapshot.info?.rangeG ?? 8) * 1000;
+    if ([record.axMg, record.ayMg, record.azMg].some(value => Math.abs(value) > bound)) {
+      this.rejectSample("Motion exceeds the reported sensor range");
+      return;
+    }
     const browserMs =
       this.sync.browserMs + signedDelta32(record.captureMs, this.sync.deviceMs);
     const age = this.now() - browserMs;
@@ -464,6 +536,16 @@ export class WandClient {
     this.snapshot.accepted++;
     this.snapshot.lastSample = sample;
     this.snapshot.issue = "";
+    if (this.validation) {
+      if (sample.breaksGesture || this.validation.since === undefined)
+        this.validation.since = sample.browserMs;
+      if (sample.browserMs - this.validation.since < 1000) return;
+      const validation = this.validation;
+      this.validation = undefined;
+      this.snapshot.phase = "streaming";
+      sample.breaksGesture = true;
+      validation.resolve();
+    }
     for (const listener of this.listeners) listener(sample);
   }
 
@@ -491,11 +573,15 @@ export class WandClient {
       this.fail("No fresh valid motion for 500 ms");
       return;
     }
+    if (this.validation && now - this.validation.startedAt >= 10_000) {
+      this.fail("Motion keeps arriving with gaps. Check the connection and retry.", false, "unstable_input");
+      return;
+    }
     void this.pump();
   }
 
   private async pump(): Promise<void> {
-    if (this.pumping || this.pending || this.snapshot.phase !== "streaming")
+    if (this.pumping || this.pending || !["streaming", "validating"].includes(this.snapshot.phase))
       return;
     const generation = this.generation;
     const syncing = this.now() >= this.syncDue;
@@ -519,6 +605,10 @@ export class WandClient {
           this.sync = candidate;
           this.snapshot.rttMs = candidate.rttMs;
         }
+      } else if (this.snapshot.phase === "validating") {
+        // A continuity check still owns a live clock. Do not let waiting for
+        // clean motion masquerade as expired clock sync; no game feedback yet.
+        return;
       } else if (this.desired && this.now() >= this.stateDue) {
         const state = this.desired;
         this.stateDue = this.now() + 500;

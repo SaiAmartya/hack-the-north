@@ -2,7 +2,7 @@
 
 **Product:** a two-player live-video duel in which every spell requires a spoken incantation on the player's laptop and a matching motion from that player's hacker badge or iPhone.
 
-**Current direction (September 19, 2026):** Sai requested implementation across the platform, script-driven QA and a minimal game-only UI, with **both real BLE badge and physical iPhone player controls**. Firmware now matches teammate main `6a50929`; Sai explicitly requested discarding our local firmware fixes. Do not silently reapply them. Automated raw replay remains test-only. The internally named `/ws/dev-wand` phone relay is an explicitly enabled physical-input path, not a second badge transport. See [current platform evidence](docs/qa/game-platform.md) and [latest firmware review](docs/qa/firmware-main-6a50929.md) for actual implementation status. Physical badge, iPhone, speech and Windows acceptance remain distinct from software tests and from one another.
+**Current direction (September 19, 2026):** the approved [input rebuild](docs/qa/input-rebuild.md) supersedes the older connection/calibration slices below: hosted HTTPS QR, direct data-only WebRTC first, explicit Internet relay, recoverable approved pairs, visible sensor/receipt indicators and explicit grip calibration. Both real BLE badge and physical iPhone remain player controls. Sai authorized publication of the reviewed rebuild after integrating teammate main `76b6388`; see [teammate setup](docs/TEAM-SETUP.md) for current installation/run steps. Current firmware 0.1.9 is diagnostic-only and has not been flashed or hardware-qualified. Automated raw replay is test-only. Physical badge, iPhone, speech and Windows acceptance remain distinct from software tests and from one another.
 
 This document is the durable end-to-end build order. [MVP-OUTLINE.md](MVP-OUTLINE.md) owns product/gameplay scope, [BADGE-FIRMWARE-CONTRACT.md](BADGE-FIRMWARE-CONTRACT.md) owns the unchanged badge interface, [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md) owns visual and interaction presentation, and [$wand-dev-workflow](.agents/skills/wand-dev-workflow/SKILL.md) owns the development and human-QA procedure. If they conflict on badge bytes, the firmware contract wins; if they conflict on what game to ship, the MVP outline wins. The design system cannot change mechanics, runtime gates or evidence status.
 
@@ -138,7 +138,7 @@ Keep the player UI game-only: Badge/iPhone choice, connection/pairing, actionabl
 
 The virtual endpoint implements the real packet codec, subscriptions, OPEN/SYNC, status, command expiry/deduplication and disconnect/reboot behavior. Its QA-only controller preview is driven by decoding outbound command bytes, never by reading game state directly.
 
-Phone motion uses `accelerationIncludingGravity`, portrait orientation and the contract's axis/units/clipping mapping. Verify all six gravity faces. At each 20 ms output opportunity, select only the newest not-yet-used finite observation. Skip when none exists: never interpolate, repeat or backfill a sample to fake 50 Hz. Preserve a monotonic millisecond observation clock, sequence selected observations, guard old relay generations/callbacks and expose actual callback/output cadence.
+Phone motion uses `accelerationIncludingGravity` in fixed device coordinates and the contract's units/clipping mapping. Recommend a comfortable sideways/slightly diagonal grip; calibrate any consistent starting grip, independently for each source. Screen rotation does not remap axes or disconnect. Verify all six gravity faces. At each 20 ms output opportunity, select only the newest not-yet-used finite observation. Skip when none exists: never interpolate, repeat or backfill a sample to fake 50 Hz. Preserve a monotonic millisecond observation clock, sequence selected observations, guard old relay generations/callbacks and expose actual callback/output cadence.
 
 Initial safety/freshness rules remain aligned with the firmware contract:
 
@@ -198,7 +198,7 @@ Calibrate each `source kind + device alias + sensor profile + grip` independentl
 1. Record `3 s` of stillness for bias, gravity direction and noise.
 2. Coach three safe examples of each enabled motion.
 3. Check later held-out attempts rather than declaring success on calibration examples alone.
-4. Invalidate calibration when source/profile/grip/orientation changes.
+4. Invalidate calibration when source/profile or the deliberately selected grip changes. A screen-layout rotation alone changes neither the sensor coordinate frame nor calibration. Return to the learned neutral between gestures; use Reset grip for a different grip.
 
 Start candidate segmentation with `200 ms` rest, `150–900 ms` movement and `150 ms` settling. Use filtered acceleration including gravity, dominant-axis energy, sign/order, impulse/settle behavior and orientation deltas. Do not integrate acceleration into position.
 

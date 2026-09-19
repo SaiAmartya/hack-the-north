@@ -145,6 +145,22 @@ input:focus-visible {
   font-weight: 900;
   letter-spacing: 3px;
 }
+.phone-live { gap: 20px; padding-top: 90px; }
+.phone-live .wand-orb { width: 130px; height: 130px; font-size: 80px; transition: transform 100ms ease-out; }
+.phone-signals { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 18px; font-size: 14px; }
+.phone-signals span { display: inline-flex; align-items: center; gap: 7px; color: #736a80; }
+.phone-signals i { width: 9px; height: 9px; background: #b9accc; border-radius: 50%; }
+.phone-signals .live { color: #276858; }
+.phone-signals .live i { background: #39836e; }
+.phone-progress { display: flex; gap: 12px; }
+.phone-progress span { width: 32px; height: 32px; border: 2px solid #d8cdea; border-radius: 50%; display: grid; place-items: center; }
+.phone-progress .done { color: #fff; background: #39836e; border-color: #39836e; }
+.phone-note { max-width: 270px; font-size: 13px; color: #736a80; }
+.phone-details { max-width: 320px; width: 100%; font-size: 13px; color: #655b77; }
+.phone-details summary { cursor: pointer; padding: 10px; }
+.phone-details dl { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; text-align: left; }
+.phone-details dd { margin: 0; text-align: right; }
+.phone-details button { font-size: 13px; }
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

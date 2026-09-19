@@ -4,7 +4,7 @@ The product is a game, not a development dashboard. A friendly wizard-school set
 
 ## Player experience
 
-One task per screen: **Connect wand → microphone → learn two gestures → cast each spell → Ready → duel → rematch.**
+One task per screen: **Connect wand → microphone → illustrated grip → Start calibration → visible stillness → three jabs → three guards → cast each spell → Ready → duel → rematch.** Calibration never starts behind microphone setup.
 
 Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synthetic replay is never a third way to play.
 
@@ -13,7 +13,9 @@ Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synt
 - No “virtual transport,” simulated wand, replay, packet, clock, stage or firmware-engineering terminology in the player UI.
 - Coaching is brief and physical: “Hold your wand still,” “Three gentle jabs,” “Raise. Tilt. Hold.” Success appears only after observed input.
 - Show one actionable fault at a time. Device/profile incompatibility is a setup failure, never a cosmetic warning permitting play.
-- A small **Badge** source label is enough during play. Diagnostic evidence belongs in scripts and reports.
+- The phone has two essential, expiring player indicators: **Sensor active** (fresh finite acceleration) and **Reaching laptop** (laptop-confirmed accepted input). A small acceleration-responsive orb and synchronized coaching/example dots make movement visible. Optional **Connection details** reveals observed/received rate, age and last issue, with an explicit sanitized trace download. These are necessary input feedback, not a general debugging dashboard; no gyro claim.
+- **Reset grip** restarts visible stillness without disconnecting. Show one actionable retry hint and the current movement stage, never a silent 0/3. A diagnostic badge offers **Use iPhone**, not a futile reconnect loop. Direct Wi-Fi failure offers **Use internet connection** explicitly; never switch routes during a round.
+- Recommend a comfortable sideways/slightly diagonal grip with an angled illustration. Other consistent grips are valid; never demand portrait, screen-facing or top-edge-up. Coach return to the learned starting grip, not an absolute device axis. Screen rotation must not interrupt play.
 - Keep test routes behind `VITE_WAND_QA=1`; they are never linked from the game and are excluded from the default production bundle. Automated replay remains a regression tool, not a player feature.
 
 ## Visual foundations
@@ -55,4 +57,4 @@ Normal rendering caps at 1920×1080, low at 1280×720. Select quality before pla
 
 ## Review rule
 
-If a proposed UI element helps only a developer diagnose the system, put it in script-driven QA—not the player interface. Never hide a real gameplay failure to make the screen cleaner. Hardware qualification, acoustic accuracy and measured performance remain explicit reports outside the game.
+Keep engineering detail in script-driven QA, except the optional bounded input details above. Never hide a real gameplay failure to make the screen cleaner. A paused phone requires a foreground Resume tap; recovery clears interrupted examples/casts and requires a fresh Ready. Hardware qualification, acoustic accuracy and measured performance remain explicit reports outside the game.

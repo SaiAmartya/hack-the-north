@@ -2,6 +2,12 @@ import { WAND_UUIDS } from "./protocol";
 
 export type NotificationKind = "motion" | "status";
 export type ByteListener = (bytes: Uint8Array) => void;
+export type TransportFailure = {
+  code: string;
+  message: string;
+  recoverable: boolean;
+};
+export type DisconnectListener = (failure?: TransportFailure) => void;
 
 export interface GattCharacteristic extends EventTarget {
   readonly value?: DataView;
@@ -27,7 +33,9 @@ export interface BluetoothAccess {
 
 export interface WandTransport {
   readonly source: "REPLAY" | "REAL BLE" | "PHONE";
-  connect(onDisconnect: () => void): Promise<void>;
+  connect(onDisconnect: DisconnectListener): Promise<void>;
+  /** Resets a logical link, retaining only an already approved phone pairing. */
+  recover?(onDisconnect: DisconnectListener): Promise<void>;
   readInfo(): Promise<Uint8Array>;
   readStatus(): Promise<Uint8Array>;
   subscribe(kind: NotificationKind, listener: ByteListener): Promise<void>;

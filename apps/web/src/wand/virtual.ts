@@ -4,6 +4,7 @@ import type {
   ByteListener,
   NotificationKind,
   WandTransport,
+  DisconnectListener,
 } from "./transport";
 
 export type ReplayName = "rest" | "jab" | "guard" | "sweep";
@@ -42,12 +43,14 @@ export class VirtualWandTransport implements WandTransport {
   private duplicate = false;
   private stale = false;
   private discontinuity = false;
+  readonly recover?: (onDisconnect: DisconnectListener) => Promise<void>;
 
   constructor(
     private readonly now = () => performance.now(),
     info?: InfoRecord,
     private readonly channel?: WandTransport,
   ) {
+    if (channel?.recover) this.recover = (listener) => channel.recover!(listener);
     this.endpoint = new VirtualWandEndpoint({
       nowMs: now,
       info: info ?? {
@@ -63,7 +66,7 @@ export class VirtualWandTransport implements WandTransport {
     });
   }
 
-  async connect(_onDisconnect: () => void): Promise<void> {
+  async connect(_onDisconnect: DisconnectListener): Promise<void> {
     if (this.channel) return this.channel.connect(_onDisconnect);
     this.disconnect();
     this.connected = true;

@@ -4,6 +4,7 @@
 #include "buttons.h"
 #include "config.h"
 #include "display.h"
+#include "diagnostic.h"
 #include "leds.h"
 #include "proto.h"
 #include "wand.h"
@@ -42,6 +43,7 @@ void axes_text(char *out, size_t n) {
 
 void help() {
   Serial.println("HPOK|commands: help status trace id selftest axes [+x -y +z] btn rot <0-3> leds on|off echo on|off recal reboot flashmode");
+  Serial.println("HPOK|diagnostic: profile creator|rate|range|high off|on (BLE mode; reboots); trace reset (capture next 16 bursts)");
 }
 
 bool parse_axis(const char *tok, int8_t &map, int8_t &sign) {
@@ -70,6 +72,9 @@ void handle(char *line) {
   } else if (!strcmp(cmd, "id")) {
     reply("name=%s fw=%s boot=%08lX", ble::name(), FW_VERSION_STR, (unsigned long)wand::stats().boot_id);
   } else if (!strcmp(cmd, "status")) {
+    const diagnostic::Profile &p = diagnostic::profile();
+    reply("profile=%s ble=%s caps=0 configured_hz=%u range_g=%u mg_per_count=%u expected_ctrl0_1_4=%02X/%02X/%02X",
+          p.name, diagnostic::selection().ble ? "on" : "off", p.sample_hz, p.range_g, p.mg_per_count, p.ctrl0, p.ctrl1, p.ctrl4);
     const wand::Stats &w = wand::stats();
     char ax[24];
     axes_text(ax, sizeof(ax));
@@ -86,7 +91,7 @@ void handle(char *line) {
           d.ctrl0, d.ctrl2, d.ctrl3, d.ctrl5, d.ctrl6, d.fifo_ctrl, d.revision, d.status_before, d.status_after,
           (unsigned long)d.overrun_cleared, (unsigned long)d.overrun_still_set);
     reply("cadence diagnostic=%d configured_hz=%d tick_hz=%d status_polls=%lu not_ready=%lu fresh_reads=%lu ready_span_us=%llu",
-          DIAGNOSTIC_SENSOR_CADENCE, SAMPLE_HZ, configTICK_RATE_HZ, (unsigned long)d.status_polls,
+          DIAGNOSTIC_SENSOR_CADENCE, p.sample_hz, configTICK_RATE_HZ, (unsigned long)d.status_polls,
           (unsigned long)d.not_ready_polls, (unsigned long)d.fresh_reads, (unsigned long long)d.ready_interval_sum_us);
     reply("cadence ready_us_last_min_max=%lu,%lu,%lu after_read_us_last_min_max=%lu,%lu,%lu",
           (unsigned long)d.ready_interval_us, (unsigned long)d.min_ready_interval_us, (unsigned long)d.max_ready_interval_us,
@@ -97,6 +102,14 @@ void handle(char *line) {
     reply("sensor_reset readback_ok=%d ctrl0_1_4=%02X/%02X/%02X trace_count=%u",
           d.reset_readback_ok ? 1 : 0, d.reset_ctrl0, d.reset_ctrl1, d.reset_ctrl4, d.trace_count);
   } else if (!strcmp(cmd, "trace")) {
+    if (arg) {
+      if (strcmp(arg, "reset") || strtok(nullptr, " \t")) { reply("usage: trace [reset]"); return; }
+      accel::reset_trace();
+      reply("trace armed; next 16 fresh bursts; profile and health counters unchanged");
+      return;
+    }
+    reply("trace profile=%s ble=%s native_chip_axes=1 mg_per_count=%u", diagnostic::profile().name,
+          diagnostic::selection().ble ? "on" : "off", diagnostic::profile().mg_per_count);
     for (uint8_t i = 0; i < accel::TRACE_CAPACITY; ++i) {
       accel::ReadyTrace t{};
       if (!accel::ready_trace(i, t)) break;
@@ -104,8 +117,21 @@ void handle(char *line) {
             i + 1, t.have_not_ready ? 1 : 0, (unsigned long)t.last_not_ready_us, t.last_not_ready_status,
             (unsigned long)t.ready_us, t.before, (unsigned long)t.burst_start_us, (unsigned long)t.burst_end_us,
             (unsigned long)t.after_status_us, t.after);
+      reply("trace n=%u counts=%d,%d,%d mg=%d,%d,%d", i + 1, t.counts[0], t.counts[1], t.counts[2], t.mg[0], t.mg[1], t.mg[2]);
     }
     reply("trace end");
+  } else if (!strcmp(cmd, "profile")) {
+    const int index = diagnostic::profile_index(arg);
+    const char *mode = strtok(nullptr, " \t");
+    if (index < 0 || !mode || (strcmp(mode, "off") && strcmp(mode, "on")) || strtok(nullptr, " \t")) {
+      reply("usage: profile creator|rate|range|high off|on (BLE mode; reboots)");
+      return;
+    }
+    if (ble::connected()) { reply("disconnect BLE before selecting a boot profile"); return; }
+    if (!diagnostic::select_next_boot((uint8_t)index, !strcmp(mode, "on"))) return;
+    reply("next_boot profile=%s ble=%s caps=0; software rebooting; no NVS write", arg, mode);
+    delay(100);
+    ESP.restart();
   } else if (!strcmp(cmd, "selftest")) {
     if (ble::connected()) { reply("disconnect BLE before selftest"); return; }
     const int fails = proto::selftest(log_line);
@@ -206,8 +232,10 @@ void hello() {
   if (!Serial) return;
   char ax[24];
   axes_text(ax, sizeof(ax));
-  Serial.printf("HPHELLO|fw=%s|name=%s|boot=%08lX|hz=%d|range=%d|axes=%s|sensor=%d\n", FW_VERSION_STR, ble::name(), (unsigned long)wand::stats().boot_id,
-                SAMPLE_HZ, RANGE_G, ax, wand::stats().sensor_ok ? 1 : 0);
+  const diagnostic::Profile &p = diagnostic::profile();
+  Serial.printf("HPHELLO|fw=%s|name=%s|boot=%08lX|hz=%u|range=%u|profile=%s|ble=%s|caps=0|axes=%s|sensor=%d\n",
+                FW_VERSION_STR, ble::name(), (unsigned long)wand::stats().boot_id, p.sample_hz, p.range_g,
+                p.name, diagnostic::selection().ble ? "on" : "off", ax, wand::stats().sensor_ok ? 1 : 0);
 }
 
 void tick() {

@@ -1,8 +1,10 @@
 # Badge firmware ↔ game platform contract
 
-**Status:** proposed v1 team handoff, HAL-grounded revision, September 19, 2026. Not yet accepted by the firmware team or validated on custom firmware. Packet layouts, UUIDs and golden vectors are unchanged; both teams must acknowledge this revised draft before freezing it. Companion: [MVP-OUTLINE.md](MVP-OUTLINE.md).
+**Status:** v1 team handoff, HAL-grounded revision, September 19, 2026. Both implementations use this interface, but formal firmware-team acknowledgement and complete hardware acceptance remain open. Packet layouts, UUIDs and golden vectors are unchanged; both teams must acknowledge this revised draft before freezing it. The [0.1.8 controlled matrix](docs/qa/firmware-0.1.8-matrix.md) records partial custom-firmware measurements; current 0.1.9 source remains diagnostic-only, unflashed and unqualified for gameplay. Companion: [MVP-OUTLINE.md](MVP-OUTLINE.md).
 
 **In plain English:** deliver a battery-powered wand that connects directly to Chrome, streams trustworthy motion, reports when something is wrong, and displays small feedback messages from the game. We will build all spell recognition, speech handling, multiplayer, combat, camera/video and Three.js graphics.
+
+**Approved profile amendment (September 19):** prefer verified native 50 Hz/±8 g; a **qualified native 50 Hz/±2 g** release is also permitted. This is an explicit supported-profile extension, not a packet change or evidence that either profile has passed. INFO must report the actual range, conversion/clipping must match it, and the player must calibrate anew. The creator 100 Hz/±2 g recipe remains diagnostic-only. Existing UUIDs, 20-byte layouts and ±8 g golden vectors are unchanged. See [input rebuild evidence](docs/qa/input-rebuild.md) for current gates.
 
 This specifies **observable behavior and the shared interface**, not a firmware implementation. The firmware owner (currently the two firmware teammates) owns language/SDK, board support, drivers, scheduling, memory and flashing. The same handoff applies if our team later takes that role. They may choose any implementation that passes this contract and its hardware constraints. The UUIDs/bytes below are proposed project constants, not existing badge APIs; agree changes here before either side forks its implementation.
 
@@ -27,7 +29,7 @@ This specifies **observable behavior and the shared interface**, not a firmware 
 | Creator-documented | Board wiring, component identities, example initialization and cautions supplied by the badge creators; not measurements by our team |
 | Manufacturer-documented | Chip/SDK capabilities supported by primary documentation; not proof of this complete badge application |
 | Project requirement | Requested behavior or acceptance target, including 50 Hz/±8 g output and connected GATT |
-| Hardware-verified | A recorded result tied to an actual image, board, computer and test procedure; none of this revision's custom-firmware gates has been measured |
+| Hardware-verified | A recorded result tied to an actual image, board, computer and test procedure; partial measurements are recorded in the linked matrix, not transferable to an untested image |
 
 **Creator source provenance:** Sai confirmed on September 19, 2026 that `custom-firmware-hal.md` came directly from the badge creators. [The repository reference copy](docs/hardware/custom-firmware-hal.md) is byte-for-byte unchanged from the supplied file; its SHA-256 is `c7c88fc8e1ad9da9d775997b7a1c19da6528e14cb65ed1c407f5715dd0909db9`. The file has no internal revision/date identifier; the date here records receipt/provenance, not authorship. Preserve that copy unchanged and put qualifications in this contract. Its setup commands and generic HAL checklist are source material, not authorization to install, flash, add buttons or enable NFC.
 
@@ -42,7 +44,7 @@ Keep streaming responsive while the screen and LEDs update; Appendix A captures 
 
 **Selected path:** badge BLE peripheral ↔ laptop Bluetooth adapter ↔ Chrome Web Bluetooth. No specialized IDE or local native bridge during gameplay. Chrome supports GATT reads, writes and notifications on Windows; discovery requires a user click and secure context. Qualify the exact Windows/Chrome/adapter combination. [Chrome documentation](https://developer.chrome.com/docs/capabilities/bluetooth)
 
-**Feasibility status: SDK-supported, badge-unvalidated.** The creator HAL reports a proven extended-advertising/passive-scan pattern and warns about NimBLE heap exhaustion. That is not evidence for our connected GATT workload. Espressif's ESP32-C3-compatible peripheral example establishes SDK support for the required operations, not our board's memory, timing or battery performance. [ESP-IDF v5.5.3 peripheral example](https://github.com/espressif/esp-idf/blob/v5.5.3/examples/bluetooth/nimble/bleprph/README.md)
+**Feasibility status: SDK-supported; short diagnostic badge sessions measured, full qualification pending.** The creator HAL reports a proven extended-advertising/passive-scan pattern and warns about NimBLE heap exhaustion. That is not evidence for our connected GATT workload. Espressif's ESP32-C3-compatible peripheral example establishes SDK support for the required operations, not our board's memory, timing or battery performance. [ESP-IDF v5.5.3 peripheral example](https://github.com/espressif/esp-idf/blob/v5.5.3/examples/bluetooth/nimble/bleprph/README.md). Our separate [0.1.8 matrix](docs/qa/firmware-0.1.8-matrix.md) exercised connected motion and commands; it does not pass the remaining sensor, endurance, battery or Windows gates.
 
 **Recommended minimal feasibility build:**
 
@@ -80,7 +82,7 @@ All offsets are zero-based bytes. All multi-byte integers are **little-endian**;
 | 0 | u8 | `version = 1` |
 | 1 | u8 | `capabilities`: bit 0 raw motion, bit 1 state feedback, bit 2 cue feedback, bit 3 clock sync; completed MVP requires `0x0F` |
 | 2 | u8 | `sample_hz = 50` |
-| 3 | u8 | `range_g = 8` initially; profile changes require joint agreement and fresh calibration |
+| 3 | u8 | `range_g = 8` preferred; `2` explicitly supported after qualification; profile changes require fresh calibration |
 | 4–9 | 6 bytes | Stable `device_id`, displayed as 12 hex digits in byte order |
 | 10–13 | u32 | Nonzero random `boot_id`, new on each firmware boot |
 | 14, 15, 16 | u8 each | Firmware major, minor, patch; release manifest maps these to the exact build/hash |
@@ -106,6 +108,8 @@ INFO is constant for a boot. A sensor configuration change requires a reboot/new
 **Units and axes:** `1000 mg = 1 g`; retain gravity, with no player-specific calibration, gravity subtraction or gesture filtering in firmware. +X is screen-right, +Y screen-top, +Z outward from the screen, viewed from the badge front. This is a contract coordinate convention, not an assertion of the chip's native mounting. Firmware remaps chip axes/signs; platform handles the user's grip. With the front facing upward on a level table, expect approximately `(0, 0, +1000)` mg. Verify all six static faces and signed conversion against gravity before interpreting gestures.
 
 For the ±8 g profile, round normalized values to integer mg and clamp to `[-8000, +8000]`. Mark saturated if any native sensor axis rails or any normalized value requires clamping; valid may remain set for a fresh but clipped sample, which the browser excludes from gestures. Values outside that domain are malformed, not silently clamped by the browser. Endpoints −8000 and +8000 encode as `c0 e0` and `40 1f`; +8001 (`41 1f`) and −32768 (`00 80`) are invalid for this profile. Native quantization may reach its rail before exactly 8000 mg; that still requires saturated.
+
+For the approved ±2 g alternative, use `[-2000,+2000]` instead and the verified native conversion for that profile. The platform validates against INFO as well as the wire-format ceiling; it never interprets ±2 g readings with a ±8 g conversion. Both ranges reject saturated samples. Capability bits remain zero in an unqualified diagnostic image; changing that byte solely to remove the setup error is prohibited.
 
 **Freshness:** 50 fresh samples/s, normally 20 ms apart. Use sensor new-data semantics; rereading one old register image must not masquerade as new acquisitions. If exact sensor timestamps are unavailable, timestamp the prompt read of fresh data and document/bound that acquisition-to-read delay. Do not fabricate valid zero vectors on I²C failure. Report a sensor fault through STATUS; if an invalid sample is emitted, clear valid and set unused axes to zero. Invalid, clipped or discontinuous data breaks the current gesture; it is not interpolated into evidence.
 
@@ -247,6 +251,8 @@ For physical latency use a measured method (timestamp logs for capture/ACK, obse
 6. Acknowledgement by firmware and platform owners before freezing this revision. Notify us before changing bytes, UUIDs, units, axes, sample profile, sequence semantics or feedback enums. Do not silently reinterpret v1 for existing implementations; incompatible interface changes require a protocol version bump and updates to both fixtures/adapters.
 
 **Agreement needed now:** acknowledge the HAL-grounded draft; confirm the selected but unvalidated connected-GATT path and requested 50 Hz/±8 g profile; agree H0–H4 delivery/evidence checkpoints. One wand/player, four-characteristic v1 bytes and expiring semantic feedback remain unchanged. The firmware owner retains implementation responsibility within these constraints.
+
+**Sensor discrepancy procedure:** compare creator 100 Hz/±2 g, then rate-only 50 Hz/±2 g, then range-only 50 Hz/±8 g, then the previously tested high-performance setting. Record readback, signed raw counts, READY/overwrite before/after reads, cadence and timings with BLE disabled and under BLE/display/LED load. Reboot between profiles; no live profile mutation. STATUS bit 7 observations alone do not establish unread-data loss on revision 0x28; seek creator confirmation of its BDU semantics/read sequence. Keep real bus errors, measured acquisition/queue gaps and saturation visible. No undocumented FIFO rewrite. Release still requires six faces, clipping/movement, ten-minute load, 20 reconnects, cold boots, USB unplug and 30-minute battery operation; Windows/two-badge gates remain separate.
 
 ## Appendix A. Creator HAL constraints and qualifications
 

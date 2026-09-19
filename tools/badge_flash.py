@@ -4,16 +4,17 @@
     uv run --with pyserial python tools/badge_flash.py list
     uv run --with pyserial python tools/badge_flash.py backup            # two verified 4 MB reads -> private user data
     uv run --with pyserial python tools/badge_flash.py register-backup --device-mac <mac> <read1> <read2>
-    uv run --with pyserial python tools/badge_flash.py flash             # pio run -t upload (builds first)
+    uv run --with pyserial python tools/badge_flash.py flash             # legacy multi-artifact upload; NOT app-only
     uv run --with pyserial python tools/badge_flash.py restore <file>    # write a backup back, byte for byte
     uv run --with pyserial python tools/badge_flash.py monitor           # raw serial console at 115200 (--seconds N to auto-stop)
     uv run --with pyserial python tools/badge_flash.py cmd selftest axes # send console commands, print replies
 
-Always run `backup` once per badge before the first `flash`: the dump contains the
-stock firmware, its partition table and the badge's identity, and `restore` puts
-everything back exactly as it was.
+Back up before any approved write. A dump contains the device's current image,
+not necessarily stock. `restore` writes all 4 MiB and is a separately approved
+recovery action. Follow firmware/README.md for guarded app-only installation;
+this helper's legacy `flash` action does not perform that procedure.
 
-Requirements: `esptool` and `pio` on PATH (both installed with `uv tool install esptool platformio`).
+Requirements: `esptool` and `pio` on PATH (install each tool separately; see firmware/README.md).
 The badge IDE tab must be closed: only one program can hold the serial port.
 """
 from __future__ import annotations

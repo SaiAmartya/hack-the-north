@@ -1,9 +1,106 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type WebSocketRoute } from "@playwright/test";
 
 type RelayOperation = {
   operation: string;
   data?: number[];
 };
+
+test("hosted phone allows a sideways grip and waits for real motion before pairing", async ({ page }) => {
+  let sockets = 0;
+  page.on("websocket", socket => { if (socket.url().includes("/ws/")) sockets++; });
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.addInitScript(() => {
+    Reflect.set(window, "__motionPermissionRequests", 0);
+    class Motion extends Event {
+      static requestPermission = async () => { Reflect.set(window, "__motionPermissionRequests", Number(Reflect.get(window, "__motionPermissionRequests")) + 1); return "granted"; };
+    }
+    Object.defineProperty(window, "DeviceMotionEvent", { value: Motion, configurable: true });
+  });
+  await page.goto(`/phone.html?room=${"a".repeat(32)}`);
+  await page.getByRole("button", { name: "Connect wand" }).click();
+  await expect(page.getByRole("heading", { name: "Move your iPhone gently…" })).toBeVisible();
+  expect(await page.evaluate(() => Reflect.get(window, "__motionPermissionRequests"))).toBe(1);
+  expect(sockets).toBe(0);
+});
+
+test("hosted phone uses real RTC, resumes, and re-handshakes an explicit route change", async ({ page: owner, context }) => {
+  test.setTimeout(35_000);
+  const roomId = "a".repeat(32);
+  let ownerSocket: WebSocketRoute | undefined, phoneSocket: WebSocketRoute | undefined;
+  let generation = 1;
+  let dataViaCloud = 0;
+  const paired = () => {
+    ownerSocket?.send(JSON.stringify({ v: 2, type: "paired", generation, route: "direct", resumed: generation > 1, resumeToken: "c".repeat(64), expiresAtMs: Date.now() + 120000 }));
+    phoneSocket?.send(JSON.stringify({ v: 2, type: "paired", generation, route: "direct", resumed: generation > 1, resumeToken: "d".repeat(64), expiresAtMs: Date.now() + 120000 }));
+  };
+  await context.routeWebSocket(`**/ws/${roomId}`, socket => {
+    let role = "";
+    socket.onMessage(raw => {
+      const message = JSON.parse(String(raw));
+      if (message.type === "owner") { role = "owner"; ownerSocket = socket; }
+      if (message.type === "phone") {
+        role = "phone"; phoneSocket = socket;
+        ownerSocket?.send(JSON.stringify({ v: 2, type: "claim", claimId: "b".repeat(32), challenge: "123456" }));
+        socket.send(JSON.stringify({ v: 2, type: "awaiting", challenge: "123456" }));
+      }
+      if (message.type === "approve") paired();
+      if (message.type === "signal") (role === "owner" ? phoneSocket : ownerSocket)?.send(JSON.stringify(message));
+      if (message.type === "reset-link") { generation++; paired(); }
+      if (message.type === "route") { generation++; const update = JSON.stringify({ v: 2, type: "route", route: "relay", generation }); ownerSocket?.send(update); phoneSocket?.send(update); }
+      if (message.type === "data") { dataViaCloud++; (role === "owner" ? phoneSocket : ownerSocket)?.send(JSON.stringify(message)); }
+    });
+  });
+  await owner.goto("/");
+  await owner.evaluate(async room => {
+    const { PhoneSession } = await import(/* @vite-ignore */ "/src/phone/session.ts");
+    const { WandClient } = await import(/* @vite-ignore */ "/src/wand/client.ts");
+    const session = new PhoneSession({ pair: { roomId: room, ownerToken: "b".repeat(64), expiresAtMs: Date.now() + 120000, socketUrl: `ws://${location.host}/ws/${room}`, phoneUrl: `${location.origin}/phone.html?room=${room}` }, onClaim: (claim: { claimId: string }) => session.approve(claim.claimId) });
+    const wand = new WandClient(session);
+    wand.onSample(() => {
+      const snapshot = wand.getSnapshot();
+      session.reportAccepted({ sequence: snapshot.lastSample?.seq ?? 0, accepted: snapshot.accepted, receivedHz: 50, ageMs: 20 });
+    });
+    Reflect.set(window, "__hostedPhone", { session, wand });
+    void wand.connect();
+  }, roomId);
+  const phone = await context.newPage(); await phone.setViewportSize({ width: 844, height: 390 });
+  await phone.addInitScript(() => {
+    class Motion extends Event {
+      static requestPermission = async () => "granted";
+      readonly accelerationIncludingGravity = { x: 0, y: 9.80665, z: 0 };
+    }
+    Object.defineProperty(window, "DeviceMotionEvent", { value: Motion, configurable: true });
+    setInterval(() => window.dispatchEvent(new Motion("devicemotion")), 20);
+  });
+  await phone.goto(`/phone.html?room=${roomId}`);
+  await phone.getByRole("button", { name: "Connect wand" }).click();
+  await expect(phone.getByText("Sensor active", { exact: true })).toBeVisible();
+  await expect(phone.getByText("Reaching laptop", { exact: true })).toBeVisible({ timeout: 15000 });
+  expect(dataViaCloud).toBe(0);
+  const beforeRotation = generation;
+  await phone.setViewportSize({ width: 390, height: 844 });
+  await phone.evaluate(() => window.dispatchEvent(new Event("orientationchange")));
+  await expect(phone.getByText("Reaching laptop", { exact: true })).toBeVisible();
+  await expect(phone.getByRole("button", { name: "Resume", exact: true })).toHaveCount(0);
+  expect(generation).toBe(beforeRotation);
+  await owner.evaluate(() => {
+    const { session } = Reflect.get(window, "__hostedPhone") as { session: { coach(value: { instruction: string; completed: number; total: number; hint: string }): void } };
+    session.coach({ instruction: "Three gentle jabs.", completed: 1, total: 3, hint: "Return to your starting grip." });
+  });
+  await expect(phone.getByRole("heading", { name: "Three gentle jabs." })).toBeVisible();
+  await expect(phone.getByLabel("1 of 3 gestures")).toBeVisible();
+  await phone.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+  await expect(phone.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
+  await expect(phone.getByText("Waiting for laptop", { exact: true })).toBeVisible();
+  await phone.getByRole("button", { name: "Resume", exact: true }).click();
+  await expect(phone.getByText("Reaching laptop", { exact: true })).toBeVisible({ timeout: 15000 });
+  expect(generation).toBeGreaterThan(1); expect(dataViaCloud).toBe(0);
+  const inputGeneration = await owner.evaluate(() => { const h = Reflect.get(window, "__hostedPhone") as { wand: { getSnapshot(): { generation: number } }; session: { chooseRelay(): void } }; const before = h.wand.getSnapshot().generation; h.session.chooseRelay(); return before; });
+  await expect.poll(() => owner.evaluate(() => { const h = Reflect.get(window, "__hostedPhone") as { wand: { getSnapshot(): { phase: string; generation: number } } }; const snapshot = h.wand.getSnapshot(); return { phase: snapshot.phase, changed: snapshot.generation }; })).toEqual({ phase: "streaming", changed: inputGeneration + 1 });
+  await expect(phone.getByText("Reaching laptop", { exact: true })).toBeVisible(); expect(dataViaCloud).toBeGreaterThan(0);
+  await owner.evaluate(() => { const h = Reflect.get(window, "__hostedPhone") as { wand: { disconnect(): void } }; h.wand.disconnect(); });
+  await phone.getByRole("button", { name: "Disconnect", exact: true }).click();
+});
 
 test("phone opens one relay only after its first real motion sample", async ({
   page,

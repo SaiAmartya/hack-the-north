@@ -31,7 +31,7 @@ export class RawMotionTraceBuilder {
     });
   }
 
-  jab(amplitude = 900, axis: 0 | 1 = 0): readonly CapturedMotion[] {
+  jab(amplitude = 900, axis: 0 | 1 = 0, direction?: Pose, stopScale = 1): readonly CapturedMotion[] {
     return this.capture(() => {
       this.rest(260);
       const shape = [
@@ -39,21 +39,23 @@ export class RawMotionTraceBuilder {
         -0.3, -0.12, 0, 0, 0,
       ];
       for (const amount of shape) {
-        const value = amount * amplitude;
-        this.point(axis === 0 ? [value, 0, 1_000] : [0, value, 1_000]);
+        const value = amount * amplitude * (amount < 0 ? stopScale : 1);
+        const unit = direction ?? (axis === 0 ? [1, 0, 0] : [0, 1, 0]);
+        this.point([unit[0] * value, unit[1] * value, 1_000 + unit[2] * value]);
       }
       this.rest(260);
     });
   }
 
-  guard(degrees = 35, holdMs = 220): readonly CapturedMotion[] {
+  guard(degrees = 35, holdMs = 220, movementMs = 320): readonly CapturedMotion[] {
     return this.capture(() => {
       this.rest(260);
-      for (let step = 1; step <= 16; step++)
-        this.point(this.tilt((degrees * step) / 16));
+      const steps = Math.round(movementMs / 20);
+      for (let step = 1; step <= steps; step++)
+        this.point(this.tilt((degrees * step) / steps));
       this.rest(holdMs, this.tilt(degrees));
-      for (let step = 15; step >= 0; step--)
-        this.point(this.tilt((degrees * step) / 16));
+      for (let step = steps - 1; step >= 0; step--)
+        this.point(this.tilt((degrees * step) / steps));
       this.rest(260);
     });
   }
@@ -78,8 +80,8 @@ export class RawMotionTraceBuilder {
     });
   }
 
-  neutralSample(): readonly CapturedMotion[] {
-    return this.capture(() => this.point([0, 0, 1_000]));
+  neutralSample(durationMs = 20): readonly CapturedMotion[] {
+    return this.capture(() => this.rest(durationMs));
   }
 
   private capture(build: () => void): readonly CapturedMotion[] {

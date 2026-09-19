@@ -252,7 +252,7 @@ export function isSupportedDuelProfile(info: InfoRecord): boolean {
   return (
     info.capabilities === ALL_CAPABILITIES &&
     info.sampleHz === 50 &&
-    info.rangeG === 8 &&
+    (info.rangeG === 8 || info.rangeG === 2) &&
     info.axisConvention === 1
   );
 }

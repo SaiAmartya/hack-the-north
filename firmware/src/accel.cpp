@@ -1,4 +1,5 @@
 #include "accel.h"
+#include "diagnostic.h"
 #include "pins.h"
 #include <Arduino.h>
 #include <Wire.h>
@@ -10,8 +11,6 @@ namespace {
 const uint8_t REG_WHO_AM_I = 0x0F, REG_CTRL0 = 0x1F, REG_CTRL1 = 0x20, REG_CTRL4 = 0x23, REG_STATUS = 0x27, REG_OUT_X_L = 0x28, AUTO_INC = 0x80;
 const uint8_t STATUS_ZYXDA = 0x08;   // new X, Y and Z data available
 const uint8_t STATUS_ZYXOR = 0x80;   // at least one axis overwritten; exact missed count is unknown
-const uint8_t CTRL1_50HZ_XYZ = 0x47; // ODR 50 Hz, LPen=0, X/Y/Z enabled
-const uint8_t CTRL4_BDU_8G = 0xA0;   // block data update (guide's verified 0x80) + FS = +/-8 g
 const int16_t RAIL_COUNTS = 2040;    // 12-bit output rails at +/-2047
 const uint16_t BUS_TIMEOUT_MS = 10;
 const uint8_t ERRORS_BEFORE_RECOVERY = 5;
@@ -51,26 +50,29 @@ bool bus_begin() {
 }
 
 bool configure() {
+  const diagnostic::Profile &p = diagnostic::profile();
   uint8_t who = 0, c0 = 0, c1 = 0, c4 = 0;
   if (!read_regs(REG_WHO_AM_I, &who, 1)) return false;
   g_who = who;
   if (who != 0x11) return false;
   if (!write_reg(REG_CTRL1, 0x07) || !read_regs(REG_CTRL0, &c0, 1)) return false;
-  // SC7A20H HR is CTRL0 bit0, not LIS3DH CTRL4 bit3. Keep reserved bits untouched.
-  if (!write_reg(REG_CTRL0, (c0 & 0x8c) | 0x01)) return false;
-  if (!write_reg(REG_CTRL4, CTRL4_BDU_8G)) return false;
-  if (!write_reg(REG_CTRL1, CTRL1_50HZ_XYZ)) return false;
+  // Creator/normal rows leave CTRL0 at its documented reset value. Never overwrite
+  // reserved bits to force a match. Only the high row writes the documented HR bit.
+  if (c0 != 0 && c0 != p.ctrl0) return false;
+  if (c0 != p.ctrl0 && !write_reg(REG_CTRL0, p.ctrl0)) return false;
+  if (!write_reg(REG_CTRL4, p.ctrl4)) return false;
+  if (!write_reg(REG_CTRL1, p.ctrl1)) return false;
   delay(1);
   if (!read_regs(REG_CTRL1, &c1, 1) || !read_regs(REG_CTRL4, &c4, 1)) return false;
   g_ctrl1 = c1;
   g_ctrl4 = c4;
-  if (c1 != CTRL1_50HZ_XYZ || c4 != CTRL4_BDU_8G) return false;
+  if (c1 != p.ctrl1 || c4 != p.ctrl4) return false;
   Diagnostics snapshot{};
   if (!read_regs(0x1f, &snapshot.ctrl0, 1) || !read_regs(0x21, &snapshot.ctrl2, 1) ||
       !read_regs(0x22, &snapshot.ctrl3, 1) || !read_regs(0x24, &snapshot.ctrl5, 1) ||
       !read_regs(0x25, &snapshot.ctrl6, 1) || !read_regs(0x2e, &snapshot.fifo_ctrl, 1) ||
       !read_regs(0x70, &snapshot.revision, 1)) return false;
-  if ((snapshot.ctrl0 & 0x73) != 0x01) return false;
+  if (snapshot.ctrl0 != p.ctrl0) return false;
   portENTER_CRITICAL(&g_diag_lock);
   snapshot.overrun_cleared = g_diag.overrun_cleared;
   snapshot.overrun_still_set = g_diag.overrun_still_set;
@@ -97,13 +99,14 @@ bool reset_once_at_boot() {
   if (!read_regs(REG_WHO_AM_I, &who, 1) || !read_regs(0x70, &revision, 1) ||
       who != 0x11 || revision != 0x28 || !read_regs(REG_CTRL0, &c0, 1) ||
       !read_regs(REG_CTRL1, &c1, 1) || !read_regs(REG_CTRL4, &c4, 1)) return false;
+  const bool reset_defaults_ok = c0 == 0x00 && c1 == 0x07 && c4 == 0x00;
   portENTER_CRITICAL(&g_diag_lock);
   g_diag.reset_ctrl0 = c0;
   g_diag.reset_ctrl1 = c1;
   g_diag.reset_ctrl4 = c4;
-  g_diag.reset_readback_ok = true;
+  g_diag.reset_readback_ok = reset_defaults_ok;
   portEXIT_CRITICAL(&g_diag_lock);
-  return true;
+  return reset_defaults_ok;
 }
 
 void recover() {
@@ -146,6 +149,11 @@ bool ready_trace(uint8_t index, ReadyTrace &out) {
   portEXIT_CRITICAL(&g_diag_lock);
   return exists;
 }
+void reset_trace() {
+  portENTER_CRITICAL(&g_diag_lock);
+  g_diag.trace_count = 0;
+  portEXIT_CRITICAL(&g_diag_lock);
+}
 
 bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, bool &overrun) {
   bus_error = false;
@@ -185,10 +193,18 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, 
     return fail();
   }
   const uint32_t read_finished_us = micros();
+  const diagnostic::Profile &p = diagnostic::profile();
+  const int16_t rx = signed_counts(b[0], b[1]);
+  const int16_t ry = signed_counts(b[2], b[3]);
+  const int16_t rz = signed_counts(b[4], b[5]);
+  x = diagnostic::to_mg(rx, p);
+  y = diagnostic::to_mg(ry, p);
+  z = diagnostic::to_mg(rz, p);
   portENTER_CRITICAL(&g_diag_lock);
   if (g_diag.trace_count < TRACE_CAPACITY) {
     g_trace[g_diag.trace_count++] = ReadyTrace{g_last_not_ready_us, ready_observed_us,
-        burst_start_us, burst_end_us, read_finished_us, g_last_not_ready_status, st, after, g_have_not_ready};
+        burst_start_us, burst_end_us, read_finished_us, g_last_not_ready_status, st, after, g_have_not_ready,
+        {rx, ry, rz}, {x, y, z}};
   }
   ++g_diag.fresh_reads;
   if (g_have_previous_read) {
@@ -217,14 +233,8 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, 
   g_have_not_ready = false;
   g_errors = 0;
   overrun = (st & STATUS_ZYXOR) != 0;
-  // 12-bit left-justified, little-endian (guide: counts = raw >> 4); 4 mg per count at +/-8 g
-  const int16_t rx = signed_counts(b[0], b[1]);
-  const int16_t ry = signed_counts(b[2], b[3]);
-  const int16_t rz = signed_counts(b[4], b[5]);
+  // Preserve native rail and overwrite evidence in every diagnostic row.
   saturated = abs(rx) >= RAIL_COUNTS || abs(ry) >= RAIL_COUNTS || abs(rz) >= RAIL_COUNTS;
-  x = (int16_t)(rx * 4);
-  y = (int16_t)(ry * 4);
-  z = (int16_t)(rz * 4);
   return true;
 }
 

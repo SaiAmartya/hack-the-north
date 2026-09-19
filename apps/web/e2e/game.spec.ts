@@ -101,7 +101,7 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
             socket.onmessage?.(
               new MessageEvent("message", {
                 data: JSON.stringify({
-                  v: 1,
+                  v: 2,
                   type: "claim",
                   claimId: expectedClaimId,
                   challenge: "482193",
@@ -156,7 +156,7 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
   expect(beforeApproval.url).toBe(socketUrl);
   expect(beforeApproval.url).not.toContain(ownerToken);
   expect(JSON.parse(beforeApproval.sent[0])).toEqual({
-    v: 1,
+    v: 2,
     type: "owner",
     token: ownerToken,
   });
@@ -169,7 +169,7 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
     Reflect.get(window, "__hostedPhoneSocket"),
   );
   expect(JSON.parse(afterApproval.sent.at(-1))).toEqual({
-    v: 1,
+    v: 2,
     type: "approve",
     claimId,
   });

@@ -3,6 +3,7 @@ import { VirtualWandEndpoint } from "../wand/endpoint";
 import type { DeviceId, InfoRecord } from "../wand/protocol";
 import { PhoneSampler } from "./sensor";
 import { recordBytes, socketUrl } from "./relay";
+import { HostedPhoneWand } from "./HostedPhoneWand";
 import "./phone.css";
 
 const PHONE_ID_KEY = "wandduel.phone-device-id.v1";
@@ -48,6 +49,11 @@ function phoneInfo(): InfoRecord {
 }
 
 export function PhoneWand(props: PhoneWandProps = {}) {
+  if (props.mode === "hosted") return <HostedPhoneWand roomId={props.roomId} infoFactory={phoneInfo} />;
+  return <LegacyPhoneWand {...props} />;
+}
+
+function LegacyPhoneWand(props: PhoneWandProps = {}) {
   const hosted = props.mode === "hosted";
   const hostedRoomId = hosted ? props.roomId : "";
   const hostedRoomValid = /^[0-9a-f]{32}$/.test(hostedRoomId);
@@ -101,7 +107,6 @@ export function PhoneWand(props: PhoneWandProps = {}) {
       stopped = true;
       if (timer !== undefined) clearInterval(timer);
       window.removeEventListener("devicemotion", onMotion);
-      window.removeEventListener("orientationchange", rotate);
       document.removeEventListener("visibilitychange", hide);
       endpoint?.disconnect();
       const ownedWakeLock = wakeLock;
@@ -136,7 +141,6 @@ export function PhoneWand(props: PhoneWandProps = {}) {
     const hide = () => {
       if (document.hidden) stop("Wand paused. Reconnect.");
     };
-    const rotate = () => stop("Keep portrait orientation. Reconnect.");
     try {
       if (!window.isSecureContext)
         throw new Error("Open the trusted HTTPS address on your laptop.");
@@ -298,7 +302,6 @@ export function PhoneWand(props: PhoneWandProps = {}) {
         setCue(shown.cue?.effect ?? 0);
       }, 20);
       window.addEventListener("devicemotion", onMotion);
-      window.addEventListener("orientationchange", rotate);
       document.addEventListener("visibilitychange", hide);
       setPhase("Move your iPhone to finish connecting…");
     } catch (error) {

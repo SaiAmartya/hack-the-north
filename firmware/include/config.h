@@ -2,8 +2,8 @@
 // Project constants. Wire-level values come from BADGE-FIRMWARE-CONTRACT.md v1; change them there first.
 #define FW_MAJOR 0
 #define FW_MINOR 1
-#define FW_PATCH 7
-#define FW_VERSION_STR "0.1.7"
+#define FW_PATCH 9
+#define FW_VERSION_STR "0.1.9"
 
 // GATT surface (contract section 3)
 #define UUID_WAND_SERVICE "7f510000-1b15-4f0d-8f3c-8db47a812000"
@@ -13,8 +13,8 @@
 #define UUID_STATUS "7f510004-1b15-4f0d-8f3c-8db47a812000"
 #define DEVICE_NAME_PREFIX "WAND-"   // + four hex digits of the device id
 
-// Stream profile (contract sections 2 and 4)
-// Diagnostic image: configured ODR is NOT yet measured native cadence. No duel capabilities.
+// Contract codec bounds (sections 2 and 4), NOT the diagnostic sensor configuration.
+// The boot-selected sensor rate/range and INFO come from diagnostic.h. No duel capabilities.
 #define DIAGNOSTIC_SENSOR_CADENCE 1
 #define SAMPLE_HZ 50
 #define RANGE_G 8

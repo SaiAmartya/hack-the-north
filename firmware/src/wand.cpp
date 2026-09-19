@@ -2,6 +2,7 @@
 #include "accel.h"
 #include "ble.h"
 #include "config.h"
+#include "diagnostic.h"
 #include "proto.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -33,23 +34,11 @@ void publish_stats() {
 void process(uint32_t capture_ms, int16_t cx, int16_t cy, int16_t cz, bool saturated) {
   g_stats.sensor_ok = true;
   const int16_t chip[3] = {cx, cy, cz};
-  const MappedSample mapped = map_and_clip(chip, g_map, g_sign, RANGE_G * 1000);
-  const int16_t v[3] = {mapped.x, mapped.y, mapped.z};
-  saturated = saturated || mapped.saturated;
   int8_t map[3], sign[3];
   get_axes(map, sign);
-  int32_t v[3];
-  for (int i = 0; i < 3; i++) {
-    v[i] = (int32_t)sign[i] * chip[map[i]];
-    if (v[i] > RANGE_G * 1000) {
-      v[i] = RANGE_G * 1000;
-      saturated = true;
-    }
-    if (v[i] < -RANGE_G * 1000) {
-      v[i] = -RANGE_G * 1000;
-      saturated = true;
-    }
-  }
+  const MappedSample mapped = map_and_clip(chip, map, sign, diagnostic::profile().range_g * 1000);
+  const int16_t v[3] = {mapped.x, mapped.y, mapped.z};
+  saturated = saturated || mapped.saturated;
   g_stats.acquired++;
   g_stats.seq++;
   g_stats.x = (int16_t)v[0];

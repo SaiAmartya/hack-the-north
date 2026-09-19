@@ -2,7 +2,11 @@
 
 Updated September 19, 2026. Software checkpoint; physical end-to-end acceptance is pending.
 
-**Latest connectivity work:** [the stabilization report](connectivity-stabilization.md)
+**Current work supersedes this historical checkpoint:** see [the input rebuild](input-rebuild.md)
+for direct-first phone sessions, explicit calibration, current tests/deployment and the
+0.1.8 diagnostic matrix. No earlier result below qualifies that rebuild.
+
+**Prior connectivity work:** [the stabilization report](connectivity-stabilization.md)
 records the repaired clock/relay lifecycle, fresh firmware diagnostics, current deployment,
 stable frontend build and latest checks. The exact-upstream and ten-second measurements
 below are historical; they do not qualify the newer image or phone connection.

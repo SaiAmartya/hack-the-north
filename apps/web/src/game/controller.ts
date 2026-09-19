@@ -1,6 +1,7 @@
 import { WandClient } from "../wand/client";
 import { BleWandTransport } from "../wand/transport";
 import { VirtualWandTransport } from "../wand/virtual";
+import { PhoneSession } from "../phone/session";
 import {
   PhoneRelayChannel,
   parseHostedPair,
@@ -52,6 +53,10 @@ export class DuelController {
   private attemptGeneration = 0;
   private cameraAttempt = 0;
   private phoneRelay?: PhoneRelayChannel;
+  phoneSession?: PhoneSession;
+  private observedWandGeneration = -1;
+  private wasStreaming = false;
+  private calibrationIdentity = "";
   private phoneRequest?: AbortController;
   onChange = () => {};
 
@@ -139,8 +144,10 @@ export class DuelController {
       this.peer.receive(payload, generation);
     document.addEventListener("visibilitychange", this.visibility);
     this.timer = setInterval(() => {
+      this.syncInputState();
       this.fusion.advance(performance.now());
       this.syncGame();
+      this.updatePhoneCoaching();
       this.onChange();
     }, 100);
   }
@@ -193,6 +200,9 @@ export class DuelController {
     this.phoneRequest = undefined;
     this.wand?.disconnect();
     this.phoneRelay = undefined;
+    this.phoneSession = undefined;
+    this.calibrationIdentity = "";
+    this.wasStreaming = false;
     this.peer.stop();
     this.videoPeerKey = "";
     this.remoteVideo = undefined;
@@ -225,16 +235,15 @@ export class DuelController {
         this.phoneUrl = hostedPair?.phoneUrl ?? `${location.origin}/phone`;
         this.pairingCode = localPair?.code ?? "";
         this.onChange();
-        let relay: PhoneRelayChannel;
+        let relay: PhoneRelayChannel | PhoneSession;
         relay = hostedPair
-          ? new PhoneRelayChannel({
-              mode: "hosted",
+          ? new PhoneSession({
               pair: hostedPair,
               onClaim: (claim) => {
                 if (
                   request !== this.attemptGeneration ||
                   this.dead ||
-                  this.phoneRelay !== relay
+                  this.phoneSession !== relay
                 )
                   return;
                 this.phoneClaim = claim;
@@ -243,7 +252,8 @@ export class DuelController {
               },
             })
           : new PhoneRelayChannel(this.game.token);
-        this.phoneRelay = relay;
+        if (relay instanceof PhoneSession) this.phoneSession = relay;
+        else this.phoneRelay = relay;
         this.wand = new WandClient(
           new VirtualWandTransport(undefined, undefined, relay),
         );
@@ -252,6 +262,12 @@ export class DuelController {
       }
       if (request !== this.attemptGeneration || this.dead) return;
       const state = this.wand!.getSnapshot();
+      if (state.phase === "unsupported") return;
+      if (state.phase === "fault" && state.canRetry) {
+        this.pairingCode = this.phoneUrl = "";
+        this.phoneClaim = undefined;
+        return;
+      }
       if (state.phase !== "streaming")
         throw new Error(state.issue || "Wand connection failed");
       if (source === "ble") await this.game.connect("ble");
@@ -260,12 +276,13 @@ export class DuelController {
       this.phoneUrl = "";
       this.phoneClaim = undefined;
       this.phoneClaimApproved = false;
-      this.phoneRelay = undefined;
-      this.motion.beginCalibration();
+      // Calibration deliberately waits for the player's explicit grip/start action.
+      this.syncInputState();
     } catch (error) {
       if (request === this.attemptGeneration) {
         this.wand?.disconnect();
         this.phoneRelay = undefined;
+        this.phoneSession = undefined;
         this.pairingCode = "";
         this.phoneUrl = "";
         this.phoneClaim = undefined;
@@ -285,9 +302,10 @@ export class DuelController {
   }
   confirmPhoneClaim() {
     const claim = this.phoneClaim;
-    if (!claim || !this.phoneRelay || this.phoneClaimApproved) return;
+    const phone = this.phoneSession ?? this.phoneRelay;
+    if (!claim || !phone || this.phoneClaimApproved) return;
     try {
-      this.phoneRelay.approve(claim.claimId);
+      phone.approve(claim.claimId);
       this.phoneClaimApproved = true;
     } catch {
       this.cancelPhonePairing();
@@ -304,6 +322,7 @@ export class DuelController {
     this.wand?.disconnect();
     this.wand = undefined;
     this.phoneRelay = undefined;
+    this.phoneSession = undefined;
     this.game.disconnect();
     this.source = undefined;
     this.busy = false;
@@ -322,13 +341,75 @@ export class DuelController {
     this.unsubscribers.push(
       wand.onSample((sample) => {
         if (this.wand !== wand) return;
+        this.syncInputState();
         if (sample.breaksGesture) this.fusion.reset(this.generation);
         this.motion.push(sample, this.generation);
+        const state = wand.getSnapshot();
+        this.phoneSession?.reportAccepted({ sequence: sample.seq, accepted: state.accepted,
+          receivedHz: state.observedHz ?? 0, ageMs: Math.max(0, sample.ageUpperMs) });
+        if (this.motion.getState().phase === "ready") this.calibrationIdentity = this.inputIdentity();
         this.speech.setRecognitionEnabled(
           this.motion.getState().phase === "ready",
         );
       }),
     );
+  }
+  private inputIdentity() {
+    const info = this.wand?.getSnapshot().info;
+    return info ? JSON.stringify([this.source, info.deviceId, info.bootId, info.sampleHz, info.rangeG, info.axisConvention]) : "";
+  }
+  private syncInputState() {
+    const state = this.wand?.getSnapshot();
+    if (!state) return;
+    if (state.generation !== this.observedWandGeneration) {
+      this.observedWandGeneration = state.generation;
+      this.generation++;
+      this.fusion.reset(this.generation);
+      this.motion.clearPending();
+      this.practiced.clear();
+      this.feedbackKey = "";
+      this.speech.setRecognitionEnabled(false);
+      if (state.failureCode === "orientation") this.calibrationIdentity = "";
+    }
+    const streaming = state.phase === "streaming";
+    if (streaming && !this.wasStreaming) {
+      if (this.calibrationIdentity && this.calibrationIdentity === this.inputIdentity()) {
+        if (!this.motion.resumeCalibration(this.generation)) this.motion.reset();
+      } else this.motion.reset();
+      this.issue = "";
+    }
+    if (!streaming && this.wasStreaming) {
+      this.fusion.reset(this.generation);
+      this.motion.clearPending();
+      this.speech.setRecognitionEnabled(false);
+      this.game.send({ type: "heartbeat", clientMs: performance.now(), inputGeneration: this.generation, healthy: false });
+    }
+    this.wasStreaming = streaming;
+  }
+  startCalibration() {
+    if (this.wand?.getSnapshot().phase !== "streaming") return;
+    this.syncInputState();
+    this.generation++;
+    this.practiced.clear();
+    this.calibrationIdentity = "";
+    this.fusion.reset(this.generation);
+    this.speech.setRecognitionEnabled(false);
+    this.motion.beginCalibration();
+    this.updatePhoneCoaching();
+    this.onChange();
+  }
+  private updatePhoneCoaching() {
+    const motion = this.motion.getState();
+    const mic = this.speech.getSnapshot().phase;
+    const instruction = !["listening", "busy"].includes(mic) ? "Enable the laptop microphone"
+      : motion.phase === "uncalibrated" ? "Find a comfortable grip. Start on the laptop."
+      : motion.phase === "stillness" ? "Hold this grip still"
+      : motion.phase === "resuming" ? "Return to your starting grip"
+      : motion.calibratingSpell === "stupefy" ? "Push forward. Stop. Return."
+      : motion.calibratingSpell === "protego" ? "Raise. Tilt. Hold."
+      : motion.phase === "ready" ? "Move and speak your spell" : "Continue on the laptop";
+    this.phoneSession?.coach({ instruction, completed: motion.calibratingSpell ? motion.examplesBySpell[motion.calibratingSpell] : 0,
+      total: motion.calibratingSpell ? 3 : 0, hint: motion.lastIssue, diagnostics: this.motion.getDiagnostics() });
   }
   async startMic() {
     this.issue = "";

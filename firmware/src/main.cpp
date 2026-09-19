@@ -17,6 +17,7 @@
 #include "buttons.h"
 #include "config.h"
 #include "console.h"
+#include "diagnostic.h"
 #include "leds.h"
 #include "present.h"
 #include "proto.h"
@@ -100,20 +101,23 @@ void on_control(const uint8_t *raw, size_t len, uint32_t received_ms, uint32_t g
 
 void boot_diag() {
   char b[64];
+  const diagnostic::Profile &p = diagnostic::profile();
   snprintf(b, sizeof(b), "wand firmware %s", FW_VERSION_STR);
   present::boot_line(b);
-  snprintf(b, sizeof(b), accel::present() ? "accel OK (who_am_i %02X) 50 Hz +/-8 g" : "accel MISSING", accel::who_am_i());
+  snprintf(b, sizeof(b), accel::present() ? "accel OK (who %02X) %u Hz +/-%u g" : "accel MISSING", accel::who_am_i(), p.sample_hz, p.range_g);
   present::boot_line(b);
   snprintf(b, sizeof(b), "reset reason %d", (int)esp_reset_reason());
   present::boot_line(b);
-  if (Serial) Serial.printf("HPDIAG|reset=%d|accel=%d|who=%02X|ctrl1=%02X|ctrl4=%02X\n", (int)esp_reset_reason(), accel::present() ? 1 : 0,
-                            accel::who_am_i(), accel::ctrl1(), accel::ctrl4());
+  if (Serial) Serial.printf("HPDIAG|reset=%d|profile=%s|ble=%s|caps=0|accel=%d|who=%02X|ctrl0=%02X|ctrl1=%02X|ctrl4=%02X\n",
+                            (int)esp_reset_reason(), p.name, diagnostic::selection().ble ? "on" : "off", accel::present() ? 1 : 0,
+                            accel::who_am_i(), accel::diagnostics().ctrl0, accel::ctrl1(), accel::ctrl4());
 }
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(5);  // a stalled USB host must never block acquisition
+  diagnostic::begin(); // latch the RTC selection before any sensor or radio access
   g_lock = xSemaphoreCreateMutexStatic(&g_lock_storage);
   btn::begin();
   console::load_settings();
@@ -128,7 +132,7 @@ void setup() {
   uint8_t device_id[6];
   esp_read_mac(device_id, ESP_MAC_BT);
 
-  proto::Info info{DIAGNOSTIC_SENSOR_CADENCE ? 0 : proto::CAP_ALL, SAMPLE_HZ, RANGE_G, {0}, g_boot_id, FW_MAJOR, FW_MINOR, FW_PATCH, AXIS_CONVENTION};
+  proto::Info info = diagnostic::info_for(diagnostic::profile(), g_boot_id);
   memcpy(info.device_id, device_id, 6);
   uint8_t info_rec[proto::REC], health_rec[proto::REC];
   proto::encode_info(info, info_rec);
@@ -137,10 +141,10 @@ void setup() {
   proto::encode_status(g_session.health(millis(), 0, health_bits()), health_rec);
   ble::set_control_handler(on_control);
   ble::set_link_handler(on_link);
-  ble::begin(device_id, info_rec, health_rec);
+  ble::begin(device_id, info_rec, health_rec, diagnostic::selection().ble);
 
   char b[64];
-  snprintf(b, sizeof(b), "BLE %s advertising  boot %08lX", ble::name(), (unsigned long)g_boot_id);
+  snprintf(b, sizeof(b), "BLE %s %s  boot %08lX", ble::name(), diagnostic::selection().ble ? "advertising" : "OFF", (unsigned long)g_boot_id);
   present::boot_line(b);
   console::begin();
   console::hello();

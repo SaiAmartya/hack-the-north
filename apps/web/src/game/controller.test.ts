@@ -110,6 +110,9 @@ it("keeps recognition paused through motion calibration and enables it for pract
   await controller.connect("ble");
   const fixtures = createCoreMotionFixtures();
   fixtures.stillness.forEach(sample);
+  expect(controller.motion.getState().phase).toBe("uncalibrated");
+  controller.startCalibration();
+  fixtures.stillness.forEach(sample);
   controller.calibrate("stupefy");
   fixtures.calibration.stupefy.forEach((trace) => trace.forEach(sample));
   controller.calibrate("protego");
@@ -170,13 +173,13 @@ it("uses POST-only local brokers and requires explicit hosted phone approval", a
   socket.readyState = FakeWebSocket.OPEN;
   socket.onopen?.();
   expect(JSON.parse(socket.sent[0])).toEqual({
-    v: 1,
+    v: 2,
     type: "owner",
     token: ownerToken,
   });
   socket.onmessage?.({
     data: JSON.stringify({
-      v: 1,
+      v: 2,
       type: "claim",
       claimId,
       challenge: "482193",
@@ -186,7 +189,7 @@ it("uses POST-only local brokers and requires explicit hosted phone approval", a
   expect(socket.sent).toHaveLength(1);
   controller.confirmPhoneClaim();
   expect(JSON.parse(socket.sent[1])).toEqual({
-    v: 1,
+    v: 2,
     type: "approve",
     claimId,
   });

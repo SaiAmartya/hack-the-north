@@ -2,577 +2,194 @@ import { env, exports } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-const worker = exports as unknown as {
-  default: { fetch(request: Request): Promise<Response> };
-};
-
-type PairResponse = {
-  roomId: string;
-  ownerToken: string;
-  expiresAtMs: number;
-  socketUrl: string;
-  phoneUrl: string;
-};
-
-function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const onMessage = (event: MessageEvent) => {
-      cleanup();
-      try {
-        resolve(JSON.parse(String(event.data)) as Record<string, unknown>);
-      } catch (error) {
-        reject(error);
-      }
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error("socket closed before message"));
-    };
-    const cleanup = () => {
-      socket.removeEventListener("message", onMessage);
-      socket.removeEventListener("close", onClose);
-    };
-    socket.addEventListener("message", onMessage);
-    socket.addEventListener("close", onClose);
-  });
-}
-
-function nextClose(socket: WebSocket): Promise<CloseEvent> {
-  return new Promise((resolve) => {
-    socket.addEventListener("close", (event) => resolve(event), { once: true });
-  });
-}
-
-async function createPair(): Promise<PairResponse> {
-  const response = await worker.default.fetch(
-    new Request("https://relay.example/api/rooms", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer test-only-pair-create-secret",
-        "content-type": "application/json",
-      },
-      body: "{}",
-    }),
-  );
-  expect(response.status).toBe(201);
-  return (await response.json()) as PairResponse;
-}
-
-async function connectSocket(url: string, origin: string): Promise<WebSocket> {
-  const requestUrl = url.replace(/^wss:/, "https:");
-  const response = await worker.default.fetch(
-    new Request(requestUrl, {
-      headers: { origin, upgrade: "websocket" },
-    }),
-  );
-  expect(response.status).toBe(101);
-  expect(response.webSocket).not.toBeNull();
-  const socket = response.webSocket as WebSocket;
-  socket.accept();
-  return socket;
-}
-
-async function openApprovedPair(): Promise<{
-  pair: PairResponse;
-  owner: WebSocket;
-  phone: WebSocket;
-}> {
-  const pair = await createPair();
-  const owner = await connectSocket(pair.socketUrl, "https://laptop.example");
-  const phone = await connectSocket(pair.socketUrl, "https://relay.example");
-  owner.send(
-    JSON.stringify({ v: 1, type: "owner", token: pair.ownerToken }),
-  );
-  const ownerClaim = nextMessage(owner);
-  const phoneAwaiting = nextMessage(phone);
-  phone.send(JSON.stringify({ v: 1, type: "phone" }));
-  const [claim, awaiting] = await Promise.all([ownerClaim, phoneAwaiting]);
-  expect(claim).toMatchObject({
-    v: 1,
-    type: "claim",
-    challenge: expect.stringMatching(/^\d{6}$/),
-    claimId: expect.stringMatching(/^[0-9a-f]{32}$/),
-  });
-  expect(awaiting).toEqual({
-    v: 1,
-    type: "awaiting",
-    challenge: claim.challenge,
-  });
-  const ownerPaired = nextMessage(owner);
-  const phonePaired = nextMessage(phone);
-  owner.send(
-    JSON.stringify({ v: 1, type: "approve", claimId: claim.claimId }),
-  );
-  await expect(ownerPaired).resolves.toEqual({
-    v: 1,
-    type: "paired",
-    generation: 1,
-  });
-  await expect(phonePaired).resolves.toEqual({
-    v: 1,
-    type: "paired",
-    generation: 1,
-  });
-  return { pair, owner, phone };
-}
-
-async function persistenceCounts(roomId: string): Promise<{
-  roomWrites: number;
-  alarmWrites: number;
-}> {
-  const rooms = (env as unknown as { ROOMS: DurableObjectNamespace }).ROOMS;
-  const stub = rooms.get(rooms.idFromName(roomId));
-  return runInDurableObject(stub, (instance) => {
-    const counters = instance as unknown as {
-      persistenceWrites: number;
-      alarmWrites: number;
-    };
-    return {
-      roomWrites: counters.persistenceWrites,
-      alarmWrites: counters.alarmWrites,
-    };
-  });
-}
-
-async function delayRoomQueue(roomId: string, delayMs: number): Promise<void> {
-  const rooms = (env as unknown as { ROOMS: DurableObjectNamespace }).ROOMS;
-  const stub = rooms.get(rooms.idFromName(roomId));
-  await runInDurableObject(stub, (instance) => {
-    const room = instance as unknown as { serial: Promise<void> };
-    room.serial = new Promise((resolve) => setTimeout(resolve, delayMs));
-  });
-}
-
-async function fillDeliveryWindow(
-  owner: WebSocket,
-  phone: WebSocket,
-): Promise<Record<string, unknown>[]> {
-  const delivered: Record<string, unknown>[] = [];
-  for (let sequence = 0; sequence < 8; sequence += 1) {
-    const next = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: Array(20).fill(sequence),
-      }),
-    );
-    delivered.push(await next);
+const worker = exports as unknown as { default: { fetch(request: Request): Promise<Response> } };
+type Message = Record<string, unknown>;
+type Pair = { roomId: string; ownerToken: string; expiresAtMs: number; socketUrl: string; phoneUrl: string };
+class Peer {
+  readonly messages: Message[] = [];
+  private listeners: Array<(m: Message) => void> = [];
+  constructor(readonly socket: WebSocket) {
+    socket.addEventListener("message", event => {
+      const message = JSON.parse(String(event.data)) as Message;
+      const listener = this.listeners.shift();
+      if (listener) listener(message); else this.messages.push(message);
+    });
   }
-  expect(new Set(delivered.map((message) => message.deliveryId)).size).toBe(8);
-  return delivered;
+  send(message: Message): void { this.socket.send(JSON.stringify(message)); }
+  next(): Promise<Message> {
+    const existing = this.messages.shift();
+    return existing ? Promise.resolve(existing) : new Promise(resolve => this.listeners.push(resolve));
+  }
 }
+async function create(): Promise<Pair> {
+  const response = await worker.default.fetch(new Request("https://relay.example/api/rooms", { method: "POST", headers: { authorization: "Bearer test-only-pair-create-secret", "content-type": "application/json" }, body: "{}" }));
+  expect(response.status).toBe(201);
+  return await response.json() as Pair;
+}
+async function connect(pair: Pair, role: "owner" | "phone"): Promise<Peer> {
+  const response = await worker.default.fetch(new Request(pair.socketUrl.replace(/^wss:/, "https:"), { headers: { origin: role === "owner" ? "https://laptop.example" : "https://relay.example", upgrade: "websocket" } }));
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!; socket.accept(); return new Peer(socket);
+}
+async function approved(relay = false) {
+  const pair = await create(), owner = await connect(pair, "owner"), phone = await connect(pair, "phone");
+  owner.send({ v: 2, type: "owner", token: pair.ownerToken });
+  phone.send({ v: 2, type: "phone" });
+  const claim = await owner.next(), awaiting = await phone.next();
+  expect(claim).toMatchObject({ v: 2, type: "claim", challenge: expect.stringMatching(/^\d{6}$/) });
+  expect(awaiting).toEqual({ v: 2, type: "awaiting", challenge: claim.challenge });
+  owner.send({ v: 2, type: "approve", claimId: claim.claimId });
+  const o = await owner.next(), p = await phone.next();
+  expect(o).toMatchObject({ v: 2, type: "paired", generation: 1, route: "direct", resumed: false });
+  expect(p.resumeToken).not.toBe(o.resumeToken);
+  let generation = 1;
+  if (relay) {
+    owner.send({ v: 2, type: "route", generation, route: "relay" });
+    expect(await owner.next()).toEqual({ v: 2, type: "route", generation: 2, route: "relay" });
+    expect(await phone.next()).toEqual({ v: 2, type: "route", generation: 2, route: "relay" });
+    generation = 2;
+  }
+  return { pair, owner, phone, generation, ownerToken: o.resumeToken as string, phoneToken: p.resumeToken as string };
+}
+function data(generation: number, rest: Message): Message { return { v: 2, type: "data", generation, ...rest }; }
+const bytes = Array.from({ length: 20 }, (_, i) => i);
+async function room<T>(pair: Pair, action: (instance: unknown) => T | Promise<T>): Promise<T> {
+  const rooms = (env as unknown as { ROOMS: DurableObjectNamespace }).ROOMS;
+  return runInDurableObject(rooms.get(rooms.idFromName(pair.roomId)), action);
+}
+async function leave(owner: Peer): Promise<void> { owner.send({ v: 2, type: "leave" }); await owner.next(); }
 
-describe("hosted phone relay runtime", () => {
-  it("protects creation and rejects an unapproved WebSocket origin", async () => {
-    const unauthorized = await worker.default.fetch(
-      new Request("https://relay.example/api/rooms", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      }),
-    );
-    expect(unauthorized.status).toBe(401);
-
-    const pair = await createPair();
-    expect(pair.roomId).toMatch(/^[0-9a-f]{32}$/);
-    expect(pair.ownerToken).toMatch(/^[0-9a-f]{64}$/);
-    expect(pair.socketUrl).toBe(`wss://relay.example/ws/${pair.roomId}`);
-    expect(pair.phoneUrl).toBe(
-      `https://relay.example/phone?room=${pair.roomId}`,
-    );
-    expect(pair.expiresAtMs).toBeGreaterThan(Date.now());
-    expect(pair.expiresAtMs).toBeLessThanOrEqual(Date.now() + 120_000);
-
-    const rejected = await worker.default.fetch(
-      new Request(pair.socketUrl.replace(/^wss:/, "https:"), {
-        headers: { origin: "https://attacker.example", upgrade: "websocket" },
-      }),
-    );
-    expect(rejected.status).toBe(403);
+describe("phone v2 Worker boundary", () => {
+  it("requires private creation auth, exact origins, and isolates assets", async () => {
+    expect((await worker.default.fetch(new Request("https://relay.example/api/rooms", { method: "POST", body: "{}" }))).status).toBe(401);
+    const pair = await create();
+    expect(pair.phoneUrl).toBe(`https://relay.example/phone?room=${pair.roomId}`);
+    expect(pair.phoneUrl).not.toContain(pair.ownerToken);
+    expect((await worker.default.fetch(new Request(pair.socketUrl.replace(/^wss:/, "https:"), { headers: { origin: "https://attacker.example", upgrade: "websocket" } }))).status).toBe(403);
+    for (const path of ["/api/speech/health", "/ws/game", "/__qa/game", "/@vite/client", "/src/main.tsx"]) expect((await worker.default.fetch(new Request(`https://relay.example${path}`))).status).toBe(404);
   });
-
-  it("requires approval, forwards exact records, and invalidates on disconnect", async () => {
-    const { pair, owner, phone } = await openApprovedPair();
-
-    const operationAtPhone = nextMessage(phone);
-    owner.send(
-      JSON.stringify({
-        v: 1,
-        type: "op",
-        id: "status-1",
-        operation: "status",
-      }),
-    );
-    await expect(operationAtPhone).resolves.toEqual({
-      v: 1,
-      type: "op",
-      id: "status-1",
-      operation: "status",
-    });
-
-    const status = Array.from({ length: 20 }, (_, index) => index + 1);
-    const replyAtOwner = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "reply",
-        id: "status-1",
-        data: status,
-      }),
-    );
-    await expect(replyAtOwner).resolves.toEqual({
-      v: 1,
-      type: "reply",
-      id: "status-1",
-      data: status,
-    });
-
-    const notifyAtOwner = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "status",
-        data: status,
-      }),
-    );
-    const statusNotification = await notifyAtOwner;
-    expect(statusNotification).toEqual({
-      v: 1,
-      type: "notify",
-      kind: "status",
-      data: status,
-      deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
-    });
-    owner.send(
-      JSON.stringify({
-        v: 1,
-        type: "received",
-        id: statusNotification.deliveryId,
-      }),
-    );
+  it("rejects v1 explicitly instead of silently reinterpreting its session", async () => {
+    const pair = await create(), owner = await connect(pair, "owner");
+    owner.send({ v: 1, type: "owner", token: pair.ownerToken });
+    expect(await owner.next()).toEqual({ v: 2, type: "error", code: "protocol_version" });
+  });
+  it("requires matching approval and rejects extra authority fields", async () => {
+    const pair = await create(), phone = await connect(pair, "phone");
+    phone.send({ v: 2, type: "phone", admin: true });
+    expect(await phone.next()).toMatchObject({ type: "error", code: "protocol_version" });
+  });
+  it("forwards bounded direct signaling without accepting data on the cloud route", async () => {
+    const { owner, phone, generation } = await approved();
+    const signal = { v: 2, type: "signal", generation, signal: { type: "offer", sdp: "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" } };
+    owner.send(signal); expect(await phone.next()).toEqual(signal);
+    phone.send(data(generation, { kind: "motion", sequence: 1, records: [bytes] }));
+    expect(await owner.next()).toMatchObject({ type: "error", code: "invalid_message" });
+  });
+  it("rejects a phone offer and preserves signal direction", async () => {
+    const { owner, phone, generation } = await approved();
+    phone.send({ v: 2, type: "signal", generation, signal: { type: "offer", sdp: "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" } });
+    expect(await owner.next()).toMatchObject({ type: "error", code: "invalid_signal" });
+  });
+  it("forwards exact control records/replies and independent status receipts", async () => {
+    const { owner, phone, generation } = await approved(true);
+    const op = data(generation, { kind: "op", id: "control-1", operation: "control", data: bytes });
+    owner.send(op); expect(await phone.next()).toEqual(op);
+    const reply = data(generation, { kind: "reply", id: "control-1" });
+    phone.send(reply); expect(await owner.next()).toEqual(reply);
+    const status = data(generation, { kind: "status", id: "s1", data: bytes });
+    phone.send(status); expect(await owner.next()).toEqual(status);
+    const receipt = data(generation, { kind: "receipt", through: 0, statusIds: ["s1"] });
+    owner.send(receipt); expect(await phone.next()).toEqual(receipt); await leave(owner);
+  });
+  it("reserves four control deliveries independently of eight outstanding motion batches", async () => {
+    const { pair, owner, phone, generation } = await approved(true);
+    for (let i = 1; i <= 8; i++) { const m = data(generation, { kind: "motion", sequence: i, records: [bytes, bytes] }); phone.send(m); expect(await owner.next()).toEqual(m); }
+    for (let i = 1; i <= 4; i++) { const m = data(generation, { kind: "status", id: `s${i}`, data: bytes }); phone.send(m); expect(await owner.next()).toEqual(m); }
+    expect(await room(pair, instance => { const r = instance as { motion: Map<number, number>; statuses: Map<string, number> }; return [r.motion.size, r.statuses.size]; })).toEqual([8, 4]);
+    owner.send(data(generation, { kind: "receipt", through: 8, statusIds: ["s1", "s2", "s3", "s4"] })); await phone.next(); await leave(owner);
+  });
+  it("keeps only newest two unsent samples and cumulatively releases the window", async () => {
+    const { owner, phone, generation } = await approved(true);
+    for (let i = 1; i <= 8; i++) { phone.send(data(generation, { kind: "motion", sequence: i, records: [bytes] })); await owner.next(); }
+    phone.send(data(generation, { kind: "motion", sequence: 9, records: [Array(20).fill(9)] }));
+    phone.send(data(generation, { kind: "motion", sequence: 10, records: [Array(20).fill(10), Array(20).fill(11)] }));
     await scheduler.wait(10);
-
-    const ownerClosed = nextClose(owner);
-    phone.close(1000, "done");
-    await expect(ownerClosed).resolves.toBeDefined();
-
-    const reused = await worker.default.fetch(
-      new Request(pair.socketUrl.replace(/^wss:/, "https:"), {
-        headers: {
-          origin: "https://laptop.example",
-          upgrade: "websocket",
-        },
-      }),
-    );
-    expect(reused.status).toBe(410);
+    owner.send(data(generation, { kind: "receipt", through: 8, statusIds: [] })); await phone.next();
+    expect(await owner.next()).toMatchObject({ kind: "motion", sequence: 10, records: [Array(20).fill(10), Array(20).fill(11)] });
+    owner.send(data(generation, { kind: "receipt", through: 10, statusIds: [] })); await phone.next(); await leave(owner);
   });
-
-  it("bounds motion delivery, keeps the newest overflow, and accepts delayed ACKs", async () => {
-    const { pair, owner, phone } = await openApprovedPair();
-    const writesBefore = await persistenceCounts(pair.roomId);
-    let closeReason = "not_closed";
-    owner.addEventListener("close", (event) => {
-      closeReason = `owner:${event.reason}`;
-    });
-    phone.addEventListener("close", (event) => {
-      closeReason = `phone:${event.reason}`;
-    });
-    const delivered: Record<string, unknown>[] = [];
-    const ackTasks: Promise<void>[] = [];
-    const onMessage = (event: MessageEvent) => {
-      const message = JSON.parse(String(event.data)) as Record<string, unknown>;
-      if (message.type !== "notify" || message.kind !== "motion") return;
-      delivered.push(message);
-      const id = message.deliveryId;
-      if (typeof id !== "string") return;
-      ackTasks.push(
-        scheduler.wait(60).then(() => {
-          try {
-            owner.send(JSON.stringify({ v: 1, type: "received", id }));
-          } catch {
-            // The main stream loop reports the close reason deterministically.
-          }
-        }),
-      );
-    };
-    owner.addEventListener("message", onMessage);
-
-    for (let sequence = 0; sequence < 500; sequence += 1) {
-      const data = Array(20).fill(sequence % 256);
-      try {
-        phone.send(
-          JSON.stringify({ v: 1, type: "notify", kind: "motion", data }),
-        );
-      } catch {
-        throw new Error(`relay closed during stream (${closeReason})`);
-      }
-      await scheduler.wait(20);
-    }
-    await scheduler.wait(120);
-    await Promise.all(ackTasks);
-    expect(delivered.length).toBeGreaterThanOrEqual(475);
-    expect(
-      delivered.every(
-        (message) =>
-          typeof message.deliveryId === "string" &&
-          /^[0-9a-f]{32}$/.test(message.deliveryId),
-      ),
-    ).toBe(true);
-    const writesAfter = await persistenceCounts(pair.roomId);
-    expect(writesAfter).toEqual(writesBefore);
-    owner.removeEventListener("message", onMessage);
-    phone.close(1000, "done");
-  }, 15_000);
-
-  it("overwrites a full motion window with only the newest fresh sample", async () => {
-    const { owner, phone } = await openApprovedPair();
-    const delivered = await fillDeliveryWindow(owner, phone);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: Array(20).fill(8),
-      }),
-    );
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: Array(20).fill(9),
-      }),
-    );
-    await scheduler.wait(10);
-    const newest = nextMessage(owner);
-    owner.send(
-      JSON.stringify({
-        v: 1,
-        type: "received",
-        id: delivered[0].deliveryId,
-      }),
-    );
-    await expect(newest).resolves.toMatchObject({
-      v: 1,
-      type: "notify",
-      kind: "motion",
-      data: Array(20).fill(9),
-      deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
-    });
-    owner.close(1000, "done");
+  it("discards expired unsent motion rather than catching up", async () => {
+    const { owner, phone, generation } = await approved(true);
+    for (let i = 1; i <= 8; i++) { phone.send(data(generation, { kind: "motion", sequence: i, records: [bytes] })); await owner.next(); }
+    phone.send(data(generation, { kind: "motion", sequence: 9, records: [bytes] })); await scheduler.wait(120);
+    owner.send(data(generation, { kind: "receipt", through: 8, statusIds: [] })); await phone.next();
+    phone.send(data(generation, { kind: "motion", sequence: 10, records: [bytes] }));
+    expect(await owner.next()).toMatchObject({ kind: "motion", sequence: 10 });
+    owner.send(data(generation, { kind: "receipt", through: 10, statusIds: [] })); await phone.next(); await leave(owner);
   });
-
-  it("drains queued statuses in order before the newest overflow motion", async () => {
-    const { owner, phone } = await openApprovedPair();
-    const delivered = await fillDeliveryWindow(owner, phone);
-    const newestMotion = Array(20).fill(101);
-    const firstStatus = Array.from({ length: 20 }, (_, index) => index + 20);
-    const secondStatus = Array.from({ length: 20 }, (_, index) => 255 - index);
-
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: newestMotion,
-      }),
-    );
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "status",
-        data: firstStatus,
-      }),
-    );
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "status",
-        data: secondStatus,
-      }),
-    );
-    await scheduler.wait(10);
-
-    const drained: Record<string, unknown>[] = [];
-    for (let index = 0; index < 3; index += 1) {
-      const next = nextMessage(owner);
-      owner.send(
-        JSON.stringify({
-          v: 1,
-          type: "received",
-          id: delivered[index].deliveryId,
-        }),
-      );
-      drained.push(await next);
-    }
-    expect(drained).toEqual([
-      {
-        v: 1,
-        type: "notify",
-        kind: "status",
-        data: firstStatus,
-        deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
-      },
-      {
-        v: 1,
-        type: "notify",
-        kind: "status",
-        data: secondStatus,
-        deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
-      },
-      {
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: newestMotion,
-        deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
-      },
-    ]);
-    owner.close(1000, "done");
+  it("ignores stale generations but rejects invalid cumulative receipts", async () => {
+    const { owner, phone, generation } = await approved(true);
+    phone.send(data(generation - 1, { kind: "motion", sequence: 99, records: [bytes] }));
+    owner.send(data(generation, { kind: "receipt", through: 99, statusIds: [] }));
+    expect(await owner.next()).toMatchObject({ type: "error", code: "invalid_receipt" });
   });
-
-  it("closes when the bounded status queue overflows", async () => {
-    const { owner, phone } = await openApprovedPair();
-    await fillDeliveryWindow(owner, phone);
-    const closed = nextClose(owner);
-    for (let sequence = 0; sequence < 5; sequence += 1) {
-      phone.send(
-        JSON.stringify({
-          v: 1,
-          type: "notify",
-          kind: "status",
-          data: Array(20).fill(40 + sequence),
-        }),
-      );
-    }
-    await expect(closed).resolves.toMatchObject({ reason: "delivery_backlog" });
+  it("resets a congested link after one second while retaining approved pairing", async () => {
+    const { pair, owner, phone, generation, ownerToken, phoneToken } = await approved(true);
+    phone.send(data(generation, { kind: "motion", sequence: 1, records: [bytes] })); await owner.next();
+    expect(await owner.next()).toMatchObject({ type: "recovering", code: "congestion", generation: generation + 1 });
+    expect(await phone.next()).toMatchObject({ type: "recovering" });
+    const owner2 = await connect(pair, "owner"), phone2 = await connect(pair, "phone");
+    owner2.send({ v: 2, type: "resume", role: "owner", token: ownerToken });
+    expect(await owner2.next()).toMatchObject({ type: "recovering", generation: generation + 1 });
+    phone2.send({ v: 2, type: "resume", role: "phone", token: phoneToken });
+    expect(await phone2.next()).toMatchObject({ type: "paired", generation: generation + 1 });
+    await owner2.next();
+    phone2.send(data(generation + 1, { kind: "motion", sequence: 1, records: [bytes] })); expect(await owner2.next()).toMatchObject({ kind: "motion", sequence: 1 });
+    owner2.send(data(generation + 1, { kind: "receipt", through: 1, statusIds: [] })); await phone2.next(); await leave(owner2);
   });
-
-  it("closes when a queued status becomes stale", async () => {
-    const { owner, phone } = await openApprovedPair();
-    await fillDeliveryWindow(owner, phone);
-    const closed = nextClose(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "status",
-        data: Array(20).fill(77),
-      }),
-    );
-    await expect(closed).resolves.toMatchObject({ reason: "delivery_backlog" });
+  it("retains direct generation through signaling loss and stores token hashes only", async () => {
+    const { pair, owner, phone, generation, ownerToken, phoneToken } = await approved();
+    const stored = await room(pair, instance => (instance as { room: unknown }).room);
+    expect(JSON.stringify(stored)).not.toContain(ownerToken); expect(JSON.stringify(stored)).not.toContain(phoneToken);
+    phone.socket.close(1000, "network-loss"); expect(await owner.next()).toMatchObject({ type: "recovering", route: "direct", generation });
+    const phone2 = await connect(pair, "phone"); phone2.send({ v: 2, type: "resume", role: "phone", token: phoneToken });
+    expect(await phone2.next()).toMatchObject({ type: "paired", generation, resumed: true }); await owner.next(); await leave(owner);
   });
-
-  it("closes the room when a motion delivery is not acknowledged", async () => {
-    const { owner, phone } = await openApprovedPair();
-    const firstMotion = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: Array(20).fill(7),
-      }),
-    );
-    await expect(firstMotion).resolves.toMatchObject({
-      type: "notify",
-      deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
-    });
-    const closed = nextClose(owner);
-    await scheduler.wait(220);
-    try {
-      phone.send(
-        JSON.stringify({
-          v: 1,
-          type: "notify",
-          kind: "status",
-          data: Array(20).fill(0),
-        }),
-      );
-    } catch {
-      // The alarm may have already closed the peer before this trigger frame.
-    }
-    await expect(closed).resolves.toBeDefined();
+  it("rejects duplicate roles and cross-role resume credentials", async () => {
+    const { pair, owner, phone, phoneToken } = await approved();
+    const duplicate = await connect(pair, "owner"); duplicate.send({ v: 2, type: "resume", role: "owner", token: phoneToken }); expect(await duplicate.next()).toMatchObject({ type: "error", code: "resume_rejected" });
+    phone.socket.close(1000, "network-loss"); await owner.next();
+    const wrong = await connect(pair, "phone"); wrong.send({ v: 2, type: "resume", role: "owner", token: phoneToken }); expect(await wrong.next()).toMatchObject({ type: "error", code: "resume_rejected" }); await leave(owner);
   });
-
-  it("accepts an on-time delivery receipt after serial queue delay", async () => {
-    const { pair, owner, phone } = await openApprovedPair();
-    const firstMotion = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: Array(20).fill(7),
-      }),
-    );
-    const delivered = await firstMotion;
-    await scheduler.wait(160);
-    await delayRoomQueue(pair.roomId, 60);
-    owner.send(
-      JSON.stringify({
-        v: 1,
-        type: "received",
-        id: delivered.deliveryId,
-      }),
-    );
-    await scheduler.wait(80);
-
-    const nextMotion = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "notify",
-        kind: "motion",
-        data: Array(20).fill(8),
-      }),
-    );
-    await expect(nextMotion).resolves.toMatchObject({
-      type: "notify",
-      kind: "motion",
-      data: Array(20).fill(8),
-    });
-    owner.close(1000, "done");
+  it("bounds recovery by thirty-second grace and absolute room expiry", async () => {
+    const { pair, owner, phone } = await approved(); phone.socket.close(1000, "network-loss"); const recovering = await owner.next();
+    expect(Number(recovering.resumeUntilMs) - Date.now()).toBeLessThanOrEqual(30_000);
+    await room(pair, async instance => { const r = instance as { room: { resumeUntilMs: number }; alarm(): Promise<void> }; r.room.resumeUntilMs = Date.now() - 1; await r.alarm(); });
+    expect(await owner.next()).toMatchObject({ type: "error", code: "signalling-expired" });
+    expect((await worker.default.fetch(new Request(pair.socketUrl.replace(/^wss:/, "https:"), { headers: { origin: "https://relay.example", upgrade: "websocket" } }))).status).toBe(410);
   });
-
-  it("accepts an on-time operation reply after serial queue delay", async () => {
-    const { pair, owner, phone } = await openApprovedPair();
-    const atPhone = nextMessage(phone);
-    owner.send(
-      JSON.stringify({
-        v: 1,
-        type: "op",
-        id: "delayed-status",
-        operation: "status",
-      }),
-    );
-    await expect(atPhone).resolves.toMatchObject({
-      type: "op",
-      id: "delayed-status",
-    });
-    await scheduler.wait(1_450);
-    await delayRoomQueue(pair.roomId, 70);
-    const atOwner = nextMessage(owner);
-    phone.send(
-      JSON.stringify({
-        v: 1,
-        type: "reply",
-        id: "delayed-status",
-        data: Array(20).fill(9),
-      }),
-    );
-    await scheduler.wait(100);
-    await expect(atOwner).resolves.toEqual({
-      v: 1,
-      type: "reply",
-      id: "delayed-status",
-      data: Array(20).fill(9),
-    });
-    owner.close(1000, "done");
-  }, 10_000);
+  it("intentional leave revokes pairing rather than entering recovery", async () => {
+    const { pair, owner, phone } = await approved(); await leave(owner); expect(await phone.next()).toMatchObject({ type: "error", code: "left" });
+    expect(await room(pair, instance => (instance as { room: unknown }).room)).toMatchObject({ status: "closed" });
+    expect(JSON.stringify(await room(pair, instance => (instance as { room: unknown }).room))).not.toContain("ResumeHash");
+  });
+  it("can reset a direct link during one-sided signalling recovery", async () => {
+    const { pair, owner, phone, phoneToken, generation } = await approved();
+    phone.socket.close(1000, "network-loss"); await owner.next();
+    owner.send({ v: 2, type: "reset-link", generation });
+    expect(await owner.next()).toMatchObject({ type: "recovering", generation: generation + 1 });
+    const phone2 = await connect(pair, "phone"); phone2.send({ v: 2, type: "resume", role: "phone", token: phoneToken });
+    expect(await owner.next()).toMatchObject({ type: "paired", generation: generation + 1 });
+    expect(await phone2.next()).toMatchObject({ type: "paired", generation: generation + 1 }); await leave(owner);
+  });
+  it("absolute expiry still revokes an established direct pair", async () => {
+    const { pair, owner } = await approved();
+    await room(pair, async instance => { const r = instance as { room: { expiresAtMs: number }; alarm(): Promise<void> }; r.room.expiresAtMs = Date.now() - 1; await r.alarm(); });
+    expect(await owner.next()).toMatchObject({ type: "error", code: "expired" });
+  });
+  it("owner reset creates a fresh generation for both without fresh QR approval", async () => {
+    const { owner, phone, generation } = await approved(); owner.send({ v: 2, type: "reset-link", generation });
+    expect(await owner.next()).toMatchObject({ type: "paired", generation: generation + 1, resumed: true });
+    expect(await phone.next()).toMatchObject({ type: "paired", generation: generation + 1, resumed: true }); await leave(owner);
+  });
 });

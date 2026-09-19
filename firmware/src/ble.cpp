@@ -86,8 +86,9 @@ SubscribeCB g_subscribe_cb;
 void set_control_handler(ControlHandler handler) { g_handler = handler; }
 void set_link_handler(LinkHandler handler) { g_link_handler = handler; }
 
-void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20]) {
+void begin(const uint8_t device_id[6], const uint8_t info_rec[20], const uint8_t health_rec[20], bool enabled) {
   snprintf(g_name, sizeof(g_name), "%s%02X%02X", DEVICE_NAME_PREFIX, device_id[4], device_id[5]);
+  if (!enabled) return;
   g_send_lock = xSemaphoreCreateMutexStatic(&g_send_lock_storage);
 
   NimBLEDevice::init(g_name);
@@ -126,6 +127,7 @@ bool status_subscribed() { return g_status_sub; }
 uint32_t generation() { return g_gen; }
 
 bool notify_motion(const uint8_t rec[20], uint32_t gen) {
+  if (!g_send_lock) return false; // BLE-off boot: no semaphore or NimBLE objects exist
   SendLock lock;
   if (gen != g_gen || !g_connected || !g_motion_sub || !g_motion) return false;
   const bool sent = g_motion->notify(rec, 20, g_handle);
@@ -138,6 +140,7 @@ void set_health(const uint8_t rec[20]) {
 }
 
 bool notify_status(const uint8_t rec[20], uint32_t gen) {
+  if (!g_send_lock) return false;
   SendLock lock;
   if (gen != g_gen || !g_status || !g_connected || !g_status_sub) return false;
   // Explicit bytes are copied into the packet; notifying the characteristic value defers/coalesces it.

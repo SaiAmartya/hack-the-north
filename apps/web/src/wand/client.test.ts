@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WandClient } from "./client";
 import { VirtualWandTransport } from "./virtual";
+import type { DisconnectListener, WandTransport } from "./transport";
 import {
   CueEffect,
   PresentationPhase,
@@ -12,6 +13,8 @@ import {
   ControlOpcode,
   decodeControl,
   MotionFlag,
+  decodeMotion,
+  encodeMotion,
 } from "./protocol";
 
 describe("shared wand lifecycle", () => {
@@ -40,6 +43,76 @@ describe("shared wand lifecycle", () => {
     expect(client.getSnapshot().observedHz).toBe(50);
     expect(client.getSnapshot().maxGapMs).toBe(20);
     expect(client.getSamples()[0].breaksGesture).toBe(true);
+  });
+  it("retains an approved recoverable carrier but rebuilds protocol and waits for fresh input", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    let lost: DisconnectListener = () => {};
+    const transport: WandTransport = {
+      source: "PHONE",
+      connect: async cb => { lost = cb; await endpoint.connect(cb); },
+      recover: vi.fn(async cb => { lost = cb; await endpoint.connect(cb); }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb),
+      writeControl: data => endpoint.writeControl(data),
+      disconnect: vi.fn(() => endpoint.disconnect()),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect();
+    await vi.advanceTimersByTimeAsync(1100); await connecting;
+    expect(client.getSnapshot().phase).toBe("streaming");
+    const generation = client.getSnapshot().generation;
+    const closes = vi.mocked(transport.disconnect).mock.calls.length;
+    const listener = vi.fn(); client.onSample(listener);
+    lost({ code: "congestion", message: "Network is delayed", recoverable: true });
+    expect(client.getSnapshot()).toMatchObject({ phase: "recovering", failureCode: "congestion", issue: "Network is delayed" });
+    expect(client.getSnapshot().generation).toBeGreaterThan(generation);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.getSnapshot().phase).toBe("validating");
+    expect(listener).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(client.getSnapshot().phase).toBe("streaming");
+    expect(transport.recover).toHaveBeenCalledOnce();
+    expect(transport.disconnect).toHaveBeenCalledTimes(closes);
+    expect(listener.mock.calls[0][0].breaksGesture).toBe(true);
+  });
+  it("keeps the specific failure when a generic socket close follows and allows explicit retry", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    let lost: DisconnectListener = () => {};
+    const transport: WandTransport = {
+      source: "PHONE", connect: async cb => { lost = cb; await endpoint.connect(cb); },
+      recover: vi.fn(async () => { throw new Error("Recovery window expired"); }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb), writeControl: data => endpoint.writeControl(data),
+      disconnect: () => endpoint.disconnect(),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect(); await vi.advanceTimersByTimeAsync(1100); await connecting;
+    lost({ code: "orientation", message: "Return to portrait and tap Resume", recoverable: false });
+    lost();
+    expect(client.getSnapshot()).toMatchObject({ phase: "fault", failureCode: "orientation", issue: "Return to portrait and tap Resume", canRetry: true });
+    await client.retryRecovery();
+    expect(client.getSnapshot()).toMatchObject({ phase: "fault", issue: "Recovery window expired" });
+  });
+  it("refreshes clocks while validating and reports interrupted input instead of clock expiry", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    const writes = vi.fn((data: Uint8Array) => endpoint.writeControl(data));
+    const transport: WandTransport = {
+      source: "PHONE", connect: cb => endpoint.connect(cb), recover: cb => endpoint.connect(cb),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, kind === "motion" ? bytes => {
+        const record = decodeMotion(bytes);
+        cb(encodeMotion({ ...record, flags: record.flags | (record.seq % 20 === 0 ? MotionFlag.Discontinuity : 0) }));
+      } : cb),
+      writeControl: writes, disconnect: () => endpoint.disconnect(),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(client.getSnapshot().phase).toBe("validating");
+    expect(writes.mock.calls.filter(([data]) => decodeControl(data).opcode === ControlOpcode.Sync)).toHaveLength(6);
+    await vi.advanceTimersByTimeAsync(4100); await connecting;
+    expect(client.getSnapshot()).toMatchObject({ phase: "fault", failureCode: "unstable_input", canRetry: true });
+    expect(client.getSnapshot().issue).not.toContain("Clock");
   });
   it("starts the clock lease after human pairing, not while waiting for approval", async () => {
     const transport = new VirtualWandTransport(() => Date.now());

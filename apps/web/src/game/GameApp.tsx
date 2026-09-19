@@ -82,6 +82,15 @@ export function SpellGlyph({ spell }: { spell: Spell }) {
     </svg>
   );
 }
+function GripGuide() {
+  return <svg className="grip-guide" viewBox="0 0 160 120" role="img" aria-label="Hold your wand comfortably on its side at a slight diagonal. We learn your starting grip.">
+    <g transform="rotate(60 80 60)">
+    <rect x="54" y="15" width="52" height="85" rx="10" fill="none" stroke="currentColor" strokeWidth="4" />
+    <path d="M72 25h16M76 90h8M117 64h27m-9-9 9 9-9 9M43 50H16m9-9-9 9 9 9" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+    <circle cx="80" cy="58" r="12" fill="currentColor" opacity=".15" />
+    </g>
+  </svg>;
+}
 export function GameApp() {
   const [controller, setController] = useState<DuelController>();
   const [, redraw] = useState(0);
@@ -129,6 +138,8 @@ export function GameApp() {
   const motion = c?.motion.getState(),
     mic = c?.speech.getSnapshot();
   const wandReady = c?.wand?.getSnapshot().phase === "streaming";
+  const wand = c?.wand?.getSnapshot();
+  const phone = c?.phoneSession?.getState();
   const pairingPhone = c?.source === "phone" && c.busy && !wandReady;
   const micReady = mic?.phase === "listening" || mic?.phase === "busy";
   const practice = motion?.phase === "ready" && micReady;
@@ -370,6 +381,7 @@ export function GameApp() {
                     <h1>Preparing your iPhone…</h1>
                   </>
                 )}
+                {phone?.relayAvailable && <button className="secondary" onClick={() => c.phoneSession?.chooseRelay()}>Use internet connection</button>}
                 <button className="quiet" onClick={() => c.cancelPhonePairing()}>
                   Cancel
                 </button>
@@ -379,10 +391,13 @@ export function GameApp() {
                 <div className="result-star" aria-hidden="true">
                   ✧
                 </div>
-                <h1>{c.busy ? "Connecting…" : "Let's reconnect."}</h1>
-                {!c.busy && (
+                <h1>{wand?.phase === "unsupported" ? "Your badge needs repair."
+                  : wand?.phase === "recovering" ? "Reconnecting your iPhone…"
+                  : wand?.phase === "validating" ? "Checking fresh movement…"
+                  : c.busy ? "Connecting…" : "Let's reconnect."}</h1>
+                {wand?.phase === "unsupported" ? <button onClick={() => void c.connect("phone")}>Use iPhone</button> : !c.busy && !["recovering", "validating", "synchronizing"].includes(wand?.phase ?? "") && (
                   <>
-                    <button onClick={() => void c.connect(c.source === "phone" ? "phone" : "ble")}>
+                    <button onClick={() => void (wand?.canRetry ? c.wand?.retryRecovery() : c.connect(c.source === "phone" ? "phone" : "ble"))}>
                       {c.source === "phone" ? "Reconnect iPhone" : "Reconnect badge"}
                     </button>
                     <button className="quiet" onClick={() => setRevision((n) => n + 1)}>
@@ -390,6 +405,7 @@ export function GameApp() {
                     </button>
                   </>
                 )}
+                {phone?.relayAvailable && <button className="secondary" onClick={() => c.phoneSession?.chooseRelay()}>Use internet connection</button>}
               </>
             ) : !micReady ? (
               <>
@@ -412,17 +428,26 @@ export function GameApp() {
                   Enable microphone
                 </button>
               </>
-            ) : motion?.phase === "stillness" ? (
+            ) : motion?.phase === "uncalibrated" || motion?.phase === "fault" ? (
+              <>
+                <GripGuide />
+                <h1>Find your wand grip.</h1>
+                <p>Try sideways, slightly diagonal. We’ll learn your grip.</p>
+                <button onClick={() => c.startCalibration()}>Start calibration</button>
+              </>
+            ) : motion?.phase === "stillness" || motion?.phase === "resuming" ? (
               <>
                 <div className="result-star" aria-hidden="true">
                   ✧
                 </div>
-                <h1>Hold your wand still.</h1>
+                <h1>{motion.phase === "resuming" ? "Return to your starting grip." : "Hold your wand still."}</h1>
                 <progress
-                  max={3000}
-                  value={motion.stillnessMs}
+                  max={motion.progressTargetMs || 3000}
+                  value={motion.progressMs}
                   aria-label="Stillness calibration"
                 />
+                <p role="status">{motion.lastIssue || "Keep this comfortable grip."}</p>
+                <button className="quiet" onClick={() => c.startCalibration()}>Reset grip</button>
               </>
             ) : !practice ? (
               <>
@@ -442,7 +467,10 @@ export function GameApp() {
                     : "Learn your wand."}
                 </h1>
                 {motion?.calibratingSpell ? (
-                  <p>{motion.examplesBySpell[motion.calibratingSpell]} / 3</p>
+                  <>
+                    <p>{motion.examplesBySpell[motion.calibratingSpell]} / 3</p>
+                    <p role="status">{motion.lastIssue || ({ "hold-still": "Hold still", "return-neutral": "Return to your starting grip", armed: "Ready to move", moving: "Moving", settling: "Stop and hold", ready: "Accepted" }[motion.progress])}</p>
+                  </>
                 ) : (
                   <button
                     onClick={() =>
@@ -459,6 +487,7 @@ export function GameApp() {
                       : "Protego"}
                   </button>
                 )}
+                <button className="quiet" onClick={() => c.startCalibration()}>Reset grip</button>
               </>
             ) : (
               <>

@@ -1,133 +1,66 @@
 # Wandduel — badge or iPhone + local voice
 
-The player app is a minimal wand setup, calibration/practice and two-player duel.
-Stupefy and Protego use real badge or iPhone acceleration plus speech recognized entirely on each
-laptop. Python owns combat; video is peer-to-peer and video-only; Three.js draws the spells.
-No player-facing simulated wand, diagnostic dashboard, casting buttons or cloud ASR.
+A two-player, motion-and-voice duel: React/Three.js presentation, a Python referee,
+video-only WebRTC and local speech recognition on each laptop. No button casting,
+cloud ASR, serial gameplay gateway or badge IDE dependency.
 
-Firmware source now matches teammate main `6a50929` exactly. Sai requested discarding
-the local 0.1.1/0.1.2 firmware fixes; they are not part of the current firmware tree.
-Matching protocol bytes are not proof that your badge is flashed or physically qualified.
-See [the latest firmware review](docs/qa/firmware-main-6a50929.md) and
-[current platform status](docs/qa/game-platform.md) for the measured/tested boundaries.
+**This is an incomplete development checkpoint, not a qualified demo release.**
+The iPhone path now has direct-first Wi-Fi, explicit Internet fallback, visible sensing
+and player-started grip calibration. The rebuilt physical gesture detector needs held-out
+iPhone testing; an intermittent Internet-relay freshness failure remains open.
+Badge source **0.1.9 is diagnostic-only**: it is not gameplay firmware and has not been
+flashed or hardware-qualified. Teammate main through `76b6388` is incorporated.
+See [current implementation and measured evidence](docs/qa/input-rebuild.md).
 
-- [Approved implementation plan](IMPLEMENTATION-PLAN.md)
-- [Current platform checkpoint and QA](docs/qa/game-platform.md)
-- [MVP](MVP-OUTLINE.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
-- [Design system — Wizarding Workshop](DESIGN_SYSTEMS.md)
-- [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
+- **[Start here: teammate setup](docs/TEAM-SETUP.md)** — fresh-clone macOS/Windows install,
+  local speech, iPhone connection, two laptops, checks and troubleshooting.
+- **[Badge build, backup and flash instructions](firmware/README.md)** — diagnostic only at this checkpoint.
+- [MVP](MVP-OUTLINE.md) · [Implementation plan](IMPLEMENTATION-PLAN.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
+- [Design system](DESIGN_SYSTEMS.md) · [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
 
-## Run
+## Run an already installed checkout
 
-After the Python 3.11 environment, web dependencies and local model exist,
-run from the repository root (Node 26.5.0 on PATH):
-
-```sh
-python3 tools/run_game.py
-```
-
-The default launcher builds the web app into a temporary snapshot and serves that
-snapshot with Vite preview, so source edits cannot change a running demo. Use
-`python3 tools/run_game.py --dev` only when explicit HMR is useful. On Windows use
-`py tools/run_game.py`. Open **http://127.0.0.1:5173** in Chrome.
-Connect the correct `WAND-xxxx`, enable the microphone, follow calibration, cast each
-spell once, enable the camera, then Ready. A second player joins the same referee.
-Ctrl+C stops the stack. No legacy workers, API key or specialized badge IDE is used.
-A phone is optional; badge play does not require it.
-
-First-time dependencies (Windows Python executable: `.venv\Scripts\python.exe`):
+From the repository root, with Node **26.5.0** on PATH and the Python **3.11** environment
+and pinned speech model installed:
 
 ```sh
-cd apps/host
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev,speech]'
-cd ../web
-npm ci
+apps/host/.venv/bin/python tools/run_game.py
 ```
 
-The one-time, explicitly approved model download is separate:
+Windows PowerShell:
 
-```sh
-apps/host/.venv/bin/python tools/setup_speech.py --model-dir "$HOME/.cache/wand-speech/faster-whisper-base.en"
+```powershell
+.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py
 ```
 
-This Mac's local model is already provisioned. Runtime uses only local files and in-memory audio.
-The launcher shares a fresh secret privately between the local proxy and speech helper; never
-put it in `.env`, browser code, URLs or logs.
+Open **http://127.0.0.1:5173** in desktop Chrome. Wait for **Game ready** in the terminal;
+this verifies the frontend, referee and warmed local speech helper, not physical gameplay.
+The default stable build does not hot-reload; restart after changing source. **Ctrl+C** stops
+this stack. Phone onboarding additionally needs the hosted-service flags and approved private
+enrollment file in [the setup guide](docs/TEAM-SETUP.md#3-connect-an-iphone).
 
-All services default to loopback. **After approval to expose the referee on the controlled LAN**:
-Laptop A runs `python3 tools/run_game.py --referee-bind <A-private-IP>`;
-laptop B runs `python3 tools/run_game.py --referee http://<A-private-IP>:8000`.
-Both players still open their own `http://127.0.0.1:5173`, and each speech helper stays local.
-No certificate installation is needed for this localhost badge workflow. Do not expose a public
-port or make blanket firewall exceptions. Windows/Bluetooth/network performance needs real QA.
-
-### iPhone control
-
-The iPhone supplies motion only; its laptop still captures speech and video. The approved
-hosted profile uses a dedicated phone-only HTTPS service, not a public game/dev server:
-
-```sh
-python3 tools/run_game.py --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file <private-enrollment-file>
-```
-
-Open `http://127.0.0.1:5173` on the laptop. Choose **Connect iPhone**, scan the QR with the
-iPhone camera, tap **Connect wand**, allow motion, and approve the matching number on the
-laptop. Keep Safari foregrounded, portrait and unlocked. No certificate installation is
-needed for this profile; internet access is required. Never place the enrollment secret in
-the repo, browser code, URLs or logs. Current deployment/QA evidence is in
-[the platform checkpoint](docs/qa/game-platform.md); physical iPhone, microphone and
-gameplay qualification remain pending.
-
-**Optional private-LAN profile:** requires separate approval for LAN exposure and certificate
-installation/trust. With an already trusted certificate for the selected laptop's private IP:
-
-```sh
-python3 tools/run_game.py --phone-host <laptop-private-IP> --cert <certificate-path> --key <private-key-path>
-```
-
-Open `https://<laptop-private-IP>:5173` on the laptop, choose **Connect iPhone**, then
-open `/phone` at that same origin in iPhone Safari. Enter the displayed pairing code
-and enable motion. Keep Safari foregrounded, portrait, and unlocked. No simulated
-wand is offered in the player interface. Private keys stay outside the repository.
-For two laptops, use the explicit referee profiles in [the QA guide](docs/qa/game-platform.md).
+The current diagnostic badge image is intentionally blocked from casting. Use the iPhone
+path for the next physical calibration test; neither physical path is qualified for a demo yet.
 
 ## Scripted QA
 
-The game launcher announces **Game ready** only after the frontend, referee and
-warmed local speech helper pass health checks. Occupied ports stop startup without
-killing other processes; a partial stack is not reported ready.
-
-Run `python3 tools/qa_game.py` from the root, or the individual checks below.
-The browser suite starts isolated loopback servers on frontend port `15173` and referee
-port `18000`, so the live game on `5173`/`8000` can remain running. Test-only replay/fault
-routes are enabled only for that run; the normal player app and production bundle do not
-expose them.
+Install the Playwright browser once as described in the setup guide, then run:
 
 ```sh
-cd apps/web
-npm run typecheck
-npm test
-npm run build
-npm exec playwright install chromium
-npm run test:e2e
+apps/host/.venv/bin/python tools/qa_game.py
 ```
 
-First-time dependency/browser installation requires internet. Runtime replay does not.
-
-```sh
-cd apps/host
-.venv/bin/python -m pytest -q
-```
-
-Tests include deterministic raw motion, fusion, real game sockets, combat timing, recovery,
-local speech boundaries and legacy regressions. They cannot prove acoustic accuracy, real
-badge axes/radio/feedback, Windows behavior or two-human defendability.
-The latest full browser run passed 21 tests, including real-Chrome startup-loss
-regressions and more than two seconds of production-path fake-microphone capture.
-These are automated capture checks, not evidence from a physical microphone.
+Windows: `.\apps\host\.venv\Scripts\python.exe .\tools\qa_game.py`.
+The suite uses isolated loopback ports `15173`/`18000`, so the live game on
+`5173`/`8000` can remain running. Synthetic controls stay in the test harness.
+Tests do not certify physical microphones, iPhones, badges, batteries, Windows performance
+or two-human play. The [current evidence report](docs/qa/input-rebuild.md) records exact
+results and open gates; [older platform results](docs/qa/game-platform.md) are historical.
 
 ---
+
+<details>
+<summary>Historical Phantom Arena documentation — not current run instructions</summary>
 
 # Legacy Phantom Arena reference (superseded)
 
@@ -333,3 +266,5 @@ and real end-to-end latency are **unverified on a physical badge**. Everything
 else is covered by the automated suite plus a simulated gateway over a pty. See
 [docs/hardware-verification.md](docs/hardware-verification.md) for the full list
 and the pre-flight checklist.
+
+</details>

@@ -13,6 +13,7 @@ __pycache__/
 
 # node
 node_modules/
+.pnpm-store/
 dist/
 .vite/
 playwright-report/
