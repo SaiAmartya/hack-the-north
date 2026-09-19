@@ -2,6 +2,11 @@
 
 Updated September 19, 2026. Software checkpoint; physical end-to-end acceptance is pending.
 
+**Latest connectivity work:** [the stabilization report](connectivity-stabilization.md)
+records the repaired clock/relay lifecycle, fresh firmware diagnostics, current deployment,
+stable frontend build and latest checks. The exact-upstream and ten-second measurements
+below are historical; they do not qualify the newer image or phone connection.
+
 ## Latest setup fixes and current blocker
 
 - The QR was real but a generic setup SVG stroke thickened every module into a solid

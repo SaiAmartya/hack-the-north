@@ -2,23 +2,31 @@
 #include "pins.h"
 #include <Arduino.h>
 #include <Wire.h>
+#include <atomic>
 
-// SC7A20HTR on the shared I2C bus (official custom-flash guide, section 5). Register map is
-// LIS2DH-compatible. The NFC chip on the same bus can wedge it on droopy battery power, so every
-// transaction has a bounded timeout and the bus is re-initialised after repeated failures.
+// SC7A20HTR on the shared I2C bus. Do not initialize the attached NFC controller.
 namespace accel {
 namespace {
-const uint8_t REG_WHO_AM_I = 0x0F, REG_CTRL1 = 0x20, REG_CTRL4 = 0x23, REG_STATUS = 0x27, REG_OUT_X_L = 0x28, AUTO_INC = 0x80;
+const uint8_t REG_WHO_AM_I = 0x0F, REG_CTRL0 = 0x1F, REG_CTRL1 = 0x20, REG_CTRL4 = 0x23, REG_STATUS = 0x27, REG_OUT_X_L = 0x28, AUTO_INC = 0x80;
 const uint8_t STATUS_ZYXDA = 0x08;   // new X, Y and Z data available
-const uint8_t CTRL1_50HZ_XYZ = 0x47; // ODR 50 Hz, normal power, X/Y/Z enabled (guide's 0x57 = 100 Hz)
+const uint8_t STATUS_ZYXOR = 0x80;   // at least one axis overwritten; exact missed count is unknown
+const uint8_t CTRL1_50HZ_XYZ = 0x47; // ODR 50 Hz, LPen=0, X/Y/Z enabled
 const uint8_t CTRL4_BDU_8G = 0xA0;   // block data update (guide's verified 0x80) + FS = +/-8 g
 const int16_t RAIL_COUNTS = 2040;    // 12-bit output rails at +/-2047
 const uint16_t BUS_TIMEOUT_MS = 10;
 const uint8_t ERRORS_BEFORE_RECOVERY = 5;
-bool g_present = false;
-uint8_t g_who = 0;
+std::atomic<bool> g_present{false};
+std::atomic<uint8_t> g_who{0}, g_ctrl1{0}, g_ctrl4{0};
 uint8_t g_errors = 0;
-uint32_t g_recoveries = 0;
+std::atomic<uint32_t> g_recoveries{0};
+portMUX_TYPE g_diag_lock = portMUX_INITIALIZER_UNLOCKED;
+Diagnostics g_diag{};
+ReadyTrace g_trace[TRACE_CAPACITY]{};
+uint32_t g_last_ready_us = 0, g_read_finished_us = 0;
+bool g_have_previous_read = false;
+uint32_t g_last_not_ready_us = 0;
+uint8_t g_last_not_ready_status = 0;
+bool g_have_not_ready = false;
 
 bool write_reg(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(ACCEL_ADDR);
@@ -43,10 +51,58 @@ bool bus_begin() {
 }
 
 bool configure() {
-  if (!read_regs(REG_WHO_AM_I, &g_who, 1)) return false;
-  if (g_who != 0x11 && g_who != 0x33) return false;   // SC7A20 answers 0x11, a genuine LIS2DH 0x33
-  if (!write_reg(REG_CTRL1, CTRL1_50HZ_XYZ)) return false;
+  uint8_t who = 0, c0 = 0, c1 = 0, c4 = 0;
+  if (!read_regs(REG_WHO_AM_I, &who, 1)) return false;
+  g_who = who;
+  if (who != 0x11) return false;
+  if (!write_reg(REG_CTRL1, 0x07) || !read_regs(REG_CTRL0, &c0, 1)) return false;
+  // SC7A20H HR is CTRL0 bit0, not LIS3DH CTRL4 bit3. Keep reserved bits untouched.
+  if (!write_reg(REG_CTRL0, (c0 & 0x8c) | 0x01)) return false;
   if (!write_reg(REG_CTRL4, CTRL4_BDU_8G)) return false;
+  if (!write_reg(REG_CTRL1, CTRL1_50HZ_XYZ)) return false;
+  delay(1);
+  if (!read_regs(REG_CTRL1, &c1, 1) || !read_regs(REG_CTRL4, &c4, 1)) return false;
+  g_ctrl1 = c1;
+  g_ctrl4 = c4;
+  if (c1 != CTRL1_50HZ_XYZ || c4 != CTRL4_BDU_8G) return false;
+  Diagnostics snapshot{};
+  if (!read_regs(0x1f, &snapshot.ctrl0, 1) || !read_regs(0x21, &snapshot.ctrl2, 1) ||
+      !read_regs(0x22, &snapshot.ctrl3, 1) || !read_regs(0x24, &snapshot.ctrl5, 1) ||
+      !read_regs(0x25, &snapshot.ctrl6, 1) || !read_regs(0x2e, &snapshot.fifo_ctrl, 1) ||
+      !read_regs(0x70, &snapshot.revision, 1)) return false;
+  if ((snapshot.ctrl0 & 0x73) != 0x01) return false;
+  portENTER_CRITICAL(&g_diag_lock);
+  snapshot.overrun_cleared = g_diag.overrun_cleared;
+  snapshot.overrun_still_set = g_diag.overrun_still_set;
+  snapshot.reset_ctrl0 = g_diag.reset_ctrl0;
+  snapshot.reset_ctrl1 = g_diag.reset_ctrl1;
+  snapshot.reset_ctrl4 = g_diag.reset_ctrl4;
+  snapshot.reset_readback_ok = g_diag.reset_readback_ok;
+  snapshot.trace_count = g_diag.trace_count;
+  g_diag = snapshot;
+  portEXIT_CRITICAL(&g_diag_lock);
+  g_have_previous_read = false;
+  g_have_not_ready = false;
+  return true;
+}
+
+bool reset_once_at_boot() {
+  uint8_t who = 0, revision = 0, c0 = 0, c1 = 0, c4 = 0;
+  if (!read_regs(REG_WHO_AM_I, &who, 1) || !read_regs(0x70, &revision, 1) ||
+      who != 0x11 || revision != 0x28) return false;
+  // Silan SC7A20H v1.1 p27 section 13.34: this command resets the sensor circuit.
+  // One boot-only diagnostic; never write reserved/calibration/NVM registers.
+  if (!write_reg(0x68, 0xa5)) return false;
+  delay(10); // bounded settling margin, not a manufacturer-specified reset completion time
+  if (!read_regs(REG_WHO_AM_I, &who, 1) || !read_regs(0x70, &revision, 1) ||
+      who != 0x11 || revision != 0x28 || !read_regs(REG_CTRL0, &c0, 1) ||
+      !read_regs(REG_CTRL1, &c1, 1) || !read_regs(REG_CTRL4, &c4, 1)) return false;
+  portENTER_CRITICAL(&g_diag_lock);
+  g_diag.reset_ctrl0 = c0;
+  g_diag.reset_ctrl1 = c1;
+  g_diag.reset_ctrl4 = c4;
+  g_diag.reset_readback_ok = true;
+  portEXIT_CRITICAL(&g_diag_lock);
   return true;
 }
 
@@ -67,17 +123,33 @@ bool fail() {
 
 bool begin() {
   bus_begin();
-  g_present = configure();
+  g_present = reset_once_at_boot() && configure();
   if (g_present) delay(20);
   return g_present;
 }
 
 bool present() { return g_present; }
 uint8_t who_am_i() { return g_who; }
+uint8_t ctrl1() { return g_ctrl1; }
+uint8_t ctrl4() { return g_ctrl4; }
 uint32_t recoveries() { return g_recoveries; }
+Diagnostics diagnostics() {
+  portENTER_CRITICAL(&g_diag_lock);
+  const Diagnostics snapshot = g_diag;
+  portEXIT_CRITICAL(&g_diag_lock);
+  return snapshot;
+}
+bool ready_trace(uint8_t index, ReadyTrace &out) {
+  portENTER_CRITICAL(&g_diag_lock);
+  const bool exists = index < g_diag.trace_count;
+  if (exists) out = g_trace[index];
+  portEXIT_CRITICAL(&g_diag_lock);
+  return exists;
+}
 
-bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error) {
+bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error, bool &overrun) {
   bus_error = false;
+  overrun = false;
   if (!g_present) {
     bus_error = true;
     fail();
@@ -88,20 +160,67 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error) 
     bus_error = true;
     return fail();
   }
+  const uint32_t ready_observed_us = micros();
+  portENTER_CRITICAL(&g_diag_lock);
+  ++g_diag.status_polls;
+  if (!(st & STATUS_ZYXDA)) ++g_diag.not_ready_polls;
+  portEXIT_CRITICAL(&g_diag_lock);
   if (!(st & STATUS_ZYXDA)) {
+    g_last_not_ready_us = ready_observed_us;
+    g_last_not_ready_status = st;
+    g_have_not_ready = true;
     g_errors = 0;
     return false;   // nothing new since the last read: never re-emit an old register image
   }
   uint8_t b[6];
+  const uint32_t burst_start_us = micros();
   if (!read_regs(REG_OUT_X_L, b, 6)) {
     bus_error = true;
     return fail();
   }
+  const uint32_t burst_end_us = micros();
+  uint8_t after;
+  if (!read_regs(REG_STATUS, &after, 1)) {
+    bus_error = true;
+    return fail();
+  }
+  const uint32_t read_finished_us = micros();
+  portENTER_CRITICAL(&g_diag_lock);
+  if (g_diag.trace_count < TRACE_CAPACITY) {
+    g_trace[g_diag.trace_count++] = ReadyTrace{g_last_not_ready_us, ready_observed_us,
+        burst_start_us, burst_end_us, read_finished_us, g_last_not_ready_status, st, after, g_have_not_ready};
+  }
+  ++g_diag.fresh_reads;
+  if (g_have_previous_read) {
+    const uint32_t interval = ready_observed_us - g_last_ready_us;
+    const uint32_t after_read = ready_observed_us - g_read_finished_us;
+    g_diag.ready_interval_us = interval;
+    g_diag.ready_after_read_us = after_read;
+    if (!g_diag.min_ready_interval_us || interval < g_diag.min_ready_interval_us) g_diag.min_ready_interval_us = interval;
+    if (interval > g_diag.max_ready_interval_us) g_diag.max_ready_interval_us = interval;
+    if (!g_diag.min_ready_after_read_us || after_read < g_diag.min_ready_after_read_us) g_diag.min_ready_after_read_us = after_read;
+    if (after_read > g_diag.max_ready_after_read_us) g_diag.max_ready_after_read_us = after_read;
+    g_diag.ready_interval_sum_us += interval;
+    const unsigned bin = interval < 5000 ? 0 : interval < 12000 ? 1 : interval < 17000 ? 2 : interval < 23000 ? 3 : interval < 40000 ? 4 : 5;
+    ++g_diag.interval_bins[bin];
+  }
+  g_diag.status_before = st;
+  g_diag.status_after = after;
+  if (st & STATUS_ZYXOR) {
+    if (after & STATUS_ZYXOR) ++g_diag.overrun_still_set;
+    else ++g_diag.overrun_cleared;
+  }
+  portEXIT_CRITICAL(&g_diag_lock);
+  g_last_ready_us = ready_observed_us;
+  g_read_finished_us = read_finished_us;
+  g_have_previous_read = true;
+  g_have_not_ready = false;
   g_errors = 0;
+  overrun = (st & STATUS_ZYXOR) != 0;
   // 12-bit left-justified, little-endian (guide: counts = raw >> 4); 4 mg per count at +/-8 g
-  const int16_t rx = (int16_t)((int16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8)) >> 4);
-  const int16_t ry = (int16_t)((int16_t)((uint16_t)b[2] | ((uint16_t)b[3] << 8)) >> 4);
-  const int16_t rz = (int16_t)((int16_t)((uint16_t)b[4] | ((uint16_t)b[5] << 8)) >> 4);
+  const int16_t rx = signed_counts(b[0], b[1]);
+  const int16_t ry = signed_counts(b[2], b[3]);
+  const int16_t rz = signed_counts(b[4], b[5]);
   saturated = abs(rx) >= RAIL_COUNTS || abs(ry) >= RAIL_COUNTS || abs(rz) >= RAIL_COUNTS;
   x = (int16_t)(rx * 4);
   y = (int16_t)(ry * 4);
@@ -109,12 +228,4 @@ bool poll(int16_t &x, int16_t &y, int16_t &z, bool &saturated, bool &bus_error) 
   return true;
 }
 
-int scan(uint8_t *found, int n) {
-  int count = 0;
-  for (uint8_t a = 0x08; a < 0x78 && count < n; a++) {
-    Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) found[count++] = a;
-  }
-  return count;
-}
 }  // namespace accel

@@ -124,6 +124,7 @@ void Session::reset() {
 }
 
 void Session::clear_cues() {
+  ++presentation_revision_;
   for (Cue &c : cues_) c.used = false;
 }
 
@@ -151,7 +152,7 @@ bool Session::handle_control(const uint8_t *in, size_t len, uint32_t now_ms, Sta
       result.detail1 = RC_WRONG_SESSION;
       return true;
     }
-    if (c.nonce == 0 || c.arg0 || c.arg1 || c.arg2) {
+    if (c.seq != 0 || c.nonce == 0 || c.arg0 || c.arg1 || c.arg2) {
       result.detail1 = RC_INVALID_ARG;
       return true;
     }
@@ -218,7 +219,7 @@ uint32_t Session::apply(const Control &c, const uint8_t *raw, uint32_t now_ms) {
       const uint16_t duration = (uint16_t)(c.arg0 >> 16);
       if (effect < FX_ACCEPTED_CAST || effect > FX_RESULT || spell > SP_EXPELLIARMUS || duration < 1 || duration > 1000) return RC_INVALID_ARG;
       if (effect == FX_ACCEPTED_CAST && spell == SP_NONE) return RC_INVALID_ARG;
-      if (!state_.valid || diff32(now_ms, state_.valid_until_ms) > 0 || c.arg1 != state_.epoch) return RC_INVALID_ARG;
+      if (!state_.valid || diff32(now_ms, state_.valid_until_ms) >= 0 || c.arg1 != state_.epoch) return RC_INVALID_ARG;
       if (effect == FX_RESULT && (spell != SP_NONE || (state_.phase != PH_WON && state_.phase != PH_LOST && state_.phase != PH_DRAW))) return RC_INVALID_ARG;
       const int32_t lead = diff32(c.arg2, now_ms);
       if (lead <= 0) return RC_EXPIRED;
@@ -247,7 +248,7 @@ uint32_t Session::apply(const Control &c, const uint8_t *raw, uint32_t now_ms) {
 }
 
 void Session::tick(uint32_t now_ms) {
-  if (state_.valid && diff32(now_ms, state_.valid_until_ms) > 0) {
+  if (state_.valid && diff32(now_ms, state_.valid_until_ms) >= 0) {
     state_.valid = false;
     stale_ = true;
     clear_cues();
@@ -255,10 +256,11 @@ void Session::tick(uint32_t now_ms) {
 }
 
 bool Session::take_cue(uint32_t now_ms, Cue &out) {
+  tick(now_ms);
   Cue *best = nullptr;
   for (Cue &q : cues_) {
     if (!q.used) continue;
-    if (diff32(now_ms, q.start_before_ms) > 0) {
+    if (diff32(now_ms, q.start_before_ms) >= 0) {
       q.used = false;  // expired before it could start: dropped, never drained late
       continue;
     }
@@ -389,7 +391,17 @@ int selftest(void (*log)(const char *line)) {
   // wrap fixture: last processed sequence 65535, SYNC with sequence 0 is next
   Session s3;
   unhex("01 01 ff ff dd cc bb aa 00 00 00 00 00 00 00 00 00 00 00 00", raw, REC);
-  t.expect(s3.handle_control(raw, REC, 1000, r) && r.detail1 == RC_OK, "OPEN with sequence 65535");
+  t.expect(s3.handle_control(raw, REC, 1000, r) && r.detail1 == RC_INVALID_ARG && !s3.is_open(), "OPEN must begin at sequence zero");
+  Control wrap{VERSION, OP_OPEN, 0, 0xAABBCCDD, 0, 0, 0};
+  encode_control(wrap, raw);
+  s3.handle_control(raw, REC, 1000, r);
+  wrap.opcode = OP_SYNC;
+  const uint16_t steps[] = {32767, 65534, 65535};
+  for (uint16_t step : steps) {
+    wrap.seq = step;
+    encode_control(wrap, raw);
+    s3.handle_control(raw, REC, 1010, r);
+  }
   unhex("01 02 00 00 dd cc bb aa 00 00 00 00 00 00 00 00 00 00 00 00", raw, REC);
   t.expect(s3.handle_control(raw, REC, 2000, r), "SYNC after wrap produces a result");
   encode_status(r, buf);
@@ -432,6 +444,36 @@ int selftest(void (*log)(const char *line)) {
   t.expect(s5.handle_control(raw, REC, 70, r) && r.detail1 == RC_WRONG_SESSION, "second OPEN with a new sequence is rejected");
   Status h = s5.health(80, 3, H_SENSOR | H_STREAM);
   t.expect(h.kind == 0 && h.nonce == 0xAABBCCDD && h.detail0 == 3 && h.detail1 == (H_SENSOR | H_STREAM | H_STATE_STALE), "health reports stale state before SET_STATE");
+
+  Session expiry;
+  Control c{VERSION, OP_OPEN, 0, 7, 0, 0, 0};
+  encode_control(c, raw);
+  expiry.handle_control(raw, REC, 100, r);
+  c = {VERSION, OP_SET_STATE, 1, 7, 0x00646403, 9, 200};
+  encode_control(c, raw);
+  expiry.handle_control(raw, REC, 110, r);
+  c = {VERSION, OP_CUE, 2, 7, 0x00640101, 9, 180};
+  encode_control(c, raw);
+  expiry.handle_control(raw, REC, 120, r);
+  t.expect(!expiry.take_cue(180, cue), "cue does not start at its deadline");
+  const uint32_t revision = expiry.presentation_revision();
+  expiry.tick(200);
+  t.expect(expiry.state_stale() && expiry.presentation_revision() != revision, "lease expires at exact deadline and invalidates active presentation");
+  c = {VERSION, OP_SET_STATE, 3, 7, 0x00646403, 9, 300};
+  encode_control(c, raw);
+  expiry.handle_control(raw, REC, 210, r);
+  t.expect(!expiry.state_stale() && expiry.presentation_revision() != revision, "same-epoch refresh cannot resurrect expired cue");
+  c = {VERSION, OP_CUE, 4, 7, 0x00640101, 9, 280};
+  encode_control(c, raw);
+  expiry.handle_control(raw, REC, 220, r);
+  c = {VERSION, OP_SET_STATE, 5, 7, 0x00646403, 10, 350};
+  encode_control(c, raw);
+  expiry.handle_control(raw, REC, 230, r);
+  t.expect(expiry.pending_cues() == 0, "new epoch clears pending cues");
+  expiry.reset();
+  c = {VERSION, OP_OPEN, 0, 8, 0, 0, 0};
+  encode_control(c, raw);
+  t.expect(expiry.handle_control(raw, REC, 240, r) && r.detail1 == RC_OK && r.nonce == 8, "physical reconnect accepts fresh OPEN zero and nonce");
 
   char line[48];
   snprintf(line, sizeof(line), "selftest done: %d failure(s)", t.fails);

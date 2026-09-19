@@ -180,23 +180,41 @@ async def main() -> int:
         t_end = stream_started + a.seconds
         first = len(link.motion)
         load_rtts = []
+        load_failures = 0
+        load_commands = 0
         while time.monotonic() < t_end:
             await asyncio.sleep(0.45)
             st, rtt = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
+            load_commands += 1
+            if st is None or st.detail1 != wp.R_OK:
+                load_failures += 1
+            if st is not None:
+                load_rtts.append(rtt)
+            st, rtt = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 180), epoch, link.device_now() + 300)
+            load_commands += 1
+            if st is None or st.detail1 != wp.R_OK:
+                load_failures += 1
             if st is not None:
                 load_rtts.append(rtt)
             await asyncio.sleep(0.45)
             st, rtt = await link.command(wp.OP_SYNC)
+            load_commands += 1
+            if st is None or st.detail1 != wp.R_OK:
+                load_failures += 1
             if st is not None:
                 load_rtts.append(rtt)
+        check(load_failures == 0, "all loaded state/cue/SYNC commands accepted", f"{load_failures} failures / {load_commands} commands")
         if load_rtts:
             load_rtts.sort()
-            print(f"command RTT while streaming: min {load_rtts[0]:.0f} median {statistics.median(load_rtts):.0f} max {load_rtts[-1]:.0f} ms over {len(load_rtts)} commands")
+            p95 = load_rtts[max(0, (95 * len(load_rtts) + 99) // 100 - 1)]
+            print(f"command RTT while streaming: min {load_rtts[0]:.0f} median {statistics.median(load_rtts):.0f} p95 {p95:.0f} max {load_rtts[-1]:.0f} ms over {len(load_rtts)} commands")
             check(statistics.median(load_rtts) < 100, "command RTT under load stays under 100 ms (browser sync policy)", f"median {statistics.median(load_rtts):.0f} ms")
+            check(p95 <= 150, "loaded command ACK p95 meets 150 ms target", f"p95 {p95:.0f} ms")
         frames = [m for m, _ in link.motion[first:]]
         elapsed = time.monotonic() - stream_started
         rate = len(frames) / elapsed if elapsed else 0
         check(len(frames) > 0, "MOTION notifications arrive", f"{len(frames)} frames, {link.raw_motion_bad} undecodable")
+        check(link.raw_motion_bad == 0, "no malformed MOTION records")
         if frames:
             gaps = sum(1 for p, n in zip(frames, frames[1:]) if (n.seq - p.seq) % 65536 != 1)
             disc = sum(1 for m in frames if m.discontinuity)
@@ -220,6 +238,7 @@ async def main() -> int:
             check(boot_ok, "MOTION boot_id matches INFO")
             check(40 <= rate <= 60, "MOTION rate about 50 Hz", f"{rate:.1f} Hz")
             check(gaps <= max(2, len(frames) // 50), "MOTION sequence mostly contiguous", f"{gaps} gaps")
+            check(disc <= max(2, len(frames) // 20), "continuous sensor evidence for at least 95% of frames", f"{disc} discontinuities / {len(frames)} frames")
             check(all(m.valid for m in frames), "MOTION frames flagged valid")
 
         st, _ = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_WON, 100, 0, 100), epoch, link.device_now() + 1200)

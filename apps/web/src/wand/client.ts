@@ -164,9 +164,11 @@ export class WandClient {
       this.nonce = randomNonzero();
       this.snapshot.phase = "synchronizing";
       await this.command({ opcode: ControlOpcode.Open }, true);
+      this.assertGeneration(generation);
       let best: Sync | undefined;
       for (let i = 0; i < 5; i++) {
         const candidate = await this.probe();
+        this.assertGeneration(generation);
         if (!best || candidate.rttMs < best.rttMs) best = candidate;
       }
       this.assertGeneration(generation);
@@ -174,8 +176,9 @@ export class WandClient {
         throw new Error("Clock sync RTT exceeds 100 ms");
       this.sync = best;
       this.snapshot.rttMs = best.rttMs;
-      this.status(await this.transport.readStatus());
+      const health = await this.transport.readStatus();
       this.assertGeneration(generation);
+      this.status(health);
       const inputFault = this.inputFault(this.snapshot.healthFlags);
       if (inputFault) throw new Error(inputFault);
       this.snapshot.phase = "streaming";
@@ -346,7 +349,7 @@ export class WandClient {
 
   private uncertainty(): number {
     return this.sync
-      ? this.sync.rttMs / 2 +
+      ? this.sync.rttMs / 2 + 1 + // Two integer-ms device stamps can differ by one rounding interval.
           Math.max(0, this.now() - this.sync.measuredAt) * 0.005
       : Infinity;
   }
@@ -401,6 +404,7 @@ export class WandClient {
 
   private motion(bytes: Uint8Array): void {
     if (!this.sync || this.snapshot.phase !== "streaming") return;
+    if (!this.checkTiming(this.now())) return;
     let record: MotionRecord;
     try {
       record = decodeMotion(bytes);
@@ -463,16 +467,10 @@ export class WandClient {
     for (const listener of this.listeners) listener(sample);
   }
 
-  private tick(): void {
-    const now = this.now();
+  private checkTiming(now: number): boolean {
     if (now - this.lastTick > 200) {
       this.fail("Browser stalled over 200 ms; reconnect for a fresh baseline");
-      return;
-    }
-    this.lastTick = now;
-    if (now - this.lastValid >= 500) {
-      this.fail("No fresh valid motion for 500 ms");
-      return;
+      return false;
     }
     if (
       !this.sync ||
@@ -480,6 +478,17 @@ export class WandClient {
       this.uncertainty() > 100
     ) {
       this.fail("Clock synchronization expired");
+      return false;
+    }
+    return true;
+  }
+
+  private tick(): void {
+    const now = this.now();
+    if (!this.checkTiming(now)) return;
+    this.lastTick = now;
+    if (now - this.lastValid >= 500) {
+      this.fail("No fresh valid motion for 500 ms");
       return;
     }
     void this.pump();
@@ -489,12 +498,15 @@ export class WandClient {
     if (this.pumping || this.pending || this.snapshot.phase !== "streaming")
       return;
     const generation = this.generation;
+    const syncing = this.now() >= this.syncDue;
     this.pumping = true;
     try {
-      if (this.now() >= this.syncDue) {
-        this.syncDue = this.now() + 5000;
+      if (syncing) {
         const candidate = await this.probe();
         this.assertGeneration(generation);
+        if (!this.checkTiming(this.now())) return;
+        // A missed probe must not postpone the next attempt past the 10 s lease.
+        this.syncDue = this.now() + (candidate.rttMs <= 100 ? 5000 : 500);
         if (candidate.rttMs <= 100) {
           const oldMapped = this.sync
             ? this.sync.browserMs +
@@ -534,9 +546,11 @@ export class WandClient {
         }
       }
     } catch (error) {
-      if (generation === this.generation)
+      if (generation === this.generation) {
+        if (syncing) this.syncDue = this.now() + 500;
         this.snapshot.feedbackWarning =
           error instanceof Error ? error.message : "Feedback unavailable";
+      }
     } finally {
       if (generation === this.generation) this.pumping = false;
     }

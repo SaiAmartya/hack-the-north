@@ -161,6 +161,109 @@ test("phone reports denied motion permission without opening a relay", async ({
   expect(relaySockets).toBe(0);
 });
 
+for (const wakeLockMode of ["unsupported", "denied"] as const) {
+  test(`phone keeps working when screen wake lock is ${wakeLockMode}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((mode) => {
+      class MockDeviceMotionEvent extends Event {
+        static requestPermission = async () => "granted";
+        readonly accelerationIncludingGravity = { x: 0, y: 0, z: 9.80665 };
+      }
+      Object.defineProperty(window, "DeviceMotionEvent", {
+        configurable: true,
+        value: MockDeviceMotionEvent,
+      });
+      Object.defineProperty(navigator, "wakeLock", {
+        configurable: true,
+        value:
+          mode === "unsupported"
+            ? undefined
+            : {
+                request: async () => {
+                  throw new DOMException("denied", "NotAllowedError");
+                },
+              },
+      });
+    }, wakeLockMode);
+    await page.goto("/phone");
+    await page.getByLabel("Laptop code").fill("ABCDEFGHIJ");
+    await page.getByRole("button", { name: "Connect wand" }).click();
+    await expect(
+      page.getByRole("heading", {
+        name: "Move your iPhone to finish connecting…",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Keep this screen awake during your duel."),
+    ).toBeVisible();
+  });
+}
+
+test("phone releases a wake lock that resolves after the session stops", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    class MockDeviceMotionEvent extends Event {
+      static requestPermission = async () => "granted";
+      readonly accelerationIncludingGravity = { x: 0, y: 0, z: 9.80665 };
+    }
+    Object.defineProperty(window, "DeviceMotionEvent", {
+      configurable: true,
+      value: MockDeviceMotionEvent,
+    });
+    let resolveWakeLock:
+      | ((lock: {
+          release(): Promise<void>;
+          addEventListener(): void;
+        }) => void)
+      | undefined;
+    let releases = 0;
+    Object.defineProperty(navigator, "wakeLock", {
+      configurable: true,
+      value: {
+        request: () =>
+          new Promise((resolve) => {
+            resolveWakeLock = resolve;
+          }),
+      },
+    });
+    Reflect.set(window, "__resolveWakeLock", () =>
+      resolveWakeLock?.({
+        release: async () => {
+          releases++;
+        },
+        addEventListener: () => undefined,
+      }),
+    );
+    Reflect.set(window, "__wakeLockReleases", () => releases);
+  });
+  await page.goto("/phone");
+  await page.getByLabel("Laptop code").fill("ABCDEFGHIJ");
+  await page.getByRole("button", { name: "Connect wand" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Move your iPhone to finish connecting…",
+    }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide")),
+  );
+  await page.evaluate(() => {
+    (Reflect.get(window, "__resolveWakeLock") as () => void)();
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (Reflect.get(window, "__wakeLockReleases") as () => number)(),
+      ),
+    )
+    .toBe(1);
+  await expect(
+    page.getByRole("heading", { name: "Wand paused. Reconnect." }),
+  ).toBeVisible();
+});
+
 test("phone relay performs the byte handshake, motion, feedback, and page-hide teardown", async ({
   page: owner,
 }) => {

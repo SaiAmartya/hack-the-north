@@ -13,7 +13,7 @@ import type {
   ByteListener,
   NotificationKind,
 } from "../wand/transport";
-import type { InfoRecord, MotionRecord } from "../wand/protocol";
+import { MotionFlag, type InfoRecord, type MotionRecord } from "../wand/protocol";
 
 export type GameQaReport = {
   stage: "idle" | "running" | "complete" | "failed";
@@ -27,24 +27,33 @@ export type GameQaReport = {
   rematchRound?: number;
 };
 
-class ScriptClock {
-  private value = 0;
-  readonly now = () => this.value;
-  set(value: number): void {
-    this.value = value;
-  }
-}
-
 class ScriptedVirtualTransport extends VirtualWandTransport {
-  constructor(
-    private readonly clock: ScriptClock,
-    info: InfoRecord,
-  ) {
-    super(clock.now, info);
+  private idleTimer?: ReturnType<typeof setInterval>;
+  private replaying = false;
+  private captureSequence = 0;
+  private playbackGeneration = 0;
+  private previousCapture?: number;
+
+  constructor(info: InfoRecord) {
+    super(() => performance.now(), info);
   }
 
   override async connect(_onDisconnect: () => void): Promise<void> {
-    this.endpoint.disconnect();
+    this.disconnect();
+    this.idleTimer = setInterval(() => {
+      this.endpoint.tick();
+      if (!this.replaying)
+        this.emit({
+          version: 1,
+          flags: MotionFlag.Valid,
+          seq: 0,
+          captureMs: Math.floor(performance.now()) >>> 0,
+          bootId: this.endpoint.info.bootId,
+          axMg: 0,
+          ayMg: 0,
+          azMg: 1000,
+        });
+    }, 20);
   }
 
   override async readInfo(): Promise<Uint8Array> {
@@ -68,27 +77,41 @@ class ScriptedVirtualTransport extends VirtualWandTransport {
   }
 
   override disconnect(): void {
+    this.playbackGeneration++;
+    if (this.idleTimer !== undefined) clearInterval(this.idleTimer);
+    this.idleTimer = undefined;
     this.endpoint.disconnect();
   }
 
-  emit(sample: CapturedMotion): void {
-    this.clock.set(sample.browserMs);
-    const motion: MotionRecord = {
-      version: sample.version,
-      flags: sample.flags,
-      seq: sample.seq,
-      captureMs: sample.captureMs,
-      bootId: sample.bootId,
-      axMg: sample.axMg,
-      ayMg: sample.ayMg,
-      azMg: sample.azMg,
-    };
-    if (!this.endpoint.emitMotion(motion))
-      throw new Error("Scripted virtual wand is not streaming");
+  async playTrace(samples: readonly CapturedMotion[]): Promise<void> {
+    if (this.replaying || !samples.length)
+      throw new Error("Invalid concurrent or empty QA replay");
+    const generation = this.playbackGeneration;
+    const startedAt = Math.ceil(performance.now()) + 20;
+    this.replaying = true;
+    try {
+      for (const sample of samples) {
+        const captureAt = startedAt + sample.browserMs - samples[0].browserMs;
+        await delay(Math.max(0, Math.ceil(captureAt - performance.now())));
+        if (generation !== this.playbackGeneration)
+          throw new Error("QA replay connection ended");
+        if (performance.now() - captureAt > 100)
+          throw new Error("QA replay fell behind; refusing catch-up input");
+        if (!this.emit({ ...sample, captureMs: Math.floor(captureAt) >>> 0 }))
+          throw new Error("Scripted virtual wand is not streaming");
+      }
+    } finally {
+      this.replaying = false;
+    }
   }
 
-  idleClock(): void {
-    this.clock.set(0);
+  private emit(sample: MotionRecord): boolean {
+    if (sample.captureMs === this.previousCapture) return false;
+    this.previousCapture = sample.captureMs;
+    return this.endpoint.emitMotion({
+      ...sample,
+      seq: this.captureSequence++ & 0xffff,
+    });
   }
 }
 
@@ -102,7 +125,6 @@ class QaPlayer {
   readonly motion: MotionRecognizer;
   readonly fusion: CastFusion;
   readonly wand: WandClient;
-  private readonly clock = new ScriptClock();
   private readonly transport: ScriptedVirtualTransport;
   private readonly traces = new RawMotionTraceBuilder();
   private readonly generation = 1;
@@ -123,8 +145,8 @@ class QaPlayer {
       firmware: { major: 0, minor: 1, patch: 0 },
       axisConvention: 1,
     };
-    this.transport = new ScriptedVirtualTransport(this.clock, info);
-    this.wand = new WandClient(this.transport, this.clock.now);
+    this.transport = new ScriptedVirtualTransport(info);
+    this.wand = new WandClient(this.transport);
     this.fusion = new CastFusion((attempt) => this.submitAttempt(attempt));
     this.motion = new MotionRecognizer((evidence) => {
       this.latestGesture = evidence;
@@ -144,7 +166,7 @@ class QaPlayer {
     };
   }
 
-  async connectAndCalibrate(): Promise<void> {
+  async connect(): Promise<void> {
     await this.game.connect("replay");
     this.unsubscribe = this.wand.onSample((sample) =>
       this.motion.push(sample, this.generation),
@@ -152,18 +174,27 @@ class QaPlayer {
     await this.wand.connect();
     if (this.wand.getSnapshot().phase !== "streaming")
       throw new Error(`Player ${this.playerNumber} virtual wand did not stream`);
+  }
+
+  async calibrate(): Promise<void> {
     this.motion.beginCalibration();
-    this.feed(this.traces.stillness());
+    await this.transport.playTrace(this.traces.stillness());
     this.motion.beginGestureCalibration("stupefy");
-    this.feed(this.traces.jab(820));
-    this.feed(this.traces.jab(900));
-    this.feed(this.traces.jab(980));
+    await this.transport.playTrace(this.traces.jab(820));
+    this.requireCalibrationExample("stupefy", 1);
+    await this.transport.playTrace(this.traces.jab(900));
+    this.requireCalibrationExample("stupefy", 2);
+    await this.transport.playTrace(this.traces.jab(980));
+    this.requireCalibrationExample("stupefy", 3);
     this.motion.beginGestureCalibration("protego");
-    this.feed(this.traces.guard(33));
-    this.feed(this.traces.guard(36));
-    this.feed(this.traces.guard(39));
-    if (this.motion.getState().phase !== "ready")
-      throw new Error(`Player ${this.playerNumber} raw calibration did not finish`);
+    await this.transport.playTrace(this.traces.guard(33));
+    await this.transport.playTrace(this.traces.guard(36));
+    await this.transport.playTrace(this.traces.guard(39));
+    const motion = this.motion.getState();
+    if (motion.phase !== "ready")
+      throw new Error(
+        `Player ${this.playerNumber} raw calibration did not finish: ${motion.phase}, ${motion.lastIssue}, examples ${JSON.stringify(motion.examplesBySpell)}, wand ${this.wand.getSnapshot().issue}`,
+      );
   }
 
   ready(): void {
@@ -189,7 +220,9 @@ class QaPlayer {
     this.motion.clearPending("scripted QA attempt");
     this.latestGesture = undefined;
     this.latestAttempt = undefined;
-    this.feed(spell === "stupefy" ? this.traces.jab(780) : this.traces.guard(32));
+    await this.transport.playTrace(
+      spell === "stupefy" ? this.traces.jab(780) : this.traces.guard(32),
+    );
     const gesture = this.requireGesture(spell);
 
     const utteranceId = `P${this.playerNumber}-speech-${++this.speechSequence}`;
@@ -206,7 +239,7 @@ class QaPlayer {
       spell,
       startMs,
       endMs,
-      finalAtMs: endMs + 100,
+      finalAtMs: Math.max(endMs, performance.now()),
     });
     const attempt = this.requireAttempt(spell);
     await waitFor(
@@ -240,14 +273,6 @@ class QaPlayer {
     );
   }
 
-  private feed(samples: readonly CapturedMotion[]): void {
-    try {
-      for (const sample of samples) this.transport.emit(sample);
-    } finally {
-      this.transport.idleClock();
-    }
-  }
-
   private submitAttempt(attempt: CastAttempt): void {
     this.latestAttempt = attempt;
     const snapshot = this.game.snapshot;
@@ -261,6 +286,14 @@ class QaPlayer {
       speechId: attempt.utteranceId,
       inputGeneration: this.generation,
     });
+  }
+
+  private requireCalibrationExample(spell: SpellName, count: number): void {
+    const state = this.motion.getState();
+    if (state.examplesBySpell[spell] !== count)
+      throw new Error(
+        `QA ${spell} example ${count}: ${state.lastIssue}; wand ${this.wand.getSnapshot().issue}, rejected ${this.wand.getSnapshot().rejected}`,
+      );
   }
 
   private requireGesture(spell: SpellName): GestureEvidence {
@@ -290,10 +323,12 @@ export class GameQaHarness {
   async run(): Promise<GameQaReport> {
     try {
       this.update({ stage: "running", detail: "Connecting two QA players" });
-      await this.first.connectAndCalibrate();
-      await this.second.connectAndCalibrate();
+      await this.first.connect();
+      await this.second.connect();
       if (this.first.game.slot !== "P1" || this.second.game.slot !== "P2")
         throw new Error("QA players did not receive ordinary P1/P2 slots");
+      this.update({ detail: "Calibrating two paced raw-motion replays" });
+      await Promise.all([this.first.calibrate(), this.second.calibrate()]);
 
       this.update({ detail: "Starting the first round" });
       this.first.ready();
@@ -318,7 +353,7 @@ export class GameQaHarness {
 
       const guardDelay = Math.max(
         0,
-        projectile.impactAtMs - this.second.game.now() - 700,
+        projectile.impactAtMs - this.second.game.now() - 1_600,
       );
       await delay(guardDelay);
       this.update({ detail: "Casting Protego through raw motion" });
@@ -376,6 +411,8 @@ export class GameQaHarness {
         detail: error instanceof Error ? error.message : "QA flow failed",
       });
       throw error;
+    } finally {
+      this.destroy();
     }
   }
 

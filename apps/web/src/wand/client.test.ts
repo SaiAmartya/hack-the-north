@@ -9,6 +9,9 @@ import {
   decodeStatus,
   encodeStatus,
   StatusKind,
+  ControlOpcode,
+  decodeControl,
+  MotionFlag,
 } from "./protocol";
 
 describe("shared wand lifecycle", () => {
@@ -37,6 +40,41 @@ describe("shared wand lifecycle", () => {
     expect(client.getSnapshot().observedHz).toBe(50);
     expect(client.getSnapshot().maxGapMs).toBe(20);
     expect(client.getSamples()[0].breaksGesture).toBe(true);
+  });
+  it("starts the clock lease after human pairing, not while waiting for approval", async () => {
+    const transport = new VirtualWandTransport(() => Date.now());
+    const connect = transport.connect.bind(transport);
+    vi.spyOn(transport, "connect").mockImplementation(async (onDisconnect) => {
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      await connect(onDisconnect);
+    });
+    const client = new WandClient(transport, () => Date.now());
+    clients.push(client);
+    const pending = client.connect();
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(client.getSnapshot().phase).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(1100);
+    await pending;
+    expect(client.getSnapshot()).toMatchObject({
+      phase: "streaming",
+      accepted: 5,
+    });
+  });
+  it("bounds integer device timestamp quantization against fractional browser time", async () => {
+    let fractionalMs = 0.8;
+    const now = () => Date.now() + fractionalMs;
+    const transport = new VirtualWandTransport(now);
+    const client = new WandClient(transport, now);
+    clients.push(client);
+    await client.connect();
+    fractionalMs = 0.1;
+    await vi.advanceTimersByTimeAsync(20);
+    expect(client.getSnapshot()).toMatchObject({
+      phase: "streaming",
+      accepted: 1,
+      rejected: 0,
+    });
+    expect(client.getSnapshot().lastSample!.ageUpperMs).toBeLessThan(2);
   });
   it("refuses a setup health record without an enabled stream", async () => {
     const transport = new VirtualWandTransport(() => Date.now());
@@ -117,6 +155,27 @@ describe("shared wand lifecycle", () => {
       accepted: 2,
     });
   });
+  it("rejects motion arriving before the watchdog after a browser stall", async () => {
+    const { client, transport } = await setup();
+    await vi.advanceTimersByTimeAsync(100);
+    const delivered = vi.fn();
+    client.onSample(delivered);
+    const previous = client.getSnapshot().lastSample!;
+    vi.setSystemTime(Date.now() + 250);
+    transport.endpoint.emitMotion({
+      ...previous,
+      flags: MotionFlag.Valid,
+      seq: previous.seq + 1,
+      captureMs: Date.now(),
+    });
+    await Promise.resolve();
+    expect(delivered).not.toHaveBeenCalled();
+    expect(client.getSnapshot()).toMatchObject({
+      phase: "fault",
+      issue: "Browser stalled over 200 ms; reconnect for a fresh baseline",
+    });
+    expect(client.getSamples()).toHaveLength(0);
+  });
   it("refreshes state, sends one cue, and lets stopped feedback expire", async () => {
     const { client, transport } = await setup();
     client.setState({
@@ -168,5 +227,112 @@ describe("shared wand lifecycle", () => {
     expect(client.getSnapshot().phase).toBe("fault");
     await vi.advanceTimersByTimeAsync(1000);
     expect(client.getSnapshot().phase).toBe("fault");
+  });
+  it.each([
+    { failure: "slow", count: 1 },
+    { failure: "lost", count: 1 },
+    { failure: "slow", count: 7 },
+  ] as const)(
+    "recovers from $count $failure refreshes before the existing clock mapping expires",
+    async ({ failure, count }) => {
+      const { client, transport } = await setup();
+      const write = transport.writeControl.bind(transport);
+      let refreshes = 0;
+      vi.spyOn(transport, "writeControl").mockImplementation(async (bytes) => {
+        if (decodeControl(bytes).opcode === ControlOpcode.Sync) {
+          refreshes++;
+          if (refreshes <= count && failure === "lost")
+            transport.injectLostAck();
+          await new Promise((resolve) =>
+            setTimeout(
+              resolve,
+              refreshes <= count && failure === "slow" ? 120 : 40,
+            ),
+          );
+        }
+        await write(bytes);
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(client.getSnapshot()).toMatchObject({ phase: "streaming" });
+      expect(client.getSnapshot().accepted).toBe(1500);
+      expect(client.getSnapshot().rttMs).toBe(40);
+      expect(refreshes).toBeGreaterThanOrEqual(6);
+    },
+  );
+  it("still expires the clock when every refresh exceeds the qualification limit", async () => {
+    const { client, transport } = await setup();
+    const write = transport.writeControl.bind(transport);
+    vi.spyOn(transport, "writeControl").mockImplementation(async (bytes) => {
+      if (decodeControl(bytes).opcode === ControlOpcode.Sync)
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      await write(bytes);
+    });
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(client.getSnapshot()).toMatchObject({
+      phase: "fault",
+      issue: "Clock synchronization expired",
+    });
+    expect(client.getSamples()).toHaveLength(0);
+  });
+  it("does not revive an expired mapping when a good probe beats the next watchdog tick", async () => {
+    const { client, transport } = await setup();
+    const write = transport.writeControl.bind(transport);
+    let refreshes = 0;
+    vi.spyOn(transport, "writeControl").mockImplementation(async (bytes) => {
+      if (decodeControl(bytes).opcode === ControlOpcode.Sync) {
+        refreshes++;
+        await new Promise((resolve) =>
+          setTimeout(resolve, refreshes <= 8 ? 120 : 10),
+        );
+      }
+      await write(bytes);
+    });
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(refreshes).toBe(9);
+    expect(client.getSnapshot()).toMatchObject({
+      phase: "fault",
+      issue: "Clock synchronization expired",
+    });
+    expect(client.getSamples()).toHaveLength(0);
+  });
+  it("keeps sync and expiring feedback alive together for a ten-minute software soak", async () => {
+    const { client, transport } = await setup();
+    const write = transport.writeControl.bind(transport);
+    let refreshes = 0;
+    vi.spyOn(transport, "writeControl").mockImplementation(async (bytes) => {
+      const command = decodeControl(bytes);
+      const delayed =
+        command.opcode === ControlOpcode.Sync && ++refreshes % 4 === 0;
+      await new Promise((resolve) => setTimeout(resolve, delayed ? 120 : 20));
+      await write(bytes);
+    });
+    client.setState({
+      phase: PresentationPhase.Practice,
+      hp: 100,
+      maxHp: 100,
+      statusFlags: 0,
+      presentationEpoch: 9,
+    });
+    const cues = setInterval(() => {
+      client.cue({
+        effect: CueEffect.AcceptedCast,
+        spell: SpellCode.Stupefy,
+        durationMs: 300,
+        presentationEpoch: 9,
+      });
+    }, 1000);
+    try {
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(client.getSnapshot()).toMatchObject({
+        phase: "streaming",
+        accepted: 30_000,
+        rejected: 0,
+      });
+      expect(transport.endpoint.getPresentation().state?.presentationEpoch).toBe(9);
+      expect(transport.endpoint.getPresentation().cueRevision).toBeGreaterThan(590);
+      expect(refreshes).toBeGreaterThan(100);
+    } finally {
+      clearInterval(cues);
+    }
   });
 });

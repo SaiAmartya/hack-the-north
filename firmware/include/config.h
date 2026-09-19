@@ -2,8 +2,8 @@
 // Project constants. Wire-level values come from BADGE-FIRMWARE-CONTRACT.md v1; change them there first.
 #define FW_MAJOR 0
 #define FW_MINOR 1
-#define FW_PATCH 0
-#define FW_VERSION_STR "0.1.0"
+#define FW_PATCH 7
+#define FW_VERSION_STR "0.1.7"
 
 // GATT surface (contract section 3)
 #define UUID_WAND_SERVICE "7f510000-1b15-4f0d-8f3c-8db47a812000"
@@ -14,6 +14,8 @@
 #define DEVICE_NAME_PREFIX "WAND-"   // + four hex digits of the device id
 
 // Stream profile (contract sections 2 and 4)
+// Diagnostic image: configured ODR is NOT yet measured native cadence. No duel capabilities.
+#define DIAGNOSTIC_SENSOR_CADENCE 1
 #define SAMPLE_HZ 50
 #define RANGE_G 8
 #define AXIS_CONVENTION 1
@@ -26,5 +28,5 @@
 #define ACTIVITY_MG 350              // |a - baseline| above this brightens the LEDs
 #define BASELINE_ALPHA 0.05f
 #define LED_FRAME_MS 40
-#define LED_BRIGHTNESS 48
+#define LED_BRIGHTNESS 24
 #define SCREEN_REFRESH_MS 150

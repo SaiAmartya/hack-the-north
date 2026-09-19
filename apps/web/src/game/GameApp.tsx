@@ -129,7 +129,7 @@ export function GameApp() {
   const motion = c?.motion.getState(),
     mic = c?.speech.getSnapshot();
   const wandReady = c?.wand?.getSnapshot().phase === "streaming";
-  const pairingPhone = c?.source === "phone" && !wandReady;
+  const pairingPhone = c?.source === "phone" && c.busy && !wandReady;
   const micReady = mic?.phase === "listening" || mic?.phase === "busy";
   const practice = motion?.phase === "ready" && micReady;
   const issue =
@@ -379,11 +379,16 @@ export function GameApp() {
                 <div className="result-star" aria-hidden="true">
                   ✧
                 </div>
-                <h1>{c.busy ? "Connecting…" : "Reconnect your wand."}</h1>
+                <h1>{c.busy ? "Connecting…" : "Let's reconnect."}</h1>
                 {!c.busy && (
-                  <button onClick={() => setRevision((n) => n + 1)}>
-                    Try again
-                  </button>
+                  <>
+                    <button onClick={() => void c.connect(c.source === "phone" ? "phone" : "ble")}>
+                      {c.source === "phone" ? "Reconnect iPhone" : "Reconnect badge"}
+                    </button>
+                    <button className="quiet" onClick={() => setRevision((n) => n + 1)}>
+                      Choose another wand
+                    </button>
+                  </>
                 )}
               </>
             ) : !micReady ? (
@@ -513,7 +518,9 @@ export function GameApp() {
       <div className="game-announcement" aria-live="polite">
         {issue ? (
           <span className="error-banner" role="alert">
-            {issue}
+            {issue === "Clock synchronization expired"
+              ? "Your wand connection was interrupted. Reconnect to continue."
+              : issue}
           </span>
         ) : c?.cameraIssue ? (
           <span className="warning-banner">{c.cameraIssue}</span>

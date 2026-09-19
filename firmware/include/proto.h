@@ -83,6 +83,7 @@ class Session {
   const DisplayState &state() const { return state_; }
   bool state_stale() const { return stale_; }
   int pending_cues() const;
+  uint32_t presentation_revision() const { return presentation_revision_; }
 
  private:
   void clear_cues();
@@ -97,6 +98,7 @@ class Session {
   bool stale_;
   Cue cues_[MAX_CUES];
   uint32_t cue_order_;
+  uint32_t presentation_revision_ = 0;
 };
 
 // Runs the contract's golden vectors through the codec and a Session. Returns the number of

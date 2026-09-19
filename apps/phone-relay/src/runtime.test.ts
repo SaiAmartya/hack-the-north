@@ -134,6 +134,36 @@ async function persistenceCounts(roomId: string): Promise<{
   });
 }
 
+async function delayRoomQueue(roomId: string, delayMs: number): Promise<void> {
+  const rooms = (env as unknown as { ROOMS: DurableObjectNamespace }).ROOMS;
+  const stub = rooms.get(rooms.idFromName(roomId));
+  await runInDurableObject(stub, (instance) => {
+    const room = instance as unknown as { serial: Promise<void> };
+    room.serial = new Promise((resolve) => setTimeout(resolve, delayMs));
+  });
+}
+
+async function fillDeliveryWindow(
+  owner: WebSocket,
+  phone: WebSocket,
+): Promise<Record<string, unknown>[]> {
+  const delivered: Record<string, unknown>[] = [];
+  for (let sequence = 0; sequence < 8; sequence += 1) {
+    const next = nextMessage(owner);
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "motion",
+        data: Array(20).fill(sequence),
+      }),
+    );
+    delivered.push(await next);
+  }
+  expect(new Set(delivered.map((message) => message.deliveryId)).size).toBe(8);
+  return delivered;
+}
+
 describe("hosted phone relay runtime", () => {
   it("protects creation and rejects an unapproved WebSocket origin", async () => {
     const unauthorized = await worker.default.fetch(
@@ -299,20 +329,7 @@ describe("hosted phone relay runtime", () => {
 
   it("overwrites a full motion window with only the newest fresh sample", async () => {
     const { owner, phone } = await openApprovedPair();
-    const delivered: Record<string, unknown>[] = [];
-    for (let sequence = 0; sequence < 8; sequence += 1) {
-      const next = nextMessage(owner);
-      phone.send(
-        JSON.stringify({
-          v: 1,
-          type: "notify",
-          kind: "motion",
-          data: Array(20).fill(sequence),
-        }),
-      );
-      delivered.push(await next);
-    }
-    expect(new Set(delivered.map((message) => message.deliveryId)).size).toBe(8);
+    const delivered = await fillDeliveryWindow(owner, phone);
     phone.send(
       JSON.stringify({
         v: 1,
@@ -348,6 +365,109 @@ describe("hosted phone relay runtime", () => {
     owner.close(1000, "done");
   });
 
+  it("drains queued statuses in order before the newest overflow motion", async () => {
+    const { owner, phone } = await openApprovedPair();
+    const delivered = await fillDeliveryWindow(owner, phone);
+    const newestMotion = Array(20).fill(101);
+    const firstStatus = Array.from({ length: 20 }, (_, index) => index + 20);
+    const secondStatus = Array.from({ length: 20 }, (_, index) => 255 - index);
+
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "motion",
+        data: newestMotion,
+      }),
+    );
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "status",
+        data: firstStatus,
+      }),
+    );
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "status",
+        data: secondStatus,
+      }),
+    );
+    await scheduler.wait(10);
+
+    const drained: Record<string, unknown>[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const next = nextMessage(owner);
+      owner.send(
+        JSON.stringify({
+          v: 1,
+          type: "received",
+          id: delivered[index].deliveryId,
+        }),
+      );
+      drained.push(await next);
+    }
+    expect(drained).toEqual([
+      {
+        v: 1,
+        type: "notify",
+        kind: "status",
+        data: firstStatus,
+        deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      },
+      {
+        v: 1,
+        type: "notify",
+        kind: "status",
+        data: secondStatus,
+        deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      },
+      {
+        v: 1,
+        type: "notify",
+        kind: "motion",
+        data: newestMotion,
+        deliveryId: expect.stringMatching(/^[0-9a-f]{32}$/),
+      },
+    ]);
+    owner.close(1000, "done");
+  });
+
+  it("closes when the bounded status queue overflows", async () => {
+    const { owner, phone } = await openApprovedPair();
+    await fillDeliveryWindow(owner, phone);
+    const closed = nextClose(owner);
+    for (let sequence = 0; sequence < 5; sequence += 1) {
+      phone.send(
+        JSON.stringify({
+          v: 1,
+          type: "notify",
+          kind: "status",
+          data: Array(20).fill(40 + sequence),
+        }),
+      );
+    }
+    await expect(closed).resolves.toMatchObject({ reason: "delivery_backlog" });
+  });
+
+  it("closes when a queued status becomes stale", async () => {
+    const { owner, phone } = await openApprovedPair();
+    await fillDeliveryWindow(owner, phone);
+    const closed = nextClose(owner);
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "status",
+        data: Array(20).fill(77),
+      }),
+    );
+    await expect(closed).resolves.toMatchObject({ reason: "delivery_backlog" });
+  });
+
   it("closes the room when a motion delivery is not acknowledged", async () => {
     const { owner, phone } = await openApprovedPair();
     const firstMotion = nextMessage(owner);
@@ -379,4 +499,80 @@ describe("hosted phone relay runtime", () => {
     }
     await expect(closed).resolves.toBeDefined();
   });
+
+  it("accepts an on-time delivery receipt after serial queue delay", async () => {
+    const { pair, owner, phone } = await openApprovedPair();
+    const firstMotion = nextMessage(owner);
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "motion",
+        data: Array(20).fill(7),
+      }),
+    );
+    const delivered = await firstMotion;
+    await scheduler.wait(160);
+    await delayRoomQueue(pair.roomId, 60);
+    owner.send(
+      JSON.stringify({
+        v: 1,
+        type: "received",
+        id: delivered.deliveryId,
+      }),
+    );
+    await scheduler.wait(80);
+
+    const nextMotion = nextMessage(owner);
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "notify",
+        kind: "motion",
+        data: Array(20).fill(8),
+      }),
+    );
+    await expect(nextMotion).resolves.toMatchObject({
+      type: "notify",
+      kind: "motion",
+      data: Array(20).fill(8),
+    });
+    owner.close(1000, "done");
+  });
+
+  it("accepts an on-time operation reply after serial queue delay", async () => {
+    const { pair, owner, phone } = await openApprovedPair();
+    const atPhone = nextMessage(phone);
+    owner.send(
+      JSON.stringify({
+        v: 1,
+        type: "op",
+        id: "delayed-status",
+        operation: "status",
+      }),
+    );
+    await expect(atPhone).resolves.toMatchObject({
+      type: "op",
+      id: "delayed-status",
+    });
+    await scheduler.wait(1_450);
+    await delayRoomQueue(pair.roomId, 70);
+    const atOwner = nextMessage(owner);
+    phone.send(
+      JSON.stringify({
+        v: 1,
+        type: "reply",
+        id: "delayed-status",
+        data: Array(20).fill(9),
+      }),
+    );
+    await scheduler.wait(100);
+    await expect(atOwner).resolves.toEqual({
+      v: 1,
+      type: "reply",
+      id: "delayed-status",
+      data: Array(20).fill(9),
+    });
+    owner.close(1000, "done");
+  }, 10_000);
 });

@@ -312,8 +312,12 @@ def probe_device_mac(port: str) -> str:
 
 
 def open_console(port: str):
-    """Open the badge console without touching DTR/RTS: native USB-Serial-JTAG resets the chip on
-    DTR/RTS edges, so the lines are pinned low before the port opens."""
+    """Pin requested modem lines low before opening; this is not a no-reset guarantee.
+
+    Opening this USB console on the tested Mac still causes USB_UART_CHIP_RESET.
+    Open it before a BLE measurement and keep the same handle for before/after
+    counters. Never reopen it mid-duel or mistake reset counters for a soak result.
+    """
     import serial
 
     s = serial.Serial()

@@ -36,6 +36,7 @@ const AUTH_TIMEOUT_MS = 5_000;
 const DELIVERY_ACK_TIMEOUT_MS = 200;
 const MOTION_STALE_MS = 100;
 const NOTIFICATION_DELIVERY_WINDOW = 8;
+const MAX_PENDING_STATUS_NOTIFICATIONS = 4;
 const ROOM_KEY = "room";
 
 export type Env = {
@@ -352,6 +353,10 @@ export class PairRoom extends DurableObject<Env> {
     notification: PhoneNotification;
     arrivedAtMs: number;
   } | null = null;
+  private readonly pendingStatuses: Array<{
+    notification: PhoneNotification;
+    arrivedAtMs: number;
+  }> = [];
   private readonly state: DurableObjectState;
   private readonly workerEnv: Env;
 
@@ -573,7 +578,7 @@ export class PairRoom extends DurableObject<Env> {
     }
     if (
       [...this.notificationDeliveries.values()].some(
-        (deadline) => now >= deadline,
+        (deadline) => arrivedAtMs >= deadline,
       )
     ) {
       await this.terminateRoom("delivery_timeout");
@@ -793,8 +798,7 @@ export class PairRoom extends DurableObject<Env> {
       return;
     }
     if (reply) {
-      const now = Date.now();
-      this.prunePending(now);
+      this.prunePending(arrivedAtMs);
       if (!this.pendingOperations.has(reply.id)) {
         await this.protocolViolation(socket, "unknown_operation");
         return;
@@ -822,7 +826,14 @@ export class PairRoom extends DurableObject<Env> {
       if (notification.kind === "motion") {
         this.latestMotion = { notification, arrivedAtMs };
       } else {
-        await this.terminateRoom("delivery_backlog");
+        if (
+          this.pendingStatuses.length >= MAX_PENDING_STATUS_NOTIFICATIONS
+        ) {
+          await this.terminateRoom("delivery_backlog");
+          return;
+        }
+        this.pendingStatuses.push({ notification, arrivedAtMs });
+        this.scheduleTransientTimer();
       }
       return;
     }
@@ -853,6 +864,22 @@ export class PairRoom extends DurableObject<Env> {
     }
     this.notificationDeliveries.delete(deliveryId);
     this.updateOwnerTransientIds();
+    const pendingStatus = this.pendingStatuses[0];
+    if (pendingStatus) {
+      if (
+        pendingStatus.arrivedAtMs + MAX_QUEUE_AGE_MS <= Date.now()
+      ) {
+        await this.terminateRoom("delivery_backlog");
+        return;
+      }
+      this.pendingStatuses.shift();
+      await this.forwardNotification(
+        ownerSocket,
+        pendingStatus.notification,
+        pendingStatus.arrivedAtMs,
+      );
+      return;
+    }
     const latest = this.latestMotion;
     this.latestMotion = null;
     if (latest && Date.now() - latest.arrivedAtMs <= MOTION_STALE_MS) {
@@ -910,6 +937,7 @@ export class PairRoom extends DurableObject<Env> {
     this.room.status = "closed";
     this.pendingOperations.clear();
     this.notificationDeliveries.clear();
+    this.pendingStatuses.length = 0;
     this.latestMotion = null;
     this.clearTransientTimer();
     this.updateOwnerTransientIds();
@@ -948,6 +976,9 @@ export class PairRoom extends DurableObject<Env> {
     const deadlines = [
       ...this.notificationDeliveries.values(),
       ...this.pendingOperations.values(),
+      ...this.pendingStatuses.map(
+        ({ arrivedAtMs }) => arrivedAtMs + MAX_QUEUE_AGE_MS,
+      ),
     ];
     for (const socket of this.state.getWebSockets()) {
       const attachment = attachmentOf(socket);
@@ -976,6 +1007,14 @@ export class PairRoom extends DurableObject<Env> {
       )
     ) {
       await this.terminateRoom("delivery_timeout");
+      return;
+    }
+    if (
+      this.pendingStatuses.some(
+        ({ arrivedAtMs }) => arrivedAtMs + MAX_QUEUE_AGE_MS <= now,
+      )
+    ) {
+      await this.terminateRoom("delivery_backlog");
       return;
     }
     this.prunePending(now);

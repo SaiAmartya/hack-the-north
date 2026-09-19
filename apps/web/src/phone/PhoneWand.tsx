@@ -60,6 +60,7 @@ export function PhoneWand(props: PhoneWandProps = {}) {
   const [challenge, setChallenge] = useState("");
   const [hp, setHp] = useState<number>();
   const [cue, setCue] = useState(0);
+  const [showWakeHint, setShowWakeHint] = useState(false);
   const info = useRef<InfoRecord | null>(null);
   const endpointInfo = info.current ?? (info.current = phoneInfo());
   const cleanup = useRef<(reason?: string) => void>(() => {});
@@ -87,10 +88,12 @@ export function PhoneWand(props: PhoneWandProps = {}) {
     connectingRef.current = true;
     setConnecting(true);
     setChallenge("");
+    setShowWakeHint(false);
     setPhase("Requesting motion access…");
     let stopped = false;
     let timer: ReturnType<typeof setInterval> | undefined;
     let ws: WebSocket | undefined;
+    let wakeLock: WakeLockSentinel | undefined;
     const current = () =>
       !stopped && mounted.current && attempt.current === attemptId;
     function stop(reason = "Connect your wand") {
@@ -101,6 +104,9 @@ export function PhoneWand(props: PhoneWandProps = {}) {
       window.removeEventListener("orientationchange", rotate);
       document.removeEventListener("visibilitychange", hide);
       endpoint?.disconnect();
+      const ownedWakeLock = wakeLock;
+      wakeLock = undefined;
+      if (ownedWakeLock) void ownedWakeLock.release().catch(() => undefined);
       const socket = ws;
       ws = undefined;
       if (socket) {
@@ -143,6 +149,32 @@ export function PhoneWand(props: PhoneWandProps = {}) {
       )
         throw new Error("Allow motion to use your wand.");
       if (!current()) return;
+      const wakeLockApi = (navigator as Partial<Navigator>).wakeLock;
+      if (wakeLockApi) {
+        void wakeLockApi
+          .request("screen")
+          .then((lock) => {
+            if (!current()) {
+              void lock.release().catch(() => undefined);
+              return;
+            }
+            wakeLock = lock;
+            lock.addEventListener(
+              "release",
+              () => {
+                if (wakeLock !== lock) return;
+                wakeLock = undefined;
+                if (current()) setShowWakeHint(true);
+              },
+              { once: true },
+            );
+          })
+          .catch(() => {
+            if (current()) setShowWakeHint(true);
+          });
+      } else {
+        setShowWakeHint(true);
+      }
       const wand = new VirtualWandEndpoint({
         nowMs: () => performance.now(),
         info: endpointInfo,
@@ -283,6 +315,9 @@ export function PhoneWand(props: PhoneWandProps = {}) {
         ✧
       </div>
       <h1>{phase}</h1>
+      {showWakeHint ? (
+        <p role="status">Keep this screen awake during your duel.</p>
+      ) : null}
       {hosted && !hostedRoomValid ? (
         <p>Open the iPhone pairing screen on your laptop and scan its QR code.</p>
       ) : active ? (

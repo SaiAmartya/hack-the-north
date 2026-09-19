@@ -1,9 +1,10 @@
 # Firmware integration review
 
-**Historical report.** Sai subsequently requested discarding all local firmware fixes.
-The current tree matches teammate main `6a50929`; use the [new review and flash
-record](firmware-main-6a50929.md). The remediation descriptions and measurements below
-apply only to the earlier images and do not qualify the current firmware.
+**Historical report.** Sai subsequently requested the teammate's exact `6a50929` image,
+then explicitly authorized a fresh procedural repair after that image failed live OPEN.
+Use the [current connectivity investigation](connectivity-stabilization.md) and its exact
+image-specific measurements. The [upstream flash record](firmware-main-6a50929.md) and
+remediation descriptions below remain historical and do not qualify newer firmware.
 
 Date: 2026-09-19
 Reviewed: the `firmware/` 0.1.0 baseline at `14db1b3` as merged by `6c1b857`, the

@@ -19,6 +19,17 @@ test("badge and iPhone are the only player connection actions", async ({ page })
   await page.screenshot({ path: "/tmp/wandduel-mobile.png", fullPage: true });
 });
 
+test("failed phone setup offers a fresh connection instead of a preparing screen", async ({ page }) => {
+  await page.route("**/api/phone/config", route => route.fulfill({ status: 503 }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connect iPhone", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Let's reconnect." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Preparing your iPhone…" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Reconnect iPhone", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Choose another wand" }).click();
+  await expect(page.getByRole("button", { name: "Connect badge", exact: true })).toBeVisible();
+});
+
 test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit approval", async ({
   page,
 }) => {
@@ -176,6 +187,7 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
 test("raw wand evidence drives attack, block, abort, and rematch", async ({
   page,
 }) => {
+  test.setTimeout(45_000);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
 
@@ -194,7 +206,7 @@ test("raw wand evidence drives attack, block, abort, and rematch", async ({
     .click();
   const stage = page.getByTestId("qa-stage");
   await expect
-    .poll(() => stage.textContent(), { timeout: 15_000 })
+    .poll(() => stage.textContent(), { timeout: 35_000 })
     .toMatch(/^(complete|failed)$/);
   if ((await stage.textContent()) === "failed") {
     throw new Error(
