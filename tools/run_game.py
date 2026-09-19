@@ -48,8 +48,9 @@ class StartupError(RuntimeError):
     pass
 
 
-def _load_defaults(path: Path = DEFAULTS_FILE) -> dict[str, str]:
+def _load_defaults(path: Path | None = None) -> dict[str, str]:
     """Saved launcher defaults: only the phone service origin and the secret file's path."""
+    path = path or DEFAULTS_FILE
     try:
         payload = json.loads(path.read_text())
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -60,7 +61,8 @@ def _load_defaults(path: Path = DEFAULTS_FILE) -> dict[str, str]:
     return {key: value for key, value in payload.items() if key in allowed and isinstance(value, str) and value}
 
 
-def _save_defaults(phone_service: str, phone_secret_file: Path, path: Path = DEFAULTS_FILE) -> None:
+def _save_defaults(phone_service: str, phone_secret_file: Path, path: Path | None = None) -> None:
+    path = path or DEFAULTS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_suffix(".json.pending")
     pending.write_text(json.dumps({"phone_service": phone_service, "phone_secret_file": str(phone_secret_file.resolve())}, indent=2) + "\n")
@@ -86,8 +88,9 @@ def _ensure_speech_model(model_dir: Path, python: Path, run=subprocess.run) -> N
         raise StartupError("the local speech model could not be provisioned; check the network and rerun")
 
 
-def _launcher_pid(path: Path = PID_FILE) -> int | None:
+def _launcher_pid(path: Path | None = None) -> int | None:
     """PID of a live stack started by this launcher, or None. Never trusts a recycled PID."""
+    path = path or PID_FILE
     try:
         pid = int(path.read_text().strip())
     except (FileNotFoundError, OSError, ValueError):
@@ -107,8 +110,9 @@ def _launcher_pid(path: Path = PID_FILE) -> int | None:
     return pid if "run_game.py" in args else None
 
 
-def _stop_previous(path: Path = PID_FILE, wait_seconds: float = 15.0) -> bool:
+def _stop_previous(path: Path | None = None, wait_seconds: float = 15.0) -> bool:
     """Stop a previous stack started by this launcher so a fresh one can take its ports."""
+    path = path or PID_FILE
     pid = _launcher_pid(path)
     if pid is None:
         try:
