@@ -373,3 +373,20 @@ async def _request_directive(arena: ArenaHost, director: ArenaDirector) -> None:
 # Module level app for `uvicorn phantom_host.main:app`. Construction is cheap and
 # side effect free; the serial thread only starts when the lifespan runs.
 app = create_app()
+
+
+def main() -> None:
+    """Entrypoint that honours the configured bind address.
+
+    Exists so bind_host/bind_port are not decorative: this socket streams webcam
+    frames and has no authentication, so the default must be loopback whether the
+    operator remembers the uvicorn flag or not.
+    """
+    import uvicorn
+
+    settings = Settings.from_env()
+    uvicorn.run(app, host=settings.bind_host, port=settings.bind_port)
+
+
+if __name__ == "__main__":
+    main()

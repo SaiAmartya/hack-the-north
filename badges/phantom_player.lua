@@ -41,6 +41,10 @@ local SEND_SPACING_MS = 40
 local QUEUE_MAX = 8
 local UI_REFRESH_MS = 100
 local ACCEL_SAMPLE_MS = 40
+-- The LED strip is latched on a timer, not every tick. On pre-2026-09-16
+-- firmware a tick only gets 6 ms, and a full clear/set/show every tick would
+-- eat most of it.
+local LED_REFRESH_MS = 50
 
 -- ---------------------------------------------------------------------------
 -- Gesture tuning. These are the ONLY numbers that need changing on hardware.
@@ -84,6 +88,7 @@ local last_gesture = "-"
 local effect_spell = nil
 local effect_until = 0
 local next_ui = 0
+local next_led = 0
 local last_tick_ms = 0
 
 local select_label, select_hint
@@ -339,6 +344,11 @@ local function sample_accel()
 
     if ax >= GESTURE_THRESHOLD_MG or ay >= GESTURE_THRESHOLD_MG
         or az >= GESTURE_THRESHOLD_MG then
+      -- Consume the lockout on DETECTION, not on a successful cast. Otherwise a
+      -- gesture aimed at a cooling spell keeps re-firing every sample and spams
+      -- the status line for the whole cooldown.
+      gesture_locked_until = now + GESTURE_LOCKOUT_MS
+
       if ay >= ax and ay >= az and dy > 0 then
         last_gesture = "thrust"
         cast("F")
@@ -499,7 +509,10 @@ function on_tick()
     sample_accel()
   end
 
-  paint_leds()
+  if now >= next_led then
+    next_led = now + LED_REFRESH_MS
+    paint_leds()
+  end
 
   if now < next_ui then
     return

@@ -128,7 +128,7 @@ local function fire(value)
   end
   next_action_at = now + ACTION_COOLDOWN_MS
 
-  -- PA1|J|EVT|MET|17 is 16 bytes, well inside the 44 byte radio payload cap.
+  -- PA1|J|EVT|MANA|255 is 18 bytes at worst, well inside the 44 byte cap.
   local payload = "PA1|" .. SENDER .. "|EVT|" .. value .. "|" .. sequence
   sequence = (sequence + 1) % 256
 

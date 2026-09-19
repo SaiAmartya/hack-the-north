@@ -16,8 +16,13 @@ Chaos    ─┘                                                     │
 Host (authoritative game rules, serial, vision, Director):
 
 ```bash
-cd apps/host && . .venv/bin/activate && uvicorn phantom_host.main:app --host 127.0.0.1 --port 8000
+cd apps/host && . .venv/bin/activate && python -m phantom_host.main
 ```
+
+That entrypoint binds to `127.0.0.1:8000` from `Settings`, which matters because the
+websocket carries webcam frames and has no authentication. `uvicorn
+phantom_host.main:app --host 127.0.0.1 --port 8000` is equivalent if you prefer the
+uvicorn CLI — just never bind it to `0.0.0.0` on venue Wi-Fi.
 
 Web arena (open this on the projector):
 
@@ -142,7 +147,7 @@ cd apps/host && . .venv/bin/activate && pytest -q
 cd apps/web && npm run build
 ```
 
-198 host tests cover the packet parser, the deduper, every game rule, serial
+200 host tests cover the packet parser, the deduper, every game rule, serial
 reconnect, marker loss, the Director's fallbacks, and the resilience paths in the
 table above. `tests/test_badge_apps.py` additionally validates the three Lua apps
 against `badge-app-guide.md`: manifest keys, the sandbox's missing built-ins, the

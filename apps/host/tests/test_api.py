@@ -3,6 +3,7 @@ through ArenaHost.handle_line, which is the same path real serial input takes.""
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from phantom_host.arena_director import ArenaDirector
 from phantom_host.config import Settings
+from phantom_host import main as main_module
 from phantom_host.main import ArenaHost, create_app
 
 
@@ -176,6 +178,33 @@ def test_reset_clears_the_deduper_so_sequences_can_repeat(host: ArenaHost) -> No
     start_match(host)
     host.handle_line("PA1|P1|CAST|F|17")
     assert host.state.players["P2"].health == 82
+
+
+# ---------------------------------------------------------------------------
+# bind address
+# ---------------------------------------------------------------------------
+
+
+def test_the_bind_settings_are_real_and_default_to_loopback() -> None:
+    """This socket streams webcam frames and has no authentication, so the bind
+    address must not be decorative config that nothing reads."""
+    assert Settings().bind_host == "127.0.0.1"
+    assert callable(main_module.main), "there must be an entrypoint using them"
+
+    source = inspect.getsource(main_module.main)
+    assert "settings.bind_host" in source
+    assert "settings.bind_port" in source
+
+
+def test_bind_settings_come_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHANTOM_BIND_HOST", "127.0.0.2")
+    monkeypatch.setenv("PHANTOM_BIND_PORT", "9123")
+
+    settings = Settings.from_env()
+    assert settings.bind_host == "127.0.0.2"
+    assert settings.bind_port == 9123
 
 
 # ---------------------------------------------------------------------------
