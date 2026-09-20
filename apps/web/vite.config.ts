@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { readFileSync } from "node:fs";
 import { speechMiddleware } from "./dev/speech-proxy";
 import { phoneMiddleware } from "./dev/phone-proxy";
+import { canonicalOriginMiddleware } from "./dev/origin-redirect";
 
 const host = process.env.WAND_FRONTEND_HOST ?? "127.0.0.1";
 const qaPorts = process.env.WAND_QA_PORTS === "1";
@@ -28,6 +29,8 @@ if (
   );
 
 function localServices(server: ViteDevServer | PreviewServer) {
+  // One loopback spelling: the hosted phone service trusts only this exact origin.
+  server.middlewares.use(canonicalOriginMiddleware(origin));
   server.middlewares.use(
     phoneMiddleware(origin, host, process.env.WAND_PHONE_SERVICE, process.env.WAND_PHONE_CREATE_SECRET),
   );
