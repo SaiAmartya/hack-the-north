@@ -500,15 +500,15 @@ async def _solo_tick(room, peer, clock, now):
 
 
 @pytest.mark.asyncio
-async def test_solo_bot_and_human_use_all_five_normal_spells_with_readable_pacing():
+async def test_solo_gentle_bot_leaves_room_to_practice_all_five_normal_spells():
     clock, room, _session, peer = await _solo_playing()
     schedule = {
-        7_900: [Spell.PROTEGO, Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO],
-        12_000: [Spell.STUPEFY],
-        12_200: [Spell.EPISKEY],
+        16_500: [Spell.PROTEGO, Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO],
+        25_500: [Spell.STUPEFY],
+        29_200: [Spell.EPISKEY],
     }
     events = {}
-    for now in range(3_050, 14_051, 50):
+    for now in range(3_050, 31_001, 50):
         for spell in schedule.get(now, []):
             evidence = f"human-{now}-{spell.value}"
             await room.submit_cast(peer=peer, receipt_ms=now, message=CastMessage(
@@ -520,33 +520,76 @@ async def test_solo_bot_and_human_use_all_five_normal_spells_with_readable_pacin
         events.update((event.id, event) for event in room.engine.recent_events)
     snapshot = await room.current_snapshot()
     assert snapshot.mode is Mode.SOLO
-    assert snapshot.players[Slot.P1].hp == 78  # blocked 20, took 10 + 30, healed 18
-    assert snapshot.players[Slot.P2].hp == 58  # took 20 + 10 + 30, healed 18, blocked 20
+    assert snapshot.players[Slot.P1].hp == 98  # blocked 20, took 20, healed 18
+    assert snapshot.players[Slot.P2].hp == 20  # all four attacks landed, with no bot heal/shield
     casts = [event for event in events.values() if event.type == "castAccepted"]
-    for slot in (Slot.P1, Slot.P2):
-        own_casts = [event for event in casts if event.actor is slot]
-        assert {event.spell for event in own_casts} == set(Spell)
-        for spell in Spell:
-            times = [event.at_ms for event in own_casts if event.spell is spell]
-            assert all(b - a >= SPELL_RULES[spell].cooldown_ms for a, b in zip(times, times[1:]))
+    own_casts = [event for event in casts if event.actor is Slot.P1]
+    assert {event.spell for event in own_casts} == set(Spell)
+    for spell in Spell:
+        times = [event.at_ms for event in own_casts if event.spell is spell]
+        assert all(b - a >= SPELL_RULES[spell].cooldown_ms for a, b in zip(times, times[1:]))
     bot_casts = [event for event in casts if event.actor is Slot.P2]
-    assert bot_casts[0].at_ms == 6_000, "three seconds of play before the first bot action"
-    assert all(b.at_ms - a.at_ms >= 1_800 for a, b in zip(bot_casts, bot_casts[1:]))
-    assert {event.target for event in events.values() if event.type == "impactBlocked"} == {Slot.P1, Slot.P2}
-    assert {event.target for event in events.values() if event.type == "healed"} == {Slot.P1, Slot.P2}
+    assert [(event.at_ms, event.spell) for event in bot_casts] == [
+        (15_000, Spell.STUPEFY), (27_000, Spell.STUPEFY),
+    ]
+    assert {event.target for event in events.values() if event.type == "impactBlocked"} == {Slot.P1}
+    assert {event.target for event in events.values() if event.type == "healed"} == {Slot.P1}
     assert any(event.type == "offenseLocked" for event in events.values())
 
 
 @pytest.mark.asyncio
-async def test_solo_normal_knockout_stops_bot_and_human_ready_starts_rematch():
+async def test_solo_bot_skips_a_disarmed_turn_without_a_catch_up_attack():
     clock, room, _session, peer = await _solo_playing()
-    for now in range(3_050, 30_001, 50):
+    await _solo_tick(room, peer, clock, 12_300)
+    await room.submit_cast(peer=peer, receipt_ms=12_300, message=CastMessage(
+        round_id=1, attempt_id="disarm", spell=Spell.EXPELLIARMUS,
+        gesture_id="disarm-motion", speech_id="disarm-voice", input_generation=1,
+    ))
+    await _solo_tick(room, peer, clock, 12_300)
+    await _solo_tick(room, peer, clock, 14_500)
+    assert room.engine.players[Slot.P2].offense_locked_until_ms == 15_500
+    for now in (15_000, 15_500, 26_999):
         await _solo_tick(room, peer, clock, now)
+        assert not room.engine.projectiles
+    await _solo_tick(room, peer, clock, 27_000)
+    assert len(room.engine.projectiles) == 1
+    assert room.engine.projectiles[0].caster is Slot.P2
+    assert room.engine.projectiles[0].spell is Spell.STUPEFY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("human_attacks", [False, True])
+async def test_solo_normal_result_stops_bot_and_rematch_restores_full_opening_grace(human_attacks):
+    clock, room, _session, peer = await _solo_playing()
+    schedule = {
+        3_500: [Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO],
+        5_500: [Spell.STUPEFY],
+        7_500: [Spell.STUPEFY],
+    } if human_attacks else {}
+    bot_casts = {}
+    for now in range(3_050, 63_001, 50):
+        for spell in schedule.get(now, []):
+            evidence = f"human-{now}-{spell.value}"
+            await room.submit_cast(peer=peer, receipt_ms=now, message=CastMessage(
+                round_id=1, attempt_id=evidence, spell=spell,
+                gesture_id=f"{evidence}-motion", speech_id=f"{evidence}-voice",
+                input_generation=1,
+            ))
+        await _solo_tick(room, peer, clock, now)
+        bot_casts.update((event.id, event) for event in room.engine.recent_events
+                         if event.type == "castAccepted" and event.actor is Slot.P2)
         if room.engine.phase is Phase.RESULT:
             break
     assert room.engine.result is not None
-    assert room.engine.result.reason == "knockout" and room.engine.result.winner is Slot.P2
-    assert room.engine.players[Slot.P1].hp == 0
+    if human_attacks:
+        assert room.engine.result.reason == "knockout" and room.engine.result.winner is Slot.P1
+        assert room.engine.players[Slot.P2].hp == 0
+        assert not bot_casts
+    else:
+        assert room.engine.result.reason == "timeout" and room.engine.result.winner is Slot.P2
+        assert room.engine.players[Slot.P1].hp == 20
+        assert [event.at_ms for event in bot_casts.values()] == [15_000, 27_000, 39_000, 51_000]
+        assert {event.spell for event in bot_casts.values()} == {Spell.STUPEFY}
     ended = clock.now_ms
     event_count = len(room.engine.recent_events)
     await _solo_tick(room, peer, clock, ended + 500)
@@ -557,9 +600,9 @@ async def test_solo_normal_knockout_stops_bot_and_human_ready_starts_rematch():
     assert room.engine.result is None
     assert all(player.hp == 100 and not player.cooldown_until_ms for player in room.engine.players.values())
     await _solo_tick(room, peer, clock, ended + 3_600)
-    await _solo_tick(room, peer, clock, ended + 6_599)
+    await _solo_tick(room, peer, clock, ended + 15_599)
     assert not room.engine.projectiles
-    await _solo_tick(room, peer, clock, ended + 6_600)
+    await _solo_tick(room, peer, clock, ended + 15_600)
     assert len(room.engine.projectiles) == 1
     assert room.engine.projectiles[0].caster is Slot.P2
 
@@ -567,20 +610,20 @@ async def test_solo_normal_knockout_stops_bot_and_human_ready_starts_rematch():
 @pytest.mark.asyncio
 async def test_solo_disconnect_reconnect_and_leave_keep_bot_owned_by_the_human_session():
     clock, room, session, peer = await _solo_playing()
-    await _solo_tick(room, peer, clock, 6_000)
+    await _solo_tick(room, peer, clock, 15_000)
     assert room.engine.projectiles
-    await room.detach(peer=peer, now_ms=6_100)
-    await room.tick(6_100)
+    await room.detach(peer=peer, now_ms=15_100)
+    await room.tick(15_100)
     assert room.engine.result is not None and room.engine.result.reason == "game_disconnected"
     assert not room.engine.projectiles
     replacement = GamePeer()
-    welcome = await room.attach(token=session.token, peer=replacement, now_ms=6_200)
+    welcome = await room.attach(token=session.token, peer=replacement, now_ms=15_200)
     assert welcome.mode is Mode.SOLO and replacement.connection_generation == 2
     assert welcome.snapshot.players[Slot.P2].source is Source.BOT
-    await room.submit_ready(peer=replacement, message=_ready("real-wand"), receipt_ms=6_300)
-    await _solo_tick(room, replacement, clock, 6_300)
+    await room.submit_ready(peer=replacement, message=_ready("real-wand"), receipt_ms=15_300)
+    await _solo_tick(room, replacement, clock, 15_300)
     assert room.engine.phase is Phase.COUNTDOWN
-    await room.leave(peer=replacement, now_ms=6_400)
+    await room.leave(peer=replacement, now_ms=15_400)
     assert not room.has_sessions()
     assert room.session_for_token(session.token) is None
     snapshot = await room.current_snapshot()
@@ -719,12 +762,17 @@ async def test_tutorial_requires_real_effects_and_pauses_then_runs_short_free_du
     assert briefing.phase is Phase.PLAYING and briefing.tutorial.paused
     await proceed(5)
     free = await room.current_snapshot(now)
+    free_started_ms = now
     assert free.tutorial.stage == "free" and free.round_ends_at_ms == now + 30_000
     assert free.players["P1"].hp == free.players["P2"].hp == 100
     assert all(value == 0 for player in free.players.values() for value in player.cooldown_until_ms.values())
     assert await cast(Spell.INCENDIO) is None
-    await tick(now + 3_000)
-    assert any(e.actor is Slot.P2 and e.type == "castAccepted" for e in room.engine.recent_events)
+    await tick(now + 11_999)
+    assert not any(e.actor is Slot.P2 and e.type == "castAccepted" and e.at_ms >= free_started_ms
+                   for e in room.engine.recent_events)
+    await tick(now + 1)
+    assert any(e.actor is Slot.P2 and e.type == "castAccepted" and e.at_ms == free_started_ms + 12_000
+               for e in room.engine.recent_events)
     finished = await tick(free.round_ends_at_ms)
     assert finished.phase is Phase.RESULT and finished.result.reason == "timeout"
 

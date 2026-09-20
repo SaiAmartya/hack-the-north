@@ -260,36 +260,25 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
   const assertProjectileOutcome = async (projectileId: string | undefined, spell: "expelliarmus" | "incendio", damage: number) => {
     expect(projectileId).toBeTruthy();
     const resolutions = (state: Awaited<ReturnType<typeof snapshot>>) => state.recentEvents.filter(event =>
-      event.projectileId === projectileId && ["damage", "impactBlocked"].includes(event.type),
+      event.projectileId === projectileId && event.type === "damage",
     );
     await expect.poll(async () => resolutions(await snapshot(page)).length, { intervals: [50] }).toBe(1);
     const resolved = await snapshot(page);
     const [impact] = resolutions(resolved);
-    expect(impact).toMatchObject({ actor: "P1", target: "P2", spell });
+    expect(impact).toMatchObject({ actor: "P1", target: "P2", spell, amount: damage });
     expect(resolved.projectiles.some(projectile => projectile.id === projectileId)).toBe(false);
     const disarmed = resolved.recentEvents.filter(event => event.projectileId === projectileId && event.type === "offenseLocked");
-    if (impact.type === "damage") {
-      expect(impact.amount).toBe(damage);
-      if (spell === "expelliarmus") {
-        expect(disarmed).toHaveLength(1);
-        expect(resolved.players.P2!.offenseLockedUntilMs).toBeGreaterThan(impact.atMs);
-        await expect(page.getByLabel("Rival wizard").getByText(/DISARMED/)).toBeVisible();
-      }
-    } else {
-      // The live bot may legitimately shield a projectile. Check the real defensive
-      // effect instead of making a timing-dependent assumption that every attack hits.
-      expect(disarmed).toHaveLength(0);
-      if (!resolved.recentEvents.some(event => event.type === "shieldRaised" && event.actor === "P2" && event.atMs > impact.atMs))
-        expect(resolved.players.P2!.shieldUntilMs).toBe(0);
-      expect(resolved.recentEvents.some(event => event.type === "shieldRaised" && event.actor === "P2" &&
-        event.atMs <= impact.atMs && event.atMs + 1_200 > impact.atMs)).toBe(true);
+    if (spell === "expelliarmus") {
+      expect(disarmed).toHaveLength(1);
+      expect(resolved.players.P2!.offenseLockedUntilMs).toBeGreaterThan(impact.atMs);
+      await expect(page.getByLabel("Rival wizard").getByText(/DISARMED/)).toBeVisible();
     }
   };
 
   // React to the actual first projectile; the bot remains active throughout the match.
   await expect.poll(async () => (await snapshot(page)).projectiles.some(projectile =>
     projectile.caster === "P2" && projectile.spell === "stupefy",
-  ), { intervals: [50] }).toBe(true);
+  ), { intervals: [50], timeout: 16_000 }).toBe(true);
   expect((await cast(page, "protego")).accepted).toBe(true);
   await expect(page.getByLabel(/^Protego: recharging/)).toBeVisible();
   await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
@@ -306,7 +295,7 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
   const fireCast = await cast(page, "incendio");
   expect(fireCast.accepted).toBe(true);
   await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
-  await expect.poll(async () => (await snapshot(page)).players.P1!.hp).toBeLessThanOrEqual(82);
+  await expect.poll(async () => (await snapshot(page)).players.P1!.hp, { timeout: 16_000 }).toBe(80);
   expect((await cast(page, "episkey")).accepted).toBe(true);
   await expect(page.getByLabel(/^Episkey: recharging/)).toBeVisible();
   expect((await snapshot(page)).recentEvents).toEqual(expect.arrayContaining([
@@ -314,7 +303,7 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
   ]));
   expect((await cast(page, "stupefy")).accepted).toBe(true);
   await expect(page.getByLabel(/^Stupefy: recharging/)).toBeVisible();
-  await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
+  await expect(page.getByLabel(/^Episkey: recharging/)).toBeVisible();
   expect(await cast(page, "stupefy")).toMatchObject({ accepted: false, reason: "cooldown" });
   await assertProjectileOutcome(fireCast.projectileId, "incendio", 30);
   const acceptedSpells = (await snapshot(page)).recentEvents
@@ -323,10 +312,10 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
   expect(acceptedSpells).toEqual(["episkey", "expelliarmus", "incendio", "protego", "stupefy"]);
   await expect(page.getByRole("progressbar")).toHaveCount(5);
 
-  // Stop defending and let the real opponent finish, proving its attacks reach a normal result.
-  await expect(page.getByRole("heading", { name: "Defeat!", exact: true })).toBeVisible({ timeout: 45_000 });
-  expect((await snapshot(page)).result).toMatchObject({ outcome: "win", winner: "P2" });
-  await expect(page.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "0");
+  // The gentle bot gives a learning player time to finish the round and win on remaining health.
+  await expect(page.getByRole("heading", { name: "Victory!", exact: true })).toBeVisible({ timeout: 45_000 });
+  expect((await snapshot(page)).result).toMatchObject({ outcome: "win", winner: "P1", reason: "timeout" });
+  await expect(page.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "58");
   await expect(page.getByLabel("Duel code")).toHaveCount(0);
   await page.screenshot({ path: "/tmp/wandduel-solo-result.png", fullPage: true });
   await page.getByRole("button", { name: "Rematch", exact: true }).click();
