@@ -60,16 +60,16 @@ class RoomRegistry:
         self, *, name: str, source: Source, code: str | None = None,
         mode: Mode = Mode.DUEL,
     ) -> SessionResponse:
-        if mode is Mode.SOLO and code is not None:
-            raise RoomError("solo_requires_new_room")
+        if mode is not Mode.DUEL and code is not None:
+            raise RoomError(f"{mode.value}_requires_new_room")
         created = code is None
         if code is None:
             code = self.create_room(mode=mode)
         room = self._rooms.get(code)
         if room is None:
             raise RoomError("room_not_found", status_code=404)
-        if not created and room.mode is Mode.SOLO:
-            raise RoomError("solo_room_private", status_code=409)
+        if not created and room.mode is not Mode.DUEL:
+            raise RoomError(f"{room.mode.value}_room_private", status_code=409)
         try:
             return await room.create_session(name=name, source=source)
         except BaseException:

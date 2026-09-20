@@ -52,4 +52,14 @@ describe("Python/TypeScript wire fixture", () => {
     expect(() => parseSnapshot({ ...solo, players: { ...solo.players, P1: { ...solo.players.P1, source: "bot" } } })).toThrow();
     expect(() => parseSnapshot({ ...solo, mode: "unknown" })).toThrow();
   });
+  it("requires bounded tutorial state and keeps it out of ordinary duels", () => {
+    const tutorial = { ...fixture.snapshot, mode: "tutorial", tutorial: {
+      step: 0, spell: "stupefy", stage: "instruction", paused: true,
+    } };
+    expect(parseSnapshot(tutorial).tutorial?.paused).toBe(true);
+    expect(() => parseSnapshot({ ...tutorial, tutorial: null })).toThrow();
+    expect(() => parseSnapshot({ ...tutorial, tutorial: { ...tutorial.tutorial, step: 6 } })).toThrow();
+    expect(() => parseSnapshot({ ...tutorial, tutorial: { ...tutorial.tutorial, paused: "yes" } })).toThrow();
+    expect(() => parseSnapshot({ ...tutorial, mode: "duel" })).toThrow();
+  });
 });

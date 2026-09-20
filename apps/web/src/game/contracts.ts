@@ -2,7 +2,13 @@ export type Slot = "P1" | "P2";
 export const SPELLS = ["stupefy", "protego", "expelliarmus", "incendio", "episkey"] as const;
 export type Spell = (typeof SPELLS)[number];
 export type Source = "phone" | "ble" | "replay";
-export type GameMode = "duel" | "solo";
+export type GameMode = "duel" | "solo" | "tutorial";
+export type Tutorial = {
+  step: number;
+  spell: Spell | null;
+  stage: "instruction" | "practice" | "complete" | "free";
+  paused: boolean;
+};
 export type SpellRule = {
   spell: Spell;
   enabled: boolean;
@@ -64,6 +70,7 @@ export type GameEvent = {
 export type Snapshot = {
   roomId: string;
   mode: GameMode;
+  tutorial?: Tutorial | null;
   roomGeneration: number;
   roundId: number;
   stateVersion: number;
@@ -115,7 +122,7 @@ export function parseSnapshot(value: unknown): Snapshot {
   if (
     !object(value) ||
     typeof value.roomId !== "string" ||
-    !["duel", "solo"].includes(String(value.mode)) ||
+    !["duel", "solo", "tutorial"].includes(String(value.mode)) ||
     !["roomGeneration", "roundId", "stateVersion", "serverNowMs"].every((k) =>
       finite(value[k]),
     ) ||
@@ -135,7 +142,7 @@ export function parseSnapshot(value: unknown): Snapshot {
       p.slot !== key ||
       typeof p.name !== "string" ||
       !["phone", "ble", "replay", "bot"].includes(String(p.source)) ||
-      (p.source === "bot" && (value.mode !== "solo" || key !== "P2")) ||
+      (p.source === "bot" && (value.mode === "duel" || key !== "P2")) ||
       !["connected", "ready", "inputHealthy"].every(
         (k) => typeof p[k] === "boolean",
       ) ||
@@ -195,5 +202,14 @@ export function parseSnapshot(value: unknown): Snapshot {
       !finite(value.result.endedAtMs))
   )
     throw new Error("Invalid result");
+  const lesson = value.tutorial;
+  if (value.mode === "tutorial") {
+    if (!object(lesson) || !Number.isInteger(lesson.step) ||
+      (lesson.step as number) < 0 || (lesson.step as number) > 5 ||
+      !(lesson.spell === null || spell(lesson.spell)) ||
+      !["instruction", "practice", "complete", "free"].includes(String(lesson.stage)) ||
+      typeof lesson.paused !== "boolean")
+      throw new Error("Invalid tutorial state");
+  } else if (lesson != null) throw new Error("Unexpected tutorial state");
   return value as Snapshot;
 }

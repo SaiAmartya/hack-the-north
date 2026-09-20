@@ -35,6 +35,7 @@ from phantom_host.duel_models import (
     SessionRequest,
     SessionResponse,
     Source,
+    TutorialContinueMessage,
     wire_dict,
 )
 from phantom_host.duel_registry import RoomRegistry
@@ -306,6 +307,10 @@ def create_app(
                         peer=peer,
                         message=message,
                         receipt_ms=receipt_ms,
+                    )
+                elif isinstance(message, TutorialContinueMessage):
+                    response = await room.submit_tutorial_continue(
+                        peer=peer, message=message, receipt_ms=receipt_ms,
                     )
                 elif isinstance(message, LeaveMessage):
                     explicitly_left = True

@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from phantom_host.duel_bot import PracticeBot
+from phantom_host.duel_tutorial import TutorialDuel
 from phantom_host.duel_engine import (
     HEARTBEAT_TIMEOUT_MS,
+    ROUND_MS,
     AbortCommand,
     CastCommand,
     CommandDecision,
@@ -37,6 +39,7 @@ from phantom_host.duel_models import (
     Source,
     Spell,
     WelcomeMessage,
+    TutorialContinueMessage,
     wire_dict,
 )
 
@@ -151,8 +154,9 @@ class DuelRoom:
         self.allow_replay = allow_replay
         self.room_id = room_id
         self.mode = mode
-        self._bot = PracticeBot() if mode is Mode.SOLO else None
-        self.engine = DuelEngine()
+        self._tutorial = TutorialDuel(clock_ms()) if mode is Mode.TUTORIAL else None
+        self._bot = self._tutorial or (PracticeBot() if mode is Mode.SOLO else None)
+        self.engine = DuelEngine(round_duration_ms=None if self._tutorial else ROUND_MS)
         self._rules = ruleset()
         self._sessions: dict[str, PlayerSession] = {}
         self._slots: dict[Slot, PlayerSession] = {}
@@ -185,8 +189,8 @@ class DuelRoom:
         if source is Source.REPLAY and not self.allow_replay:
             raise RoomError("virtual_source_disabled", status_code=403)
         async with self._lock:
-            if self.mode is Mode.SOLO and self._sessions:
-                raise RoomError("solo_room_private", status_code=409)
+            if self.mode is not Mode.DUEL and self._sessions:
+                raise RoomError(f"{self.mode.value}_room_private", status_code=409)
             available = next(
                 (slot for slot in (Slot.P1, Slot.P2) if slot not in self._slots),
                 None,
@@ -207,7 +211,9 @@ class DuelRoom:
             if self._bot is not None:
                 # Bots occupy a combat slot, but have no bearer token or browser session.
                 self._slots[Slot.P2] = PlayerSession(
-                    token="", slot=Slot.P2, name="Practice Wizard", source=Source.BOT,
+                    token="", slot=Slot.P2,
+                    name="Tutorial Wizard" if self._tutorial else "Practice Wizard",
+                    source=Source.BOT,
                     lease_started_at_ms=None, connected=True, input_healthy=True,
                 )
             self.room_generation += 1
@@ -363,6 +369,12 @@ class DuelRoom:
                 return self._ack_error_locked(
                     "cast", "stale_generation", request_id=message.attempt_id
                 )
+            if self._tutorial is not None and self.engine.phase in (Phase.COUNTDOWN, Phase.PLAYING):
+                rejection = self._tutorial.cast_rejection(self.engine, message.spell)
+                if rejection is None and self._tutorial.stage == "practice" and session.pending_attempts:
+                    rejection = "tutorial_wait_for_effect"
+                if rejection is not None:
+                    return self._ack_error_locked("cast", rejection, request_id=message.attempt_id)
             command_id, order = self._next_ids_locked()
             session.pending_attempts.add(attempt_key)
             self._queued.append(
@@ -383,6 +395,31 @@ class DuelRoom:
                 )
             )
             return None
+
+    async def submit_tutorial_continue(
+        self, *, peer: GamePeer, message: TutorialContinueMessage, receipt_ms: int,
+    ) -> AckMessage:
+        async with self._lock:
+            session = self._session_for_peer_locked(peer)
+            reason = None
+            if session is None:
+                reason = "not_authenticated"
+            elif self._tutorial is None:
+                reason = "not_tutorial"
+            elif not session.input_healthy or receipt_ms - session.last_heartbeat_ms >= HEARTBEAT_TIMEOUT_MS:
+                reason = "input_unhealthy"
+            elif self.engine.phase is not Phase.PLAYING:
+                reason = "phase"
+            elif message.round_id != self.engine.round_id:
+                reason = "wrong_round"
+            elif message.step != self._tutorial.step:
+                reason = "tutorial_wrong_step"
+            else:
+                reason = self._tutorial.continue_lesson(self.engine, receipt_ms)
+            return AckMessage(
+                command="tutorialContinue", accepted=reason is None, reason=reason,
+                state_version=self.engine.state_version,
+            )
 
     async def leave(self, *, peer: GamePeer, now_ms: int) -> None:
         async with self._lock:
@@ -444,9 +481,13 @@ class DuelRoom:
                 else:
                     pending.append(queued)
             self._queued = pending
+            if self._tutorial is not None:
+                self._tutorial.before_advance(self.engine, now_ms)
             decisions = self.engine.advance(
                 now_ms=now_ms, commands=[queued.command for queued in ready]
             )
+            if self._tutorial is not None:
+                self._tutorial.after_advance(self.engine, now_ms)
             self._advance_bot_locked(now_ms)
             queued_by_id = {
                 queued.command.command_id: queued
@@ -714,6 +755,7 @@ class DuelRoom:
                 )
             ),
             recent_events=tuple(self.engine.recent_events),
+            tutorial=self._tutorial.snapshot() if self._tutorial is not None else None,
         )
 
     @staticmethod

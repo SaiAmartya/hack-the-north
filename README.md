@@ -3,6 +3,9 @@
 A solo or two-player, motion-and-voice duel with an original pixel arena: your wizard faces a rival,
 five spells have independent cooldowns, and a Python referee owns health, effects and results.
 Speech stays on each laptop. Solo and multiplayer share the same combat rules.
+**Tutorial duel** teaches all five spells with animated gesture guides and a paced opponent.
+The homepage's optional **Dev mode** enables click casting and local raw wand/transcription logs.
+See the [tutorial, telemetry and speech QA record](docs/qa/tutorial-dev-release.md) for the latest changes and trace collection steps.
 
 **The launcher uses the shared Render referee.** Each laptop still runs its own frontend
 and speech helper, so pull the latest `main` and restart after updates. Use `--local-referee`

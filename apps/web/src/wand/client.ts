@@ -44,6 +44,7 @@ export type CapturedMotion = MotionRecord & {
   ageUpperMs: number;
   breaksGesture: boolean;
 };
+export type WandDiagnostic = { kind: string; atMs: number; data: unknown };
 
 export type WandSnapshot = {
   source: WandTransport["source"];
@@ -91,6 +92,7 @@ function randomNonzero(): number {
 }
 
 export class WandClient {
+  onDiagnostic?: (event: WandDiagnostic) => void;
   private snapshot: WandSnapshot;
   private generation = 0;
   private nonce = 0;
@@ -349,6 +351,7 @@ export class WandClient {
   }
 
   private fail(reason: string, recoverable = true, code = "input_interrupted"): void {
+    this.diagnose("wand.fault", { reason, recoverable, code, generation: this.generation });
     if (this.snapshot.phase === "fault" && this.snapshot.issue) return;
     if (recoverable && this.canRecover() && !this.recovering &&
         this.live()) {
@@ -442,6 +445,7 @@ export class WandClient {
       this.assertGeneration(generation);
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const sent = this.now();
+      this.diagnose("wand.control", { ...body, commandSeq: command.commandSeq, attempt });
       let rejectOperation: (error: Error) => void = () => undefined;
       const result = new Promise<{ ack: Ack; sent: number; received: number }>(
         (resolve, reject) => {
@@ -518,8 +522,13 @@ export class WandClient {
     try {
       record = decodeStatus(bytes);
     } catch {
+      this.diagnose("wand.status_rejected", { reason: "Malformed STATUS" });
       this.snapshot.feedbackWarning = "Malformed STATUS";
       return;
+    }
+    if (this.onDiagnostic) {
+      const { linkNonce: _nonce, ...status } = record;
+      this.diagnose("wand.status", status);
     }
     if (record.linkNonce !== this.nonce) return;
     if (record.kind === StatusKind.CommandResult) {
@@ -548,6 +557,7 @@ export class WandClient {
   }
 
   private rejectSample(reason: string): void {
+    this.diagnose("wand.sample_rejected", { reason, generation: this.generation, seq: this.previous?.seq });
     this.snapshot.rejected++;
     this.snapshot.issue = reason;
     this.broken = true;
@@ -556,6 +566,10 @@ export class WandClient {
   }
 
   private motion(bytes: Uint8Array): void {
+    if (this.onDiagnostic) this.diagnose("wand.raw_motion", {
+      hex: Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(" "),
+      generation: this.generation, phase: this.snapshot.phase,
+    });
     if (!this.sync || !this.live()) return;
     if (!this.checkTiming(this.now())) return;
     let record: MotionRecord;
@@ -572,6 +586,7 @@ export class WandClient {
     if (this.previous) {
       const order = classifySequence16(record.seq, this.previous.seq);
       if (order !== "newer") {
+        this.diagnose("wand.sample_rejected", { reason: order, seq: record.seq, generation: this.generation });
         this.snapshot.rejected++;
         return;
       }
@@ -612,6 +627,8 @@ export class WandClient {
       ageUpperMs: age + uncertainty,
       breaksGesture: this.broken,
     };
+    if (this.onDiagnostic)
+      this.diagnose("wand.sample", { ...sample, generation: this.generation, phase: this.snapshot.phase });
     if (this.broken) this.samples = [];
     this.broken = false;
     this.lastValid = this.now();
@@ -633,6 +650,10 @@ export class WandClient {
       validation.resolve();
     }
     for (const listener of this.listeners) listener(sample);
+  }
+
+  private diagnose(kind: string, data: unknown): void {
+    this.onDiagnostic?.({ kind, atMs: this.now(), data });
   }
 
   private checkTiming(now: number): boolean {

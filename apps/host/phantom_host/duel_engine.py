@@ -8,7 +8,7 @@ step: every impact due in that step resolves before knockout adjudication.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from phantom_host.duel_models import (
@@ -163,7 +163,8 @@ class CommandDecision:
 class DuelEngine:
     """One-room state machine with deterministic IDs and explicit time."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, round_duration_ms: int | None = ROUND_MS) -> None:
+        self.round_duration_ms = round_duration_ms
         self.room_generation = 1
         self.round_id = 0
         self.state_version = 0
@@ -200,6 +201,40 @@ class DuelEngine:
         self._evidence_order = {
             slot: deque(maxlen=EVIDENCE_LIMIT) for slot in occupied_slots
         }
+        self._touch()
+
+    def pause_timeline(self, *, after_ms: int, elapsed_ms: int) -> None:
+        """Freeze active combat deadlines while a tutorial instruction is read."""
+        if elapsed_ms <= 0 or self.phase is not Phase.PLAYING:
+            return
+        if self.round_ends_at_ms:
+            self.round_ends_at_ms += elapsed_ms
+        self.projectiles = [replace(
+            projectile,
+            launch_at_ms=projectile.launch_at_ms + elapsed_ms,
+            impact_at_ms=projectile.impact_at_ms + elapsed_ms,
+        ) for projectile in self.projectiles]
+        for player in self.players.values():
+            if player.shield_until_ms > after_ms:
+                player.shield_until_ms += elapsed_ms
+            if player.offense_locked_until_ms > after_ms:
+                player.offense_locked_until_ms += elapsed_ms
+            player.cooldown_until_ms = {
+                spell: deadline + elapsed_ms if deadline > after_ms else deadline
+                for spell, deadline in player.cooldown_until_ms.items()
+            }
+        self._touch()
+
+    def restore_training_checkpoint(self, *, health: dict[Slot, int], clear_effects: bool = False) -> None:
+        """Explicit lesson reset; never emit a fabricated spell/healing event."""
+        for slot, hp in health.items():
+            self.players[slot].hp = hp
+        if clear_effects:
+            self.projectiles.clear()
+            for player in self.players.values():
+                player.shield_until_ms = 0
+                player.offense_locked_until_ms = 0
+                player.cooldown_until_ms.clear()
         self._touch()
 
     def record_membership(
@@ -253,7 +288,7 @@ class DuelEngine:
                 ]
                 if due_impacts:
                     candidates.append(min(due_impacts))
-                if self.round_ends_at_ms <= now_ms:
+                if self.round_ends_at_ms and self.round_ends_at_ms <= now_ms:
                     candidates.append(self.round_ends_at_ms)
             if not candidates:
                 break
@@ -278,13 +313,15 @@ class DuelEngine:
 
             if self.phase is Phase.COUNTDOWN and self.countdown_ends_at_ms == at_ms:
                 self.phase = Phase.PLAYING
-                self.round_ends_at_ms = at_ms + ROUND_MS
+                self.round_ends_at_ms = (
+                    at_ms + self.round_duration_ms if self.round_duration_ms is not None else 0
+                )
                 self._event("roundStarted", at_ms)
 
             if self.phase is Phase.PLAYING:
                 self._resolve_impacts_at(at_ms)
 
-            if self.phase is Phase.PLAYING and self.round_ends_at_ms == at_ms:
+            if self.phase is Phase.PLAYING and self.round_ends_at_ms and self.round_ends_at_ms == at_ms:
                 if self._has_lethal_player():
                     self._finish_knockout(at_ms)
                 else:

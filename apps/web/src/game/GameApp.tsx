@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import qrcode from "qrcode-generator";
 import { DuelController, nameOf } from "./controller";
 import { DuelEffects } from "./effects";
+import { GestureGuide } from "./GestureGuide";
+import { TelemetryPanel } from "./TelemetryPanel";
 import type { GameEvent, Player, Spell, SpellRule } from "./contracts";
 import "./game.css";
 
@@ -118,7 +120,8 @@ function battleMessage(
   event: GameEvent | undefined,
   slot: string | undefined,
 ): string {
-  if (!event) return "Speak a spell and move your wand.";
+  const invitation = "Speak a spell and move your wand.";
+  if (!event) return invitation;
   const actor = event.actor === slot ? "You" : "Your rival";
   const target = event.target === slot ? "You" : "Your rival";
   if (event.type === "damage") return `${target} took ${event.amount} damage!`;
@@ -126,7 +129,79 @@ function battleMessage(
   if (event.type === "impactBlocked") return `${target} blocked the spell!`;
   if (event.type === "castAccepted" && event.spell)
     return `${actor} cast ${nameOf(event.spell)}!`;
-  return "Speak a spell and move your wand.";
+  return invitation;
+}
+
+function PlayOption({
+  checked, disabled, onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      className="play-option"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18" />
+      </svg>
+      <span>Dev mode</span>
+      <span className="option-track" aria-hidden="true"><i /></span>
+    </button>
+  );
+}
+
+const LESSONS: Record<Spell, { purpose: string; success: string }> = {
+  stupefy: { purpose: "A quick strike. Watch your rival's health fall.", success: "A direct hit. Each spell recharges on its own." },
+  protego: { purpose: "Block the incoming spell. Misses reset when you try again.", success: "Blocked. A shield stops one hit, then disappears." },
+  episkey: { purpose: "Recover some health while your attacks recharge.", success: "Health restored. Healing cannot exceed your maximum HP." },
+  expelliarmus: { purpose: "Disarm your rival to briefly stop their attacks.", success: "Disarmed. Your rival can still shield or heal." },
+  incendio: { purpose: "A slower, stronger strike. Watch it cross the courtyard.", success: "A powerful hit. Its longer cooldown rewards good timing." },
+};
+
+function TutorialLesson({ controller }: { controller: DuelController }) {
+  const lesson = controller.game.snapshot?.tutorial;
+  if (!lesson) return null;
+  const spell = lesson.spell;
+  const rule = controller.game.rules?.spells.find((candidate) => candidate.spell === spell);
+  if (!spell || lesson.stage === "free") {
+    return (
+      <section className="tutorial-panel tutorial-finale" aria-label="Tutorial guide">
+        <div className="tutorial-copy">
+          <span className="lesson-count">{lesson.stage === "free" ? "YOUR TURN" : "ALL FIVE SPELLS"}</span>
+          <h2>{lesson.stage === "free" ? "Put it together." : "Your first duel."}</h2>
+          <p>Thirty seconds. Use your spells to defeat the Practice Wizard.</p>
+        </div>
+        {lesson.stage !== "free" && <button onClick={() => controller.advanceTutorial()}>Begin duel <span aria-hidden="true">→</span></button>}
+      </section>
+    );
+  }
+  const complete = lesson.stage === "complete";
+  const raised = spell === "protego" || spell === "episkey";
+  const motion = raised ? "raise your wand and hold it still" : "jab forward, then return to rest";
+  return (
+    <section className={`tutorial-panel ${spell}`} aria-label="Tutorial guide" data-stage={lesson.stage}>
+      <GestureGuide spell={spell} />
+      <div className="tutorial-copy">
+        <span className="lesson-count">SPELL {lesson.step + 1} / 5{complete ? " · MASTERED" : ""}</span>
+        <h2>{nameOf(spell)}</h2>
+        <p>{complete ? LESSONS[spell].success : LESSONS[spell].purpose}</p>
+        {!complete && <p className="tutorial-action">Say “{nameOf(spell)}” as you {motion}.</p>}
+        {rule && <div className="lesson-stats"><span>{spellSummary(rule)}</span><span>{rule.cooldownMs / 1000}s cooldown</span></div>}
+      </div>
+      <div className="tutorial-next">
+        {lesson.stage === "instruction" ? <button onClick={() => controller.advanceTutorial()}>Try it <span aria-hidden="true">→</span></button>
+          : complete ? <button onClick={() => controller.advanceTutorial()}>Continue <span aria-hidden="true">→</span></button>
+          : <span className="lesson-listening" role="status">Your turn{controller.devMode ? " · or click the spell" : ""}</span>}
+        {lesson.paused && <span className="lesson-paused">Duel paused</span>}
+      </div>
+    </section>
+  );
 }
 
 export function GameApp() {
@@ -179,18 +254,19 @@ export function GameApp() {
   const wand = c?.wand?.getSnapshot(),
     wandReady = wand?.phase === "streaming";
   const mic = c?.speech.getSnapshot(),
-    micReady = mic?.phase === "listening" || mic?.phase === "busy";
+    micReady = c?.devMode || mic?.phase === "listening" || mic?.phase === "busy";
   const phone = c?.phoneSession?.getState();
   const pairingPhone = c?.source === "phone" && c.busy && !wandReady;
   const inRoom = !!c?.roomCode;
-  const solo = c?.mode === "solo";
+  const tutorial = c?.mode === "tutorial";
+  const solo = c?.mode === "solo" || tutorial;
   const result = game?.result;
   const now = c?.game.now() ?? 0;
   const issue =
     c?.issue ||
     c?.game.issue ||
     wand?.issue ||
-    (inRoom ? mic?.issue : "") ||
+    (inRoom && !c?.devMode ? mic?.issue : "") ||
     renderIssue;
   const checkingWand =
     c?.busy ||
@@ -249,7 +325,7 @@ export function GameApp() {
             : "Defeat!"
           : me?.ready
             ? solo ? "Wands up…" : "Waiting for your rival…"
-            : solo ? "Solo duel" : "Battle lobby";
+            : tutorial ? "Tutorial duel" : solo ? "Solo duel" : "Battle lobby";
   return (
     <main className={`game-shell ${inRoom ? "in-duel" : "at-home"}`}>
       <header className="game-top">
@@ -373,6 +449,10 @@ export function GameApp() {
                   <button className="secondary" onClick={() => void c.startDuel("solo")} disabled={c.busy}>
                     Duel a bot <span aria-hidden="true">→</span>
                   </button>
+                  <button className="tutorial-entry" onClick={() => void c.startDuel("tutorial")} disabled={c.busy}>
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 6c-3-3-7-3-10-1v14c3-2 7-2 10 1m0-14c3-3 7-3 10-1v14c-3-2-7-2-10 1V6Z" /></svg>
+                    Tutorial duel <span aria-hidden="true">→</span>
+                  </button>
                 </div>
                 <form
                   className="join-form"
@@ -451,10 +531,10 @@ export function GameApp() {
           {inRoom && (
             <div className="arena-title">
               <span>
-                <i /> {solo ? "SOLO DUEL" : "THE MOONLIT COURTYARD"}
+                <i /> {tutorial ? "TUTORIAL DUEL" : solo ? "SOLO DUEL" : "THE MOONLIT COURTYARD"}
               </span>
               <span>ROUND {game?.roundId || 1}</span>
-              {live && game?.phase === "playing" && (
+              {live && game?.phase === "playing" && (!tutorial || game.tutorial?.stage === "free") && (
                 <time className="round-clock" aria-label="Time remaining">
                   {Math.max(
                     0,
@@ -546,7 +626,9 @@ export function GameApp() {
                           ? "Battle connection interrupted."
                           : result?.outcome === "aborted"
                             ? "Reconnect, then ready up for a fresh round."
-                            : solo
+                            : tutorial
+                              ? "Learn one spell at a time."
+                              : solo
                               ? "Practice Wizard awaits."
                               : opponent?.connected
                               ? opponent.ready
@@ -602,6 +684,7 @@ export function GameApp() {
             )}
           </div>
         </div>
+        {tutorial && game?.phase === "playing" && c && !c.game.issue && <TutorialLesson controller={c} />}
         {inRoom && (
           <section className="battle-console" aria-label="Spell book">
             <div className="battle-dialogue" role="status">
@@ -635,11 +718,15 @@ export function GameApp() {
                   );
                   const support =
                     rule.spell === "protego" || rule.spell === "episkey";
+                  const SpellCard = c.devMode ? "button" : "div";
+                  const lessonSpell = game?.tutorial?.spell === rule.spell;
                   return (
-                    <div
+                    <SpellCard
                       key={rule.spell}
-                      className={`spell-slot ${rule.spell} ${remaining ? "recharging" : ""}`}
-                      aria-label={`${nameOf(rule.spell)}: ${remaining ? `recharging ${(remaining / 1000).toFixed(1)} seconds` : "ready"}`}
+                      className={`spell-slot ${rule.spell} ${remaining ? "recharging" : ""} ${c.devMode ? "spell-cast-button" : ""} ${lessonSpell ? "spell-lesson" : ""}`}
+                      aria-label={`${c.devMode ? "Cast " : ""}${nameOf(rule.spell)}: ${remaining ? `recharging ${(remaining / 1000).toFixed(1)} seconds` : "ready"}`}
+                      disabled={c.devMode ? !c.canCastSpell(rule.spell) : undefined}
+                      onClick={c.devMode ? () => c.castSpell(rule.spell) : undefined}
                     >
                       <div className="spell-title">
                         <SpellGlyph spell={rule.spell} />
@@ -672,13 +759,19 @@ export function GameApp() {
                           }}
                         />
                       </div>
-                    </div>
+                    </SpellCard>
                   );
                 })}
             </div>
           </section>
         )}
+        {inRoom && c?.devMode && <TelemetryPanel controller={c} />}
       </div>
+      {!inRoom && (
+        <footer className="play-options" aria-label="Play options">
+          <PlayOption checked={c?.devMode ?? false} disabled={!c || c.busy} onChange={(value) => c?.setDevMode(value)} />
+        </footer>
+      )}
       <div className="game-announcement" aria-live="polite">
         {issue ? (
           <span className="error-banner" role="alert">

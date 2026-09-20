@@ -231,6 +231,8 @@ describe("shared wand lifecycle", () => {
   it("clears evidence after a browser stall, drops buffered samples and keeps the link", async () => {
     const { client, transport } = await setup();
     await vi.advanceTimersByTimeAsync(100);
+    const diagnostics = vi.fn();
+    client.onDiagnostic = diagnostics;
     const delivered = vi.fn();
     client.onSample(delivered);
     const previous = client.getSnapshot().lastSample!;
@@ -242,12 +244,15 @@ describe("shared wand lifecycle", () => {
     expect(delivered).not.toHaveBeenCalled();
     expect(client.getSnapshot().phase).toBe("streaming");
     expect(client.getSamples()).toHaveLength(0);
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ kind: "wand.raw_motion", data: expect.objectContaining({ hex: expect.stringMatching(/^(?:[0-9a-f]{2} ){19}[0-9a-f]{2}$/) }) }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ kind: "wand.sample_rejected", data: expect.objectContaining({ reason: "Stale or future motion sample" }) }));
     // A genuinely fresh sample resumes the stream but starts a new gesture baseline.
     transport.endpoint.emitMotion({ ...previous, flags: MotionFlag.Valid, seq: previous.seq + 2, captureMs: Date.now() });
     await Promise.resolve();
     expect(delivered).toHaveBeenCalledTimes(1);
     expect(delivered.mock.calls[0][0].breaksGesture).toBe(true);
     expect(client.getSnapshot().phase).toBe("streaming");
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ kind: "wand.sample", data: expect.objectContaining({ axMg: previous.axMg, browserMs: expect.any(Number), breaksGesture: true }) }));
   });
 
   it("treats a page pause over two seconds as an interruption", async () => {

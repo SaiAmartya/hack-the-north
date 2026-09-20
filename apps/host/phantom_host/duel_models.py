@@ -34,6 +34,7 @@ class Source(str, Enum):
 class Mode(str, Enum):
     DUEL = "duel"
     SOLO = "solo"
+    TUTORIAL = "tutorial"
 
 
 class Spell(str, Enum):
@@ -174,13 +175,20 @@ class CastMessage(WireModel):
     input_generation: InputGeneration
 
 
+class TutorialContinueMessage(WireModel):
+    v: Literal[1] = 1
+    type: Literal["tutorialContinue"] = "tutorialContinue"
+    round_id: int = Field(ge=1, le=2_147_483_647)
+    step: int = Field(ge=0, le=5)
+
+
 class LeaveMessage(WireModel):
     v: Literal[1] = 1
     type: Literal["leave"] = "leave"
 
 
 GameMessage = Annotated[
-    HeartbeatMessage | ReadyMessage | CastMessage | LeaveMessage,
+    HeartbeatMessage | ReadyMessage | CastMessage | TutorialContinueMessage | LeaveMessage,
     Field(discriminator="type"),
 ]
 GAME_MESSAGE_ADAPTER: TypeAdapter[GameMessage] = TypeAdapter(GameMessage)
@@ -256,6 +264,13 @@ class DuelEvent(WireModel):
     reason: str | None = None
 
 
+class TutorialSnapshot(WireModel):
+    step: int = Field(ge=0, le=5)
+    spell: Spell | None
+    stage: Literal["instruction", "practice", "complete", "free"]
+    paused: bool
+
+
 class Snapshot(WireModel):
     room_id: RoomId = "main"
     mode: Mode = Mode.DUEL
@@ -270,6 +285,7 @@ class Snapshot(WireModel):
     players: dict[str, PlayerSnapshot | None]
     projectiles: tuple[ProjectileSnapshot, ...]
     recent_events: tuple[DuelEvent, ...]
+    tutorial: TutorialSnapshot | None = None
 
 
 class SnapshotMessage(WireModel):
@@ -291,7 +307,7 @@ class WelcomeMessage(WireModel):
 class AckMessage(WireModel):
     v: Literal[1] = 1
     type: Literal["ack"] = "ack"
-    command: Literal["ready", "cast"]
+    command: Literal["ready", "cast", "tutorialContinue"]
     request_id: str | None = None
     accepted: bool
     reason: str | None = None

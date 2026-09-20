@@ -4,8 +4,9 @@ import { SpeechClient, type SpeechDiscard, type SpeechOnset } from "../speech/cl
 import { WandClient } from "../wand/client";
 import { GameClient } from "./client";
 import { PresentationPhase } from "../wand/protocol";
-import { parseSnapshot } from "./contracts";
+import { parseRules, parseSnapshot } from "./contracts";
 import welcome from "../../../host/tests/fixtures/game-welcome-v1.json";
+import { DuelTelemetry } from "./telemetry";
 
 class FakeWebSocket {
   static readonly OPEN = 1;
@@ -48,6 +49,54 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   FakeWebSocket.instances = [];
+});
+
+it("makes click casting explicitly opt-in while preserving wand, cooldown and tutorial gates", () => {
+  const controller = new DuelController();
+  controller.renderingReady = true;
+  controller.motion.useDefaultProfile(0);
+  controller.wand = { getSnapshot: () => ({ phase: "streaming" }), disconnect: vi.fn() } as unknown as WandClient;
+  controller.game.rules = parseRules(welcome.rules);
+  controller.game.slot = "P1";
+  controller.game.snapshot = parseSnapshot(structuredClone({ ...welcome.snapshot, phase: "playing" }));
+  const send = vi.spyOn(controller.game, "send");
+  expect(controller.healthy()).toBe(false);
+  controller.castSpell("stupefy");
+  expect(send).not.toHaveBeenCalled();
+  controller.setDevMode(true);
+  expect(controller.healthy()).toBe(true);
+  expect(controller.canCastSpell("episkey")).toBe(false);
+  controller.castSpell("stupefy");
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "cast", spell: "stupefy", attemptId: expect.stringMatching(/^dev:/) }));
+  const own = controller.game.snapshot.players.P1!;
+  own.cooldownUntilMs.stupefy = controller.game.now() + 2_000;
+  expect(controller.canCastSpell("stupefy")).toBe(false);
+  controller.game.snapshot.tutorial = { step: 1, spell: "protego", stage: "instruction", paused: true };
+  expect(controller.canCastSpell("protego")).toBe(false);
+  controller.game.snapshot.tutorial = { step: 1, spell: "protego", stage: "practice", paused: false };
+  expect(controller.canCastSpell("incendio")).toBe(false);
+  expect(controller.canCastSpell("protego")).toBe(true);
+  vi.spyOn(controller.wand, "getSnapshot").mockReturnValue({ phase: "fault" } as ReturnType<WandClient["getSnapshot"]>);
+  expect(controller.canCastSpell("protego")).toBe(false);
+  controller.destroy();
+});
+
+it("keeps telemetry opt-in, ordered and bounded, including raw transcription text", () => {
+  const log = new DuelTelemetry();
+  log.record("speech.result", { transcript: "private" });
+  expect(log.snapshot().total).toBe(0);
+  log.enabled = true;
+  for (let index = 0; index < 30_005; index++) log.record("wand.raw_motion", { seq: index }, index);
+  log.record("speech.result", { transcript: "Protego", voiceStartMs: 30_000, voiceEndMs: 30_005 }, 30_010);
+  const snapshot = log.snapshot(2);
+  expect(snapshot.total).toBe(30_000);
+  expect(snapshot.dropped).toBe(6);
+  expect(snapshot.entries.map(entry => entry.kind)).toEqual(["wand.raw_motion", "speech.result"]);
+  const exported = JSON.parse(log.export({ source: "REAL BLE" }));
+  expect(exported.entries[0].data.seq).toBe(6);
+  expect(exported.entries.at(-1).data.transcript).toBe("Protego");
+  log.clear();
+  expect(log.snapshot()).toEqual({ entries: [], total: 0, dropped: 0 });
 });
 
 it("stops renewing badge feedback and clears evidence when the referee is lost", () => {

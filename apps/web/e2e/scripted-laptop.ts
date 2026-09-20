@@ -142,6 +142,7 @@ Object.defineProperty(navigator, "bluetooth", {
         const context = new AudioContext({ sampleRate: 16000 });
         const source = context.createConstantSource();
         source.offset.value = 0;
+        Reflect.set(window, "__scriptedMicrophone", source);
         const destination = context.createMediaStreamDestination();
         destination.channelCount = 1;
         source.connect(destination);
@@ -168,7 +169,7 @@ export async function snapshot(page: Page): Promise<Snapshot> {
   return page.evaluate(() => Reflect.get(window, "__duelController").game.snapshot);
 }
 
-export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolean; reason?: string }> {
+export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolean; reason?: string; projectileId?: string }> {
   return page.evaluate(async spellName => {
     const controller = Reflect.get(window, "__duelController");
     const badge = Reflect.get(window, "__scriptedBadge");
@@ -176,11 +177,11 @@ export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolea
     controller.fusion.reset(controller.generation);
     controller.motion.clearPending("scripted browser test");
     let gesture: { id: string; spell: string; startMs: number; endMs: number } | undefined;
-    let ack: { accepted: boolean; reason?: string } | undefined;
+    let ack: { accepted: boolean; reason?: string; projectileId?: string } | undefined;
     const originalGesture = controller.fusion.pushGesture.bind(controller.fusion);
     const originalAck = controller.game.onAck;
     controller.fusion.pushGesture = (evidence: typeof gesture) => { gesture = evidence; originalGesture(evidence); };
-    controller.game.onAck = (message: { command: string; accepted: boolean; reason?: string }) => {
+    controller.game.onAck = (message: { command: string; accepted: boolean; reason?: string; projectileId?: string }) => {
       originalAck(message);
       if (message.command === "cast") ack = message;
     };
@@ -210,11 +211,10 @@ export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolea
         result: controller.game.snapshot?.result, transitions: badge.healthTransitions,
       })}`);
       if (support) await badge.play("lower");
-      return { accepted: ack.accepted, reason: ack.reason };
+      return { accepted: ack.accepted, reason: ack.reason, projectileId: ack.projectileId };
     } finally {
       controller.fusion.pushGesture = originalGesture;
       controller.game.onAck = originalAck;
     }
   }, spell);
 }
-

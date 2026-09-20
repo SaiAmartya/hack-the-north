@@ -136,7 +136,7 @@ def test_session_without_code_creates_and_reserves_a_room_in_one_request():
 
 
 @pytest.mark.parametrize("source", ["phone", "replay", "bot"])
-@pytest.mark.parametrize("mode", ["duel", "solo"])
+@pytest.mark.parametrize("mode", ["duel", "solo", "tutorial"])
 def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(source, mode):
     from phantom_host.duel_registry import MAX_ROOMS
 
@@ -156,20 +156,21 @@ def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(s
         assert accepted.status_code == 200 and len(app.state.duel_rooms) == 1
 
 
-def test_solo_session_is_atomic_private_and_identified_on_the_wire():
+@pytest.mark.parametrize("game_mode", ["solo", "tutorial"])
+def test_bot_session_is_atomic_private_and_identified_on_the_wire(game_mode):
     app = create_app(DuelSettings(start_background_tick=False))
     with TestClient(app) as client:
         response = client.post(
             "/api/game/session", headers=ORIGIN_HEADERS,
-            json={"name": "Harry", "source": "ble", "mode": "solo"},
+            json={"name": "Harry", "source": "ble", "mode": game_mode},
         )
         assert response.status_code == 200
         session = response.json()
-        assert session["mode"] == "solo" and session["slot"] == "P1"
+        assert session["mode"] == game_mode and session["slot"] == "P1"
         assert len(app.state.duel_rooms) == 1
         room = app.state.duel_rooms.room_for_code(session["roomId"])
         assert room.session_for_token("") is None, "the bot must not acquire a player token"
-        for mode, expected in [("duel", "solo_room_private"), ("solo", "solo_requires_new_room")]:
+        for mode, expected in [("duel", f"{game_mode}_room_private"), (game_mode, f"{game_mode}_requires_new_room")]:
             outsider = client.post(
                 "/api/game/session", headers=ORIGIN_HEADERS,
                 json={"name": "Intruder", "source": "ble", "code": session["roomId"], "mode": mode},
@@ -179,11 +180,20 @@ def test_solo_session_is_atomic_private_and_identified_on_the_wire():
         with client.websocket_connect("/ws/game", headers=ORIGIN_HEADERS) as game:
             game.send_json({"v": 1, "type": "auth", "token": session["token"]})
             welcome = game.receive_json()
-            assert welcome["mode"] == welcome["snapshot"]["mode"] == "solo"
+            assert welcome["mode"] == welcome["snapshot"]["mode"] == game_mode
             opponent = welcome["snapshot"]["players"]["P2"]
-            assert opponent["name"] == "Practice Wizard"
+            assert opponent["name"] == ("Tutorial Wizard" if game_mode == "tutorial" else "Practice Wizard")
             assert opponent["source"] == "bot" and opponent["connected"] is True
             assert opponent["hp"] == 100 and opponent["ready"] is False
+            if game_mode == "tutorial":
+                assert welcome["snapshot"]["tutorial"] == {
+                    "step": 0, "spell": "stupefy", "stage": "instruction", "paused": True,
+                }
+                game.send_json({"v": 1, "type": "tutorialContinue", "roundId": 1, "step": 0})
+                ack = _receive_type(game, "ack")
+                assert ack["command"] == "tutorialContinue" and ack["accepted"] is False
+            else:
+                assert welcome["snapshot"]["tutorial"] is None
 
 
 def test_referee_brokers_wand_first_pairing_and_preserves_legacy_session_auth():

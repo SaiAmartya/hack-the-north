@@ -601,3 +601,177 @@ async def test_unused_solo_reservation_release_or_expiry_removes_bot(release):
     assert not room.has_sessions()
     assert not room.engine.players
     assert (await room.current_snapshot()).players == {"P1": None, "P2": None}
+
+
+@pytest.mark.asyncio
+async def test_tutorial_requires_real_effects_and_pauses_then_runs_short_free_duel():
+    from phantom_host.duel_models import TutorialContinueMessage
+
+    room = DuelRoom(clock_ms=FakeClock(), mode=Mode.TUTORIAL)
+    session = await room.create_session(name="Learner", source=Source.BLE)
+    peer = GamePeer()
+    await room.attach(token=session.token, peer=peer, now_ms=0)
+    now = 0
+    sequence = 0
+
+    async def tick(at_ms):
+        nonlocal now
+        now = at_ms
+        await room.heartbeat(peer=peer, message=_heartbeat(), receipt_ms=now)
+        await room.tick(now)
+        return await room.current_snapshot(now)
+
+    async def proceed(step, *, accepted=True):
+        reply = await room.submit_tutorial_continue(
+            peer=peer, receipt_ms=now,
+            message=TutorialContinueMessage(round_id=room.engine.round_id, step=step),
+        )
+        assert reply.accepted is accepted, reply
+        return reply
+
+    async def cast(spell):
+        nonlocal sequence
+        sequence += 1
+        message = CastMessage(
+            round_id=room.engine.round_id, attempt_id=f"tutorial-{sequence}", spell=spell,
+            gesture_id=f"gesture-{sequence}", speech_id=f"speech-{sequence}", input_generation=1,
+        )
+        reply = await room.submit_cast(peer=peer, message=message, receipt_ms=now)
+        await tick(now)
+        return reply
+
+    await room.submit_ready(peer=peer, message=_ready("tutorial-wand"), receipt_ms=0)
+    await tick(0)
+    # Even a delayed tick crossing the countdown and an entire normal round
+    # cannot time out training. An early cast cannot sneak across that boundary.
+    assert (await cast(Spell.STUPEFY)).reason == "tutorial_paused"
+    start = await tick(90_000)
+    assert start.phase is Phase.PLAYING and start.tutorial.stage == "instruction"
+    assert start.round_ends_at_ms == 0
+    # Read for longer than a whole round; no bot damage, timeout, or accepted casts.
+    idle = await tick(180_000)
+    assert idle.phase is Phase.PLAYING and idle.players["P1"].hp == 100
+    assert idle.projectiles == ()
+    assert (await cast(Spell.STUPEFY)).reason == "tutorial_paused"
+    assert (await proceed(1, accepted=False)).reason == "tutorial_wrong_step"
+    await proceed(0)
+    assert (await proceed(0, accepted=False)).reason == "tutorial_not_paused"
+    assert (await cast(Spell.INCENDIO)).reason == "tutorial_spell_required"
+    assert await cast(Spell.STUPEFY) is None
+    assert (await proceed(0, accepted=False)).reason == "tutorial_not_paused"
+    assert (await cast(Spell.STUPEFY)).reason == "tutorial_wait_for_effect"
+    hit = await tick(now + 2_000)
+    assert hit.players["P2"].hp == 80 and hit.tutorial.stage == "complete"
+    remaining = hit.players["P1"].cooldown_until_ms["stupefy"] - now
+    paused = await tick(now + 120_000)
+    assert paused.tutorial.stage == "complete" and paused.players["P2"].hp == 80
+    assert max(0, paused.players["P1"].cooldown_until_ms["stupefy"] - now) == max(0, remaining)
+
+    # Protego only succeeds on a real block. A miss pauses and offers a checkpoint retry.
+    await proceed(0)
+    assert (await room.current_snapshot(now)).tutorial.spell is Spell.PROTEGO
+    await proceed(1)
+    await tick(now + 1_500)
+    assert room.engine.projectiles[0].caster is Slot.P2
+    miss = await tick(now + 2_000)
+    assert miss.players["P1"].hp == 80 and miss.tutorial.stage == "instruction"
+    await tick(now + 120_000)
+    await proceed(1)
+    assert room.engine.players[Slot.P1].hp == 100
+    await tick(now + 1_500)
+    await tick(now + 1_300)
+    assert await cast(Spell.PROTEGO) is None
+    blocked = await tick(now + 700)
+    assert blocked.players["P1"].hp == 100 and blocked.tutorial.stage == "complete"
+    assert any(e.type == "impactBlocked" and e.target is Slot.P1 for e in blocked.recent_events)
+    guard_cd = blocked.players["P1"].cooldown_until_ms["protego"] - now
+    after_reading = await tick(now + 10_000)
+    assert after_reading.players["P1"].cooldown_until_ms["protego"] - now == guard_cd
+
+    # Episkey has to heal actual incoming damage, not cast into full health.
+    await proceed(1)
+    await proceed(2)
+    await cast(Spell.EPISKEY)
+    assert room._tutorial.stage == "practice" and room.engine.players[Slot.P1].hp == 100
+    await tick(now + 1_500)
+    hurt = await tick(now + 2_000)
+    assert hurt.players["P1"].hp == 80
+    assert await cast(Spell.EPISKEY) is None
+    healed = await room.current_snapshot(now)
+    assert healed.players["P1"].hp == 98 and healed.tutorial.stage == "complete"
+    assert any(e.type == "healed" and e.amount == 18 for e in healed.recent_events)
+
+    # Disarm is completed by its real offense lock, and Incendio by 30 damage.
+    await proceed(2)
+    await proceed(3)
+    await cast(Spell.EXPELLIARMUS)
+    disarmed = await tick(now + 2_200)
+    assert disarmed.players["P2"].hp == 70 and disarmed.tutorial.stage == "complete"
+    assert disarmed.players["P2"].offense_locked_until_ms == now + 1_000
+    await proceed(3)
+    await proceed(4)
+    await cast(Spell.INCENDIO)
+    burned = await tick(now + 2_400)
+    assert burned.players["P2"].hp == 40 and burned.tutorial.stage == "complete"
+    await proceed(4)
+    briefing = await tick(now + 70_000)
+    assert briefing.tutorial.step == 5 and briefing.tutorial.spell is None
+    assert briefing.phase is Phase.PLAYING and briefing.tutorial.paused
+    await proceed(5)
+    free = await room.current_snapshot(now)
+    assert free.tutorial.stage == "free" and free.round_ends_at_ms == now + 30_000
+    assert free.players["P1"].hp == free.players["P2"].hp == 100
+    assert all(value == 0 for player in free.players.values() for value in player.cooldown_until_ms.values())
+    assert await cast(Spell.INCENDIO) is None
+    await tick(now + 3_000)
+    assert any(e.actor is Slot.P2 and e.type == "castAccepted" for e in room.engine.recent_events)
+    finished = await tick(free.round_ends_at_ms)
+    assert finished.phase is Phase.RESULT and finished.result.reason == "timeout"
+
+    # Rematch restarts instruction zero with normal 100 HP countdown.
+    await room.submit_ready(peer=peer, message=_ready("tutorial-wand"), receipt_ms=now)
+    restarted = await tick(now)
+    assert restarted.round_id == 2 and restarted.phase is Phase.COUNTDOWN
+    assert restarted.tutorial.step == 0 and restarted.tutorial.stage == "instruction"
+    assert restarted.players["P1"].hp == restarted.players["P2"].hp == 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["heartbeat", "unhealthy", "disconnect"])
+async def test_tutorial_pauses_keep_real_input_failure_abort_and_lease_semantics(failure):
+    from phantom_host.duel_models import TutorialContinueMessage
+
+    room = DuelRoom(clock_ms=FakeClock(), mode=Mode.TUTORIAL)
+    session = await room.create_session(name="Learner", source=Source.BLE)
+    peer = GamePeer()
+    await room.attach(token=session.token, peer=peer, now_ms=0)
+    await room.submit_ready(peer=peer, message=_ready("tutorial-wand"), receipt_ms=0)
+    await room.tick(0)
+    await room.heartbeat(peer=peer, message=_heartbeat(), receipt_ms=3_000)
+    await room.tick(3_000)
+    assert (await room.current_snapshot(3_000)).tutorial.paused
+    if failure == "unhealthy":
+        await room.heartbeat(peer=peer, message=_heartbeat(healthy=False), receipt_ms=3_100)
+        denied = await room.submit_tutorial_continue(
+            peer=peer, message=TutorialContinueMessage(round_id=1, step=0), receipt_ms=3_100,
+        )
+        assert denied.reason == "input_unhealthy"
+        await room.tick(3_100)
+    elif failure == "disconnect":
+        await room.detach(peer=peer, now_ms=3_100)
+        await room.tick(3_100)
+    else:
+        denied = await room.submit_tutorial_continue(
+            peer=peer, message=TutorialContinueMessage(round_id=1, step=0), receipt_ms=4_500,
+        )
+        assert denied.reason == "input_unhealthy"
+        await room.tick(4_500)
+    assert room.engine.phase is Phase.RESULT and room.engine.result.outcome.value == "aborted"
+    assert room.engine.projectiles == []
+    if failure == "disconnect":
+        replacement = GamePeer()
+        welcome = await room.attach(token=session.token, peer=replacement, now_ms=3_200)
+        assert welcome.mode is Mode.TUTORIAL and welcome.snapshot.result.outcome.value == "aborted"
+        await room.detach(peer=replacement, now_ms=3_300)
+        await room.tick(3_300 + SESSION_LEASE_MS)
+        assert not room.has_sessions() and room.engine.players == {}

@@ -7,8 +7,8 @@ change certificate trust, open firewall rules or flash a badge automatically.
 
 **Run `python3 tools/run_game.py` for the hosted release.** Each laptop runs its own
 frontend and speech helper; Render runs only the shared referee. Pair a wand first, then
-choose **Duel a bot**, **Start a duel**, or **Join with code**. The exact deployed commit,
-rollout progress and QA results live in [the solo release record](qa/solo-release.md).
+choose **Tutorial duel**, **Duel a bot**, **Start a duel**, or **Join with code**. Current changes and
+QA results live in [the tutorial and speech release record](qa/tutorial-dev-release.md).
 Use `--local-referee` for a single laptop without the hosted referee, or
 [Section 4](#4-optional-local-and-lan-referee) to share a local referee between laptops.
 
@@ -106,6 +106,18 @@ ten minutes. **Leave duel** returns to room selection while keeping the connecte
 Say the exact incantation while moving the wand. Attack spells use a firm jab; support spells
 use a raise and hold. Cooldowns are independent, so a different ready move can follow immediately.
 
+**Tutorial duel**, directly beneath **Duel a bot**, teaches each spell's gesture and effect.
+Instructions pause the battle; choose **Try it**, speak while moving, and wait for the confirmed
+effect before continuing. Guided lessons have no time limit, and finish with a 30-second free duel.
+
+For diagnostics, enable **Dev mode** on the homepage before pairing. The spell cards then become
+cast buttons, and **Wand log** appears below the battle. Microphone readiness is optional for those
+clicks; the wand still needs to be connected. Select **Enable microphone** to collect speech trials.
+The local log correlates raw received packets,
+classifier decisions, raw transcription text and cast outcomes. **Pause view** keeps recording;
+**Export JSON** saves the bounded trace. See [trace collection steps](qa/tutorial-dev-release.md#physical-trace-collection).
+Normal play still requires both speech and movement; there is no motion-only option.
+
 | Spell | Movement | Result | Cooldown |
 | --- | --- | --- | --- |
 | Stupefy | Firm jab | 20 damage | 2 s |
@@ -128,7 +140,7 @@ failure.
 | Service | Default address | Responsibility |
 | --- | --- | --- |
 | Player frontend | `127.0.0.1:5173` | UI; tightly scoped game, speech and phone proxies |
-| Hosted referee | `https://wandduel-referee.onrender.com` | Authoritative solo and two-player rooms |
+| Hosted referee | `https://wandduel-referee.onrender.com` | Authoritative tutorial, solo and two-player rooms |
 | Optional local referee | `127.0.0.1:8000` with `--local-referee`, or laptop A's selected private IP | The same game rules without the hosted referee |
 | Speech helper | `127.0.0.1:8001` | Only this laptop's audio; per-launch authentication |
 

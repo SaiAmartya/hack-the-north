@@ -35,6 +35,12 @@ export class GameClient {
   now() {
     return performance.now() + (this.offset ?? 0);
   }
+  clockEstimate() {
+    return {
+      serverMinusBrowserMs: this.offset ?? null,
+      roundTripMs: Number.isFinite(this.bestRtt) ? this.bestRtt : null,
+    };
+  }
   /** Open a fresh duel room; the returned code is what the opponent types to join. */
   async createRoom(): Promise<string> {
     const lifecycle = this.lifecycle,
@@ -65,8 +71,8 @@ export class GameClient {
     const lifecycle = this.lifecycle;
     this.issue = "";
     this.mode = mode;
-    if (mode === "solo" && code !== undefined)
-      throw new Error("Start a new solo duel.");
+    if (mode !== "duel" && code !== undefined)
+      throw new Error("Start a new practice duel.");
     if (code !== undefined && !ROOM_CODE_PATTERN.test(code))
       throw new Error("Enter the six-character duel code.");
     const abort = new AbortController();
@@ -76,7 +82,7 @@ export class GameClient {
       const response = await fetch("/api/game/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Wizard", source, code, ...(mode === "solo" ? { mode } : {}) }),
+        body: JSON.stringify({ name: "Wizard", source, code, ...(mode !== "duel" ? { mode } : {}) }),
         signal: abort.signal,
       });
       if (!response.ok)
