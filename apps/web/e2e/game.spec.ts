@@ -566,6 +566,24 @@ test("wrong raw gestures fizzle locally, explain the correction, and allow the n
   await expect(fizzle).toHaveCount(0);
   await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(80);
   await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("complete");
+  const ownHud = page.getByRole("region", { name: "Your wizard", exact: true });
+  const rivalHud = page.getByRole("region", { name: "Rival wizard", exact: true });
+  const assertHudOwnership = async () => {
+    await expect(ownHud.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "100");
+    await expect(rivalHud.getByRole("meter", { name: "Opponent health", exact: true })).toHaveAttribute("value", "80");
+    await expect(page.locator(".health-panel").getByText("WIZARD", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".health-panel").getByText("DUELIST", { exact: true })).toHaveCount(0);
+    const ownBounds = (await ownHud.boundingBox())!;
+    const rivalBounds = (await rivalHud.boundingBox())!;
+    expect(ownBounds.x).toBeLessThan(rivalBounds.x);
+    expect(ownBounds.y + ownBounds.height).toBeLessThan(rivalBounds.y);
+  };
+  await assertHudOwnership();
+  await page.locator(".arena").screenshot({ path: "/tmp/wandduel-hud-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertHudOwnership();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.locator(".arena").screenshot({ path: "/tmp/wandduel-hud-mobile.png" });
   expect(errors).toEqual([]);
 });
 

@@ -27,7 +27,7 @@ The homepage is a quiet split composition: one title and two wand choices beside
 ## Battle composition
 
 - Back-facing player wizard stands lower-left; front-facing rival stands upper-right.
-- Rival HP panel upper-left; own HP panel lower-right. Numeric health accompanies a bar.
+- Own HP panel upper-left above the player's wizard; rival HP panel lower-right beneath the opponent. Show the player name, HP bar and numeric health, with a status only when active. No Wizard or Duelist captions.
 - The clock and round appear in a compact arena heading.
 - Five spell cards show names, damage/healing/effect and each cooldown. Always show the gesture; voice selects the spell in ordinary play. Only Dev mode makes them cast buttons. No global cooldown.
 - A short battle message reflects authoritative casts, blocks, hits, healing and result. Both players see the same server outcome from their own perspective.

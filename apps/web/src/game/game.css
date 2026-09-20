@@ -486,11 +486,11 @@ button.play-option:hover:enabled {
   min-width: 205px;
   image-rendering: auto;
 }
-.opponent-hud {
+.my-health {
   top: 9%;
   left: 5%;
 }
-.my-health {
+.opponent-hud {
   bottom: 8%;
   right: 5%;
 }
@@ -503,16 +503,6 @@ button.play-option:hover:enabled {
 .health-name strong {
   font-size: 17px;
   letter-spacing: 1.5px;
-}
-.health-name > span {
-  font-size: 8px;
-  letter-spacing: 0.5px;
-  color: #817762;
-}
-.health-name b {
-  color: #a48249;
-  font-size: 12px;
-  margin-left: 4px;
 }
 .health-track {
   display: flex;
@@ -559,6 +549,7 @@ meter::-moz-meter-bar {
   color: #938574;
 }
 .health-caption b {
+  margin-left: auto;
   font-size: 12px;
   color: #514a43;
   letter-spacing: 1px;
@@ -1203,9 +1194,6 @@ button.spell-cast-button:disabled {
   .health-name strong {
     font-size: 14px;
   }
-  .health-name > span {
-    font-size: 6px;
-  }
   .health-caption b {
     font-size: 10px;
   }
@@ -1376,19 +1364,16 @@ button.spell-cast-button:disabled {
     padding: 9px 10px;
     border-width: 2px;
   }
-  .opponent-hud {
+  .my-health {
     left: 4%;
     top: 5%;
   }
-  .my-health {
+  .opponent-hud {
     right: 4%;
     bottom: 6%;
   }
   .health-name strong {
     font-size: 12px;
-  }
-  .health-name > span {
-    font-size: 5px;
   }
   .health-track {
     margin: 7px 0 5px;
@@ -1400,10 +1385,6 @@ button.spell-cast-button:disabled {
     font-size: 5px;
   }
   .health-caption b {
-    font-size: 9px;
-  }
-  .health-name b {
-    margin: 0;
     font-size: 9px;
   }
   .spell-dock {

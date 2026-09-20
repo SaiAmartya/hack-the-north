@@ -72,6 +72,11 @@ function HealthPanel({
 }) {
   const health = player?.hp ?? 100,
     max = player?.maxHp ?? 100;
+  const status = player && player.shieldUntilMs > now
+    ? "◇ SHIELDED"
+    : player && player.offenseLockedUntilMs > now
+      ? "✧ DISARMED"
+      : health === 0 ? "FAINTED" : undefined;
   return (
     <section
       className={`health-panel ${own ? "my-health" : "opponent-hud"}`}
@@ -79,9 +84,6 @@ function HealthPanel({
     >
       <div className="health-name">
         <strong>{own ? "YOU" : player?.source === "bot" ? "PRACTICE" : "RIVAL"}</strong>
-        <span>
-          WIZARD <b>✦</b>
-        </span>
       </div>
       <div className="health-track">
         <span>HP</span>
@@ -94,15 +96,7 @@ function HealthPanel({
         />
       </div>
       <div className="health-caption">
-        <span>
-          {player && player.shieldUntilMs > now
-            ? "◇ SHIELDED"
-            : player && player.offenseLockedUntilMs > now
-              ? "✧ DISARMED"
-              : health === 0
-                ? "FAINTED"
-                : "DUELIST"}
-        </span>
+        {status && <span>{status}</span>}
         <b>
           {health} / {max}
         </b>
