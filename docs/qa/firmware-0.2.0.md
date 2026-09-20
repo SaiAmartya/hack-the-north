@@ -116,6 +116,10 @@ Then, in order, and please report each line's result verbatim:
    `uv run --python 3.12 --with bleak python tools/wand_ble_check.py --name WAND-xxxx --seconds 30`.
    *Report:* the PASS/FAIL lines plus the `MOTION ... Hz; seq gaps N, discontinuity flags N` line and the
    `command RTT ... p95` line. Target: ≥45 Hz, discontinuity flags ≤ 2, p95 ≤ 150 ms.
+   To watch the raw x/y/z samples themselves (six faces, jab amplitude, clipping), use
+   `uv run --python 3.12 --with bleak python tools/wand_motion_dump.py --name WAND-xxxx --seconds 20`
+   (`--all` prints every sample, `--csv <file>` records them); a still badge reads about 1000 mg
+   on the axis pointing up and the summary lists per-axis extremes and saturated counts.
 4. **Chrome stream.** Connect the badge in Wandduel, enable microphone, *Start calibration*, hold still
    1.5 s, jab three times, raise/hold/lower three times. *Report:* did calibration complete, how many
    attempts per spell, any coaching text shown, and whether practice casts of *Stupefy* and *Protego*

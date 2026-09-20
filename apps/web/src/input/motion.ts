@@ -85,13 +85,19 @@ type Features = {
   endPose: Vector;         // pose held (or reached) at the end
   endQuiet: boolean;       // the movement ended in a still hold (guards need this)
 };
-type ImpulseTemplate = { kind: "impulse"; direction: Vector; peak: number };
-type GuardTemplate = { kind: "guard"; direction: Vector; tiltDeg: number; peak: number };
+// A template without a direction is the quick-play generic profile: any firm stroke, any held raise.
+type ImpulseTemplate = { kind: "impulse"; direction?: Vector; peak: number };
+type GuardTemplate = { kind: "guard"; direction?: Vector; tiltDeg: number; peak: number };
 type GestureTemplate = ImpulseTemplate | GuardTemplate;
 
 const SPELLS: readonly SpellName[] = ["stupefy", "protego", "expelliarmus"];
 const CORE_SPELLS: readonly SpellName[] = ["stupefy", "protego"];
 const EXAMPLES_PER_SPELL = 3;
+// Quick-play profile: typical peaks so the play thresholds (35% / 30% of the template) land near the
+// calibration floors, without knowing which way this player's jab points.
+const DEFAULT_IMPULSE_PEAK_MG = 1_500;
+const DEFAULT_GUARD_TILT_DEG = 35;
+const DEFAULT_GUARD_PEAK_MG = 500;
 
 // Wii-remote style segmentation: a movement starts on a sharp change, continues through any number of
 // strokes, and ends when the wand is held still again in whatever pose it ended up. Nothing requires
@@ -174,6 +180,7 @@ export class MotionRecognizer {
   private armed = false;   // latched once the hand has been still for ARM_MS; cleared when a movement starts
   private burst?: Burst;
   private rejectedGuardReturn?: Vector;  // after a rejected raise, the lowering that undoes it is expected next
+  private lastGuardDirection?: Vector;   // quick play: the raise just accepted, so its lowering is not a second guard
   private evidenceSequence = 0;
   private lastIssue = "";
   private reason?: MotionRejectionReason;
@@ -188,6 +195,21 @@ export class MotionRecognizer {
     this.reset("Hold your wand still");
     this.phase = "stillness";
     this.setProgress("hold-still", 0, STILLNESS_MS);
+  }
+
+  /**
+   * Quick play: ready at once with a grip-agnostic profile. Any firm stroke is Stupefy and any held
+   * raise is Protego; the resting pose re-anchors from the first still quarter second, so no
+   * personal calibration is needed. Personal templates from beginCalibration remain more selective.
+   */
+  useDefaultProfile(generation: number): void {
+    if (!Number.isSafeInteger(generation) || generation < 0) throw new Error("Generation must be a non-negative integer");
+    this.reset("");
+    this.generation = generation;
+    this.templates.set("stupefy", { kind: "impulse", peak: DEFAULT_IMPULSE_PEAK_MG });
+    this.templates.set("protego", { kind: "guard", tiltDeg: DEFAULT_GUARD_TILT_DEG, peak: DEFAULT_GUARD_PEAK_MG });
+    this.phase = "ready";
+    this.setProgress("armed", 0, ARM_MS);
   }
 
   resumeCalibration(generation: number): boolean {
@@ -270,6 +292,7 @@ export class MotionRecognizer {
     this.examples.clear();
     this.templates.clear();
     this.enabledSpells = new Set(CORE_SPELLS);
+    this.lastGuardDirection = undefined;
     this.evidenceSequence = 0;
     this.lastIssue = reason;
     this.reason = undefined;
@@ -586,6 +609,7 @@ export class MotionRecognizer {
     }
     this.lastIssue = "";
     this.reason = undefined;
+    if (match.spell === "protego") this.lastGuardDirection = features.tiltDirection;
     this.recordCandidate(features, stopEvidence(how), "accepted");
     this.setProgress("ready", ARM_MS, ARM_MS);
     this.onGesture({
@@ -671,7 +695,7 @@ export class MotionRecognizer {
       if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > LOWERING_DEG)
         return "ignore";
       const stupefy = this.templates.get("stupefy");
-      if (stupefy?.kind === "impulse" && angleDegrees(features.direction, stupefy.direction) <= DIRECTION_TOLERANCE_DEG && features.peak >= stupefy.peak * 0.5)
+      if (stupefy?.kind === "impulse" && stupefy.direction && angleDegrees(features.direction, stupefy.direction) <= DIRECTION_TOLERANCE_DEG && features.peak >= stupefy.peak * 0.5)
         return { message: "That looked like a jab. Raise your wand into a guard and hold it.", reason: "unclear-direction" };
       if (features.peak < GUARD_MIN_PEAK_MG) {
         if (features.tiltDeg < GUARD_MIN_TILT_DEG) return "ignore";  // the hand drifting, not an attempt
@@ -693,7 +717,7 @@ export class MotionRecognizer {
     if (prior.length && angleDegrees(features.direction, mean(prior.map((example) => example.direction))) > CONSISTENCY_DEG)
       return { message: spell === "stupefy" ? "Jab the same way each time." : "Sweep the same way each time.", reason: "inconsistent-direction" };
     const stupefy = this.templates.get("stupefy");
-    if (spell === "expelliarmus" && stupefy?.kind === "impulse" && angleDegrees(stupefy.direction, features.direction) < SEPARATION_DEG)
+    if (spell === "expelliarmus" && stupefy?.kind === "impulse" && stupefy.direction && angleDegrees(stupefy.direction, features.direction) < SEPARATION_DEG)
       return { message: "Sweep sideways, away from your jab direction.", reason: "inconsistent-direction" };
     return undefined;
   }
@@ -711,12 +735,15 @@ export class MotionRecognizer {
       if (!template) continue;
       if (template.kind === "impulse") {
         if (reorientation) continue;
-        const angle = angleDegrees(features.direction, template.direction);
+        const angle = template.direction ? angleDegrees(features.direction, template.direction) : 0;
         if (angle <= DIRECTION_TOLERANCE_DEG && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
           features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35))
           impulses.push({ spell, angle, template });
       } else if (features.endQuiet) {
-        const angle = angleDegrees(features.tiltDirection, template.direction);
+        // The generic guard has no learned direction: the raise just accepted stands in for it, so
+        // lowering the wand afterwards is recognized as such instead of as a second guard.
+        const reference = template.direction ?? this.lastGuardDirection;
+        const angle = reference ? angleDegrees(features.tiltDirection, reference) : 0;
         if (features.tiltDeg >= GUARD_MIN_TILT_DEG && angle >= LOWERING_DEG) lowering = true;
         if (features.tiltDeg >= Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) && angle <= GUARD_TOLERANCE_DEG &&
           features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) && features.peak <= Math.max(template.peak * 4, 1_500))

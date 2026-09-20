@@ -4,7 +4,7 @@ The product is a game, not a development dashboard. A friendly wizard-school set
 
 ## Player experience
 
-One task per screen: **Connect wand → microphone → illustrated grip → Start calibration → visible stillness → three jabs → three guards → cast each spell → Ready → duel → rematch.** Calibration never starts behind microphone setup.
+One task per screen: **Connect wand → Join battle → battle lobby → Ready → duel → rematch.** The lobby is available as soon as the wand pairs; Ready still requires fresh input and a healthy microphone. **Practice first** offers the optional personal flow: microphone → illustrated grip → Start calibration → visible stillness → three jabs → three guards → cast each spell. **Join battle** can skip that walkthrough using the shared quick-play profile. Calibration never starts behind microphone setup.
 
 Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synthetic replay is never a third way to play.
 
@@ -57,4 +57,4 @@ Normal rendering caps at 1920×1080, low at 1280×720. Select quality before pla
 
 ## Review rule
 
-Keep engineering detail in script-driven QA, except the optional bounded input details above. Never hide a real gameplay failure to make the screen cleaner. A paused phone requires a foreground Resume tap; recovery clears interrupted examples/casts and requires a fresh Ready. Hardware qualification, acoustic accuracy and measured performance remain explicit reports outside the game.
+Keep engineering detail in script-driven QA, except the optional bounded input details above. Never hide a real gameplay failure to make the screen cleaner. Switching laptop tabs pauses input and aborts an active round while retaining the selected wand connection where available; return validates fresh input and requires a fresh Ready. A paused phone still requires a foreground Resume tap. Recovery clears interrupted examples/casts. Show microphone, wand and battle recovery in the lobby/result screen without requiring the player to pair again. Hardware qualification, acoustic accuracy and measured performance remain explicit reports outside the game.

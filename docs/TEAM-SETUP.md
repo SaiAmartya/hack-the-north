@@ -146,14 +146,22 @@ a plain `tools/run_game.py` uses those defaults, `--no-phone` ignores them for o
    changes route during play. Internet is needed for initial QR pairing/signalling either way.
 3. Move gently. Check **Sensor active** and **Reaching laptop** on the phone. If either fails,
    open Connection details; socket connection alone does not mean valid motion is arriving.
-4. Enable the **laptop** microphone and allow two seconds of quiet. Find a comfortable grip:
-   sideways/slightly diagonal is recommended; another consistent grip is valid. Tap
-   **Start calibration**, hold still for three visible seconds, then follow three jabs and
-   three guard examples. Calibration is movement-only. Do not jab harder to overcome a rejection.
-5. Follow spoken Stupefy/Protego practice, enable the laptop camera, then Ready when both players
-   have passed setup. Both speech and matching movement are required. Return to the starting
-   grip between attempts; **Reset grip** is for an intentional grip change without re-pairing.
+4. **Quick play (default):** after pairing, choose **Join battle** to enter the lobby immediately.
+   As soon as the wand streams, the laptop microphone is started for
+   you (allow it and give it two seconds of quiet) and a generic gesture profile is active: any
+   firm jab is Stupefy, any held raise is Protego, lowering the wand is ignored. Enable the
+   camera if you like, then **Ready**. Speech and a matching movement are still both required
+   for every cast.
+5. **Personal calibration (optional):** choose **Practice first**. **Join battle** can skip this
+   walkthrough at any point. Find a comfortable grip (sideways/slightly diagonal is recommended; another consistent
+   grip is valid), tap **Start calibration**, hold still for three visible seconds, then follow
+   three jabs and three guard examples, and cast each spell once in practice before Ready.
+   Calibration is movement-only. Do not jab harder to overcome a rejection. Return to the
+   starting grip between attempts; **Reset grip** is for an intentional grip change without
+   re-pairing.
 
+Switching laptop tabs retains the selected wand where available, pauses input and aborts an active
+duel. Returning checks fresh input; microphone and battle recovery stay available in the lobby.
 Locking/hiding Safari pauses input; use its foreground **Resume** action. Recovery cannot
 resume an aborted round or deliver buffered casts. Reloading either endpoint needs fresh QR
 approval. Phone Connection details offers an explicitly requested, sanitized last-minute trace;
@@ -227,7 +235,9 @@ no uptime guarantee. Checked against Render's documentation on September 19, 202
 - **It would sleep after 15 minutes without inbound traffic and take about a minute to wake**,
   so a keep-alive Worker ([`apps/referee-keepalive`](../apps/referee-keepalive/wrangler.jsonc),
   a Cloudflare cron trigger on the team account) fetches its health route every ten minutes
-  and it normally never sleeps. If that Worker is ever removed, the launcher still copes: it
+  and it normally never sleeps. Its last run is shown at
+  <https://wandduel-referee-keepalive.saiamartya19.workers.dev/> (a timestamp older than
+  ten minutes means the schedule stopped). If that Worker is ever removed, the launcher still copes: it
   wakes the referee before printing `Game ready`, pings it every four minutes while a stack
   runs, and player heartbeats keep it awake during play. Either way, **start both laptops'
   stacks a couple of minutes before a demo and leave them running.**

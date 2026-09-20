@@ -163,8 +163,12 @@ export function GameApp() {
     renderIssue;
   const now = c?.game.now() ?? 0;
   const result = game?.result;
+  const inLobby = c?.battleLobby && c.source && !pairingPhone;
+  const battle = live || inLobby;
+  const checkingWand = c?.busy || ["recovering", "validating", "synchronizing", "suspended"].includes(wand?.phase ?? "");
+  const startingMic = mic?.phase === "starting" || mic?.phase === "calibrating";
   return (
-    <main className={`game-shell ${live ? "in-duel" : ""}`}>
+    <main className={`game-shell ${battle ? "in-duel" : ""}`}>
       <header className="game-top">
         <a className="wordmark" href="/">
           wandduel<span>✦</span>
@@ -186,7 +190,7 @@ export function GameApp() {
           )}
         </div>
       </header>
-      <div className={`arena ${live ? "arena-live" : ""}`}>
+      <div className={`arena ${battle ? "arena-live" : ""}`}>
         <Video
           stream={c?.remoteVideo}
           className="opponent-video"
@@ -284,34 +288,49 @@ export function GameApp() {
             )}
           </>
         ) : (
-          <section className="setup-card">
-            {result ? (
+          <section className={`setup-card ${inLobby ? "battle-lobby" : ""}`}>
+            {inLobby && c ? (
               <>
-                <div className="result-star" aria-hidden="true">
-                  {result.outcome === "aborted" ? "↻" : "✦"}
-                </div>
                 <h1>
-                  {result.outcome === "aborted"
+                  {result?.outcome === "aborted"
                     ? "Duel paused"
-                    : result.outcome === "draw"
+                    : result?.outcome === "draw"
                       ? "A worthy match"
-                      : result.winner === slot
+                      : result && result.winner === slot
                         ? "Brilliantly cast!"
-                        : "Another round?"}
+                        : result ? "Another round?"
+                          : me?.ready ? "Waiting for your rival…" : "Battle lobby"}
                 </h1>
-                <button
-                  disabled={!c?.healthy() || !!me?.ready}
-                  onClick={() => c?.ready()}
-                >
-                  {me?.ready ? "Waiting for opponent…" : "Rematch"}
-                </button>
-                {result.outcome === "aborted" && (
-                  <button
-                    className="quiet"
-                    onClick={() => setRevision((n) => n + 1)}
-                  >
-                    Reconnect
+                <output className="pair-code" aria-label="Duel code">{c.roomCode}</output>
+                <p className="pair-status" role="status">
+                  {c.game.issue ? "Battle connection interrupted."
+                    : opponent?.connected ? (opponent.ready ? "Your rival is ready." : "Your rival has joined.")
+                      : "Share this code with your rival."}
+                </p>
+                <p>Stupefy: jab + speak. Protego: raise + speak.</p>
+                {c.game.issue ? (
+                  <button disabled={c.busy} onClick={() => void c.reconnectBattle()}>Reconnect battle</button>
+                ) : !wandReady ? (
+                  wand?.phase === "unsupported" ? <button onClick={() => void c.connect("phone")}>Use iPhone</button> :
+                  checkingWand ? <p role="status">Checking your wand…</p> :
+                  <button onClick={() => void (wand?.canRetry ? c.retryWand() : c.connect(c.source === "phone" ? "phone" : "ble"))}>
+                    Reconnect wand
                   </button>
+                ) : !micReady ? (
+                  <button disabled={startingMic} onClick={() => void c.startMic()}>
+                    {mic?.phase === "calibrating" ? "A moment of quiet…" : startingMic ? "Warming up…" : "Enable microphone"}
+                  </button>
+                ) : motion?.phase === "resuming" ? <p role="status">Hold your wand still for a moment.</p>
+                  : !c.practiceComplete() ? <p role="status">Cast each spell once, or practice your grip again.</p> : null}
+                <div className="ready-actions">
+                  {!c.localVideo && <button className="secondary" onClick={() => void c.startCamera(low)}>Enable camera</button>}
+                  <button disabled={!c.healthy() || !c.practiceComplete() || c.busy || !!me?.ready} onClick={() => c.ready()}>
+                    {me?.ready ? "Waiting for opponent…" : result ? "Rematch" : "Ready"}
+                  </button>
+                </div>
+                {c.localVideo && <Video stream={c.localVideo} className="setup-preview" label="Your camera" />}
+                {wandReady && !me?.ready && (
+                  <button className="quiet" onClick={() => c.startCalibration()}>Practice first</button>
                 )}
               </>
             ) : !c?.roomCode ? (
@@ -470,6 +489,13 @@ export function GameApp() {
                 )}
                 {phone?.relayAvailable && <button className="secondary" onClick={() => c.phoneSession?.chooseRelay()}>Use internet connection</button>}
               </>
+            ) : c.quickPlay ? (
+              <>
+                <div className="result-star" aria-hidden="true">✧</div>
+                <h1>Your wand is connected.</h1>
+                <button onClick={() => c.enterBattle()}>Join battle</button>
+                <button className="quiet" onClick={() => c.startCalibration()}>Practice first</button>
+              </>
             ) : !micReady ? (
               <>
                 <div className="result-star" aria-hidden="true">
@@ -573,7 +599,7 @@ export function GameApp() {
                 <h1>
                   {me?.ready
                     ? "Waiting for your rival…"
-                    : c.practiced.size < 2
+                    : !c.practiceComplete()
                       ? "Cast each spell once."
                       : "Ready to duel?"}
                 </h1>
@@ -591,7 +617,7 @@ export function GameApp() {
                   )}
                   <button
                     disabled={
-                      c.practiced.size < 2 || !c.healthy() || !!me?.ready
+                      !c.practiceComplete() || !c.healthy() || !!me?.ready
                     }
                     onClick={() => c.ready()}
                   >
@@ -606,6 +632,9 @@ export function GameApp() {
                   />
                 )}
               </>
+            )}
+            {wandReady && c && !c.battleLobby && !c.quickPlay && (
+              <button className="quiet" onClick={() => c.enterBattle()}>Join battle</button>
             )}
           </section>
         )}

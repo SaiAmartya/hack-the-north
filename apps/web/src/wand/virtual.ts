@@ -43,7 +43,7 @@ export class VirtualWandTransport implements WandTransport {
   private duplicate = false;
   private stale = false;
   private discontinuity = false;
-  readonly recover?: (onDisconnect: DisconnectListener) => Promise<void>;
+  readonly recover?: WandTransport["recover"];
 
   constructor(
     private readonly now = () => performance.now(),

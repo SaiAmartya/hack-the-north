@@ -40,7 +40,7 @@ messages or game sockets exist in this checkpoint. iPhone traffic is not enabled
 ## Your five-minute QA card
 
 **Setup:** Mac + desktop Chrome, no phone or badge required. Follow the current
-[README launch commands](../../README.md#run-the-current-checkpoint), then open
+[README launch commands](../../README.md#run-an-already-installed-checkout), then open
 `http://127.0.0.1:5173`. The optional isolated host is not needed for replay.
 
 | Step | Action | Expected |

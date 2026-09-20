@@ -101,19 +101,72 @@ export class GameClient {
     }
     this.token = session.token;
     this.slot = session.slot;
+    if (!(await this.openSocket()))
+      throw new Error(this.issue);
+  }
+  /** Reattach the existing reservation; false lets the caller explicitly rejoin an expired one. */
+  async reconnect(): Promise<boolean> {
+    if (!this.token || !this.slot) return false;
+    const lifecycle = ++this.lifecycle;
+    this.pendingConnect?.();
+    this.pendingConnect = undefined;
+    this.stopHeartbeat();
+    const previous = this.socket;
+    this.issue = "Reconnecting to the duel…";
+    this.onChange();
+    if (previous) {
+      previous.onclose = previous.onmessage = previous.onerror = previous.onopen = null;
+      if (previous.readyState !== WebSocket.CLOSED) {
+        // The referee retains its peer until the old close handshake completes.
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            if (previous.onclose === closed) previous.onclose = null;
+            if (this.pendingConnect === cancel) this.pendingConnect = undefined;
+            if (error) reject(error);
+            else resolve();
+          };
+          const closed = () => finish();
+          const cancel = () => finish(new Error("Connection cancelled"));
+          const timeout = setTimeout(() => {
+            this.issue = "Previous connection is still closing. Reconnect again.";
+            finish(new Error(this.issue));
+          }, 5000);
+          previous.onclose = closed;
+          this.pendingConnect = cancel;
+          if (previous.readyState !== WebSocket.CLOSING) previous.close();
+        });
+      }
+    }
+    if (lifecycle !== this.lifecycle) throw new Error("Connection cancelled");
+    this.socket = undefined;
+    return this.openSocket();
+  }
+  private async openSocket(): Promise<boolean> {
     const ws = (this.socket = new WebSocket(socketUrl("/ws/game")));
-    await new Promise<void>((resolve, reject) => {
+    const lifecycle = this.lifecycle;
+    const active = () => this.socket === ws && this.lifecycle === lifecycle;
+    return new Promise<boolean>((resolve, reject) => {
+      let welcomed = false;
       const timeout = setTimeout(() => {
+        if (!active()) return;
+        this.issue = "Game connection timed out. Reconnect to play.";
+        this.pendingConnect = undefined;
+        reject(new Error(this.issue));
         ws.close();
-        reject(new Error("Game connection timed out"));
       }, 5000);
       this.pendingConnect = () => {
         clearTimeout(timeout);
         reject(new Error("Connection cancelled"));
       };
-      ws.onopen = () => this.send({ type: "auth", token: this.token });
+      ws.onopen = () => {
+        if (active()) this.send({ type: "auth", token: this.token });
+      };
       ws.onmessage = (event) => {
-        if (this.socket !== ws) return;
+        if (!active()) return;
         try {
           if (String(event.data).length > 128_000)
             throw new Error("Game message too large");
@@ -126,10 +179,13 @@ export class GameClient {
             this.iceServers = parseIceServers(message.iceServers);
             this.connectionGeneration = message.connectionGeneration;
             this.offset = this.snapshot.serverNowMs - performance.now();
+            this.bestRtt = Infinity;
+            this.issue = "";
+            welcomed = true;
             clearTimeout(timeout);
             this.pendingConnect = undefined;
             this.startHeartbeat();
-            resolve();
+            resolve(true);
           } else if (message.type === "snapshot") {
             const next = parseSnapshot(message.snapshot);
             if (
@@ -152,8 +208,15 @@ export class GameClient {
           } else if (message.type === "signal")
             this.onSignal(message.payload, message.generation);
           else if (message.type === "ack") this.onAck(message);
-          else if (message.type === "error")
-            this.issue = "Game connection needs restarting.";
+          else if (message.type === "error") {
+            if (!welcomed && message.code === "auth_failed") {
+              clearTimeout(timeout);
+              this.pendingConnect = undefined;
+              this.issue = "Battle session ended. Rejoin the duel.";
+              resolve(false);
+              ws.close();
+            } else this.issue = "Game connection needs restarting.";
+          }
           this.onChange();
         } catch {
           this.issue = "Game connection needs restarting.";
@@ -161,17 +224,22 @@ export class GameClient {
         }
       };
       ws.onerror = () => {
+        if (!active()) return;
         clearTimeout(timeout);
+        this.pendingConnect = undefined;
+        this.issue = "Cannot reach the game server";
         reject(new Error("Cannot reach the game server"));
+        ws.close();
       };
       ws.onclose = () => {
+        if (!active()) return;
         clearTimeout(timeout);
+        this.pendingConnect = undefined;
         reject(new Error("Game disconnected"));
-        if (this.socket === ws) {
+        if (!this.issue || this.issue === "Reconnecting to the duel…")
           this.issue = "Game disconnected. Reconnect to play.";
-          this.stopHeartbeat();
-          this.onChange();
-        }
+        this.stopHeartbeat();
+        this.onChange();
       };
     });
   }

@@ -103,6 +103,7 @@ it("keeps recognition paused through motion calibration and enables it for pract
   vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
   const controller = new DuelController();
   controller.roomCode = "K7X2PD";
+  controller.quickPlay = false; // the personal calibration flow
   const recognition = vi.spyOn(controller.speech, "setRecognitionEnabled");
   const microphone = vi.spyOn(controller.speech, "start").mockResolvedValue();
   await controller.startMic();
@@ -239,6 +240,96 @@ it("keeps the trusted-LAN code flow when hosted pairing is disabled", async () =
   controller.destroy();
 });
 
+it("quick play readies with a connected wand: generic profile, microphone started, no practice", async () => {
+  vi.spyOn(WandClient.prototype, "onSample").mockImplementation(() => () => {});
+  vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
+  const getSnapshot = WandClient.prototype.getSnapshot;
+  vi.spyOn(WandClient.prototype, "getSnapshot").mockImplementation(function (this: WandClient) {
+    return { ...getSnapshot.call(this), phase: "streaming" };
+  });
+  vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
+  vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
+  const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
+  const microphone = vi.spyOn(controller.speech, "start").mockResolvedValue();
+  expect(controller.quickPlay).toBe(true);
+  await controller.connect("ble");
+  await flushPromises();
+  expect(controller.motion.getState().phase).toBe("ready");
+  expect(controller.motion.getState().calibratedSpells).toEqual(["stupefy", "protego"]);
+  expect(microphone).toHaveBeenCalledTimes(1);
+  expect(controller.practiceComplete()).toBe(true);
+  controller.enterBattle();
+  expect(controller.battleLobby).toBe(true);
+
+  controller.startCalibration();
+  expect(controller.battleLobby).toBe(false);
+  expect(controller.quickPlay).toBe(false);
+  expect(controller.motion.getState().phase).toBe("stillness");
+  expect(controller.practiceComplete()).toBe(false);
+  controller.enterBattle();
+  expect(controller.battleLobby).toBe(true);
+  expect(controller.quickPlay).toBe(true);
+  expect(controller.motion.getState().phase).toBe("ready");
+  expect(controller.healthy()).toBe(false);
+  controller.destroy();
+});
+
+it("pauses hidden input without disconnecting the wand or automatically readying on return", async () => {
+  vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
+  const getSnapshot = WandClient.prototype.getSnapshot;
+  vi.spyOn(WandClient.prototype, "getSnapshot").mockImplementation(function (this: WandClient) {
+    return { ...getSnapshot.call(this), phase: "streaming" };
+  });
+  vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
+  vi.spyOn(SpeechClient.prototype, "start").mockResolvedValue();
+  vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
+  const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
+  await controller.connect("ble");
+  controller.enterBattle();
+  const disconnect = vi.spyOn(controller.wand!, "disconnect");
+  const suspend = vi.spyOn(controller.wand!, "suspend").mockImplementation(() => {});
+  const resume = vi.spyOn(controller.wand!, "resume").mockResolvedValue();
+  const stopSpeech = vi.spyOn(controller.speech, "stop");
+  const send = vi.spyOn(controller.game, "send");
+  controller.fusion.beginUtterance({ id: "before-hide", generation: controller.generation, startMs: 0 });
+  const visibility = vi.mocked(document.addEventListener).mock.calls.find(([name]) => name === "visibilitychange")![1] as () => void;
+  Reflect.set(document, "hidden", true);
+  visibility();
+  expect(suspend).toHaveBeenCalledOnce();
+  expect(stopSpeech).toHaveBeenCalledOnce();
+  expect(controller.healthy()).toBe(false);
+  expect(controller.fusion.getState().activeUtterance).toBeUndefined();
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "heartbeat", healthy: false }));
+  Reflect.set(document, "hidden", false);
+  visibility();
+  await flushPromises();
+  expect(resume).toHaveBeenCalledOnce();
+  expect(disconnect).not.toHaveBeenCalled();
+  expect(send.mock.calls.some(([message]) => message.type === "ready")).toBe(false);
+  expect(controller.battleLobby).toBe(true);
+  controller.destroy();
+});
+
+it.each([true, false])("restores the battle independently of the wand (retained session: %s)", async (retained) => {
+  const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
+  controller.source = "ble";
+  const reattach = vi.spyOn(controller.game, "reconnect").mockResolvedValue(retained);
+  const connect = vi.spyOn(controller.game, "connect").mockResolvedValue();
+  const pair = vi.spyOn(controller, "connect");
+  const ready = vi.spyOn(controller, "ready");
+  await controller.reconnectBattle();
+  expect(reattach).toHaveBeenCalledOnce();
+  expect(connect.mock.calls).toEqual(retained ? [] : [["ble", "K7X2PD"]]);
+  expect(pair).not.toHaveBeenCalled();
+  expect(ready).not.toHaveBeenCalled();
+  expect(controller.motion.getState().phase).toBe("ready");
+  expect(controller.busy).toBe(false);
+  controller.destroy();
+});
+
 it("re-establishes the referee session when a badge retry succeeds after an initial fault", async () => {
   vi.spyOn(WandClient.prototype, "onSample").mockImplementation(() => () => {});
   let phase: "fault" | "streaming" = "fault";
@@ -259,4 +350,3 @@ it("re-establishes the referee session when a badge retry succeeds after an init
   expect(controller.busy).toBe(false);
   controller.destroy();
 });
-

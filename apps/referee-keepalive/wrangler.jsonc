@@ -9,8 +9,8 @@
   "account_id": "a692c9c2b82d15e9fc3c7bba88240b8b",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-19",
-  // No public URL: the Worker only runs on its schedule.
-  "workers_dev": false,
+  // The workers.dev URL answers GET / with the last scheduled run (JSON), nothing else.
+  "workers_dev": true,
   "preview_urls": false,
   "observability": {
     "enabled": false
@@ -20,5 +20,12 @@
   },
   "vars": {
     "REFEREE_HEALTH_URL": "https://wandduel-referee.onrender.com/api/game/health"
-  }
+  },
+  // One key, rewritten every run: the evidence that the schedule is firing.
+  "kv_namespaces": [
+    {
+      "binding": "KEEPALIVE",
+      "id": "4cc1508af6c14fefb216c7064d3cd607"
+    }
+  ]
 }

@@ -373,6 +373,19 @@ progress {
 .in-duel .source-tag {
   color: #b9accb;
 }
+.battle-lobby {
+  margin: 24px 0;
+  border: 1px solid #9d784452;
+  border-radius: 24px;
+  background: #15121feb;
+}
+.battle-lobby .pair-status {
+  color: #d5c7e7;
+}
+.battle-lobby .pair-code {
+  background: #332743;
+  border-color: #8b729b;
+}
 .arena-live {
   background: radial-gradient(ellipse at 50% 40%, #392944, #16121e);
   min-height: calc(100svh - 104px);

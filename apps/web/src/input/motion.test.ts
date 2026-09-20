@@ -441,6 +441,32 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     }
   });
 
+  it("quick play is ready at once: any firm jab is Stupefy, a held raise is Protego, lowering is not", () => {
+    const harness = new MotionHarness();
+    harness.recognizer.useDefaultProfile(harness.generation);
+    const state = harness.recognizer.getState();
+    expect(state.phase).toBe("ready");
+    expect(state.calibratedSpells).toEqual(["stupefy", "protego"]);
+    harness.feed(harness.builder.stillness(600));
+    harness.feed(harness.builder.jab(900, 0));
+    harness.feed(harness.builder.jab(950, 1));
+    expect(harness.evidence.map((item) => item.spell)).toEqual(["stupefy", "stupefy"]);
+    harness.feed(harness.builder.guard(33));
+    expect(harness.evidence.map((item) => item.spell)).toEqual(["stupefy", "stupefy", "protego"]);
+    harness.feed(harness.builder.lower(33));
+    expect(harness.evidence).toHaveLength(3);
+    harness.feed(harness.builder.guard(36));
+    expect(harness.evidence.map((item) => item.spell).at(-1)).toBe("protego");
+    expect(harness.evidence.every((item) => item.generation === harness.generation)).toBe(true);
+    // A weak wobble stays silent even without a personal profile.
+    harness.feed(harness.builder.jab(300, 0));
+    expect(harness.evidence).toHaveLength(4);
+    // Personal calibration replaces the generic profile the usual way.
+    harness.still();
+    expect(harness.recognizer.getState().calibratedSpells).toEqual([]);
+    expect(() => harness.recognizer.useDefaultProfile(-1)).toThrow();
+  });
+
   it("stays silent on the recorded resting hold", () => {
     const evidence: GestureEvidence[] = [];
     const h = new MotionHarness();

@@ -52,6 +52,7 @@ export type WandSnapshot = {
     | "connecting"
     | "synchronizing"
     | "recovering"
+    | "suspended"
     | "validating"
     | "streaming"
     | "unsupported"
@@ -114,7 +115,11 @@ export class WandClient {
   private cues: (FeedbackCue & { expiresAt: number })[] = [];
   private pumping = false;
   private recovering = false;
-  private carrierRecovering = false;  // transport.recover() in flight: its retry loop owns disconnects
+  private carrierGeneration = 0;
+  private carrierRecovering = 0;
+  private carrierOperation?: Promise<unknown>;
+  private resuming?: Promise<void>;
+  private carrierSession?: { nonce: number; sequence: number };
   private recoveryTimes: number[] = [];
   private validation?: { startedAt: number; since?: number; resolve: () => void; reject: (error: Error) => void };
 
@@ -152,7 +157,7 @@ export class WandClient {
     const generation = this.generation;
     this.snapshot = this.emptySnapshot("connecting");
     try {
-      await this.transport.connect(this.disconnected(generation));
+      await this.runCarrier(this.transport.connect(this.disconnected(++this.carrierGeneration)));
       await this.handshake(generation);
     } catch (error) {
       if (generation === this.generation)
@@ -162,7 +167,7 @@ export class WandClient {
 
   private disconnected(generation: number) {
     return (failure?: TransportFailure) => {
-      if (generation !== this.generation || this.carrierRecovering) return;
+      if (generation !== this.carrierGeneration || this.carrierRecovering === generation || this.snapshot.phase === "suspended") return;
       this.fail(failure?.message ?? "Device connection ended", failure?.recoverable ?? false,
         failure?.code ?? "device_disconnected");
     };
@@ -172,7 +177,16 @@ export class WandClient {
     return Boolean(this.transport.recover) && (this.transport.canRecover ? this.transport.canRecover() : true);
   }
 
-  private async handshake(generation: number): Promise<void> {
+  private async runCarrier<T>(operation: Promise<T>): Promise<T> {
+    this.carrierOperation = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.carrierOperation === operation) this.carrierOperation = undefined;
+    }
+  }
+
+  private async handshake(generation: number, requireValidation = Boolean(this.transport.recover), session?: { nonce: number; sequence: number }): Promise<void> {
       this.assertGeneration(generation);
       const info = decodeInfo(await this.transport.readInfo());
       this.assertGeneration(generation);
@@ -193,10 +207,12 @@ export class WandClient {
         if (generation === this.generation) this.motion(bytes);
       });
       this.assertGeneration(generation);
-      this.nonce = randomNonzero();
+      this.nonce = session?.nonce ?? randomNonzero();
       this.snapshot.phase = "synchronizing";
-      await this.command({ opcode: ControlOpcode.Open }, true);
+      if (session) this.sequence = session.sequence;
+      else await this.command({ opcode: ControlOpcode.Open }, true);
       this.assertGeneration(generation);
+      this.carrierSession = { nonce: this.nonce, sequence: this.sequence };
       let best: Sync | undefined;
       for (let i = 0; i < 5; i++) {
         const candidate = await this.probe();
@@ -213,17 +229,19 @@ export class WandClient {
       this.status(health);
       const inputFault = this.inputFault(this.snapshot.healthFlags);
       if (inputFault) throw new Error(inputFault);
-      this.snapshot.phase = this.transport.recover ? "validating" : "streaming";
+      this.snapshot.phase = requireValidation ? "validating" : "streaming";
       this.lastTick = this.lastValid = this.now();
       this.syncDue = this.now() + 5000;
       this.timer = setInterval(() => this.tick(), 25);
-      if (this.transport.recover) {
+      if (requireValidation) {
         await new Promise<void>((resolve, reject) => { this.validation = { startedAt: this.now(), resolve, reject }; });
         this.assertGeneration(generation);
       }
   }
 
   disconnect(): void {
+    this.carrierGeneration++;
+    this.carrierSession = undefined;
     this.clearProtocol();
     this.recovering = false;
     this.transport.disconnect();
@@ -247,10 +265,37 @@ export class WandClient {
   }
 
   suspend(): void {
-    this.fail(
-      "Page hidden or suspended; reconnect and establish a fresh baseline",
-      false, "page_hidden",
-    );
+    if (["disconnected", "fault", "unsupported", "suspended"].includes(this.snapshot.phase)) return;
+    const info = this.snapshot.info;
+    this.clearProtocol();
+    this.recovering = false;
+    this.resuming = undefined;
+    this.snapshot = { ...this.snapshot, phase: "suspended", info, issue: "Return to the duel to resume your wand." };
+  }
+
+  async resume(): Promise<void> {
+    if (this.resuming) return this.resuming;
+    if (this.snapshot.phase !== "suspended") return;
+    const generation = this.generation;
+    const operation = (async () => {
+      // A chooser or carrier recovery already in flight still owns its physical link.
+      try { await this.carrierOperation; } catch { /* The fresh handshake reports the remaining failure. */ }
+      if (generation !== this.generation) return;
+      const session = this.carrierSession;
+      if (this.canRecover()) {
+        await this.recover("Restoring your wand connection", undefined, session);
+      } else {
+        try {
+          await this.handshake(generation, true, session);
+        } catch (error) {
+          if (generation === this.generation)
+            this.fail(error instanceof Error ? error.message : "Wand connection failed", false);
+        }
+      }
+    })();
+    this.resuming = operation;
+    try { await operation; }
+    finally { if (this.resuming === operation) this.resuming = undefined; }
   }
 
   /** Explicit retry after bounded automatic carrier recovery. Never resumes combat. */
@@ -335,25 +380,31 @@ export class WandClient {
     };
   }
 
-  private async recover(reason: string, code?: string): Promise<void> {
+  private async recover(reason: string, code?: string, session?: { nonce: number; sequence: number }): Promise<void> {
     const info = this.snapshot.info;
+    this.carrierSession = session;
     this.clearProtocol();
     const generation = this.generation;
     this.recovering = true;
     this.snapshot = { ...this.snapshot, phase: "recovering", info, issue: reason,
       failureCode: code, canRetry: false };
     try {
-      this.carrierRecovering = true;
+      const carrierGeneration = ++this.carrierGeneration;
+      this.carrierRecovering = carrierGeneration;
+      let retained: boolean | void;
       try {
-        await this.transport.recover!(this.disconnected(generation));
+        retained = await this.runCarrier(this.transport.recover!(this.disconnected(carrierGeneration), Boolean(session)).then(retained => {
+          if (carrierGeneration === this.carrierGeneration && !retained) this.carrierSession = undefined;
+          return retained;
+        }));
       } finally {
-        this.carrierRecovering = false;
+        if (this.carrierRecovering === carrierGeneration) this.carrierRecovering = 0;
       }
       this.assertGeneration(generation);
       // The carrier is back; a fault during the new handshake's validation may recover again
       // (within the budget) instead of ending in a manual fault.
       this.recovering = false;
-      await this.handshake(generation);
+      await this.handshake(generation, true, retained ? session : undefined);
     } catch (error) {
       if (generation === this.generation) {
         this.fail(error instanceof Error ? error.message : reason, false, code);
@@ -385,6 +436,7 @@ export class WandClient {
       linkNonce: this.nonce,
     };
     this.sequence = (this.sequence + 1) & 0xffff;
+    if (this.carrierSession?.nonce === this.nonce) this.carrierSession.sequence = this.sequence;
     const bytes = encodeControl(command);
     for (let attempt = 0; ; attempt++) {
       this.assertGeneration(generation);
@@ -611,6 +663,7 @@ export class WandClient {
   }
 
   private tick(): void {
+    if (!this.live()) return;
     const now = this.now();
     if (!this.checkTiming(now)) return;
     this.lastTick = now;

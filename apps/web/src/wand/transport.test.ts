@@ -268,6 +268,47 @@ describe("BLE adapter against a fake browser API, not physical BLE", () => {
     expect(f.connect).toHaveBeenCalledTimes(6);
   });
 
+  it("reuses an open GATT carrier, replaces subscriptions and reports later loss to its current owner", async () => {
+    const f = fixture();
+    const lost = vi.fn(), resumedLost = vi.fn();
+    await f.transport.connect(lost);
+    const oldSample = vi.fn(), newSample = vi.fn();
+    await f.transport.subscribe("motion", oldSample);
+    await expect(f.transport.recover(resumedLost, true)).resolves.toBe(true);
+    await f.transport.subscribe("motion", newSample);
+    await f.transport.subscribe("motion", newSample);
+    f.characteristic.emit();
+    expect(oldSample).not.toHaveBeenCalled();
+    expect(newSample).toHaveBeenCalledOnce();
+    expect(f.connect).toHaveBeenCalledOnce();
+    expect(f.requestDevice).toHaveBeenCalledOnce();
+    expect(f.server.disconnect).not.toHaveBeenCalled();
+    f.device.dispatchEvent(new Event("gattserverdisconnected"));
+    expect(lost).not.toHaveBeenCalled();
+    expect(resumedLost).toHaveBeenCalledOnce();
+    f.characteristic.emit();
+    expect(newSample).toHaveBeenCalledOnce();
+  });
+
+  it("fences pending operations on a retained carrier without overlapping GATT calls", async () => {
+    const f = fixture();
+    await f.transport.connect(vi.fn());
+    const read = deferred<DataView>();
+    vi.spyOn(f.characteristic, "readValue").mockImplementationOnce(() => read.promise);
+    const pending = expect(f.transport.readInfo()).rejects.toThrow("Connection superseded");
+    await flushOperations();
+    await f.transport.recover(vi.fn(), true);
+    const write = vi.spyOn(f.characteristic, "writeValueWithResponse");
+    const next = f.transport.writeControl(new Uint8Array(20));
+    await flushOperations();
+    expect(write).not.toHaveBeenCalled();
+    read.resolve(new DataView(new ArrayBuffer(20)));
+    await pending; await next;
+    expect(write).toHaveBeenCalledOnce();
+    expect(f.server.disconnect).not.toHaveBeenCalled();
+    f.transport.disconnect();
+  });
+
   it("refuses recovery before any badge was chosen and yields to a newer owner", async () => {
     const f = fixture();
     const transport = new BleWandTransport({ requestDevice: f.requestDevice }, async () => {});

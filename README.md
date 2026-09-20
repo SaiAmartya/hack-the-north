@@ -51,6 +51,12 @@ referee awake; if it was asleep the first launch waits about a minute for it), t
 exact URL in desktop Chrome; a tab typed as `localhost:5173` is redirected there. One player clicks
 **Start a duel** and reads the six-character code to the other, who clicks **Join with code**;
 each then connects a badge or iPhone. One referee serves several duels at once, one per code.
+After pairing, **Join battle** opens the multiplayer lobby immediately. Quick play starts the
+microphone and uses a shared gesture profile (any firm jab is Stupefy, any held raise is Protego).
+Ready still requires healthy wand/microphone input, and every cast requires speech and movement.
+**Practice first** offers personal calibration; **Join battle** can skip that walkthrough.
+Switching laptop tabs pauses an active duel while retaining the wand connection where available;
+returning validates fresh input before a new Ready. See [multiplayer checks and remaining work](docs/qa/multiplayer-entry.md).
 
 `--local-referee` runs the referee on this laptop instead: use it offline, for the LAN setup
 in the guide, or for scripted QA. The stable build does not hot-reload; restart after changing
@@ -84,4 +90,3 @@ gateway badge, webcam markers and a cloud vision call). That code, its tests and
 were removed from the tree on September 19, 2026 (commit `530a0ba`); they remain in git history
 up to commit `8f49b12` (`git log --all -- badges apps/host/phantom_host/main.py`). Nothing in the current
 platform depends on it.
-

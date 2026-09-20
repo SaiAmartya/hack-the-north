@@ -34,8 +34,8 @@ export interface BluetoothAccess {
 export interface WandTransport {
   readonly source: "REPLAY" | "REAL BLE" | "PHONE";
   connect(onDisconnect: DisconnectListener): Promise<void>;
-  /** Resets a logical link, retaining only an already approved phone pairing. */
-  recover?(onDisconnect: DisconnectListener): Promise<void>;
+  /** True means the existing protocol session survived on a retained carrier. */
+  recover?(onDisconnect: DisconnectListener, preserveConnection?: boolean): Promise<boolean | void>;
   /** Whether recover() has something to resume (a chosen badge, an approved pair). */
   canRecover?(): boolean;
   readInfo(): Promise<Uint8Array>;
@@ -59,6 +59,8 @@ export class BleWandTransport implements WandTransport {
   private service?: GattService;
   private tail: Promise<unknown> = Promise.resolve();
   private cleanup: (() => void)[] = [];
+  private subscriptions = new Map<NotificationKind, () => void>();
+  private onDisconnect?: DisconnectListener;
   /** The badge the player chose; kept across link loss so recovery needs no chooser. */
   private chosen?: BleDevice;
 
@@ -85,13 +87,19 @@ export class BleWandTransport implements WandTransport {
 
   /**
    * Bounded automatic carrier recovery for the badge the player already chose: no chooser, a
-   * fresh GATT link (or the still-open one), then the client performs a full new handshake.
+   * fresh GATT link, or the still-open session when explicitly preserving a paused connection.
    */
   readonly canRecover = (): boolean => Boolean(this.chosen?.gatt);
 
-  readonly recover = async (onDisconnect: DisconnectListener): Promise<void> => {
+  readonly recover = async (onDisconnect: DisconnectListener, preserveConnection = false): Promise<boolean | void> => {
     const device = this.chosen;
     if (!device?.gatt) throw new Error("Choose your badge again.");
+    if (preserveConnection && this.service && this.device === device) {
+      this.generation++;
+      this.clearSubscriptions();
+      this.onDisconnect = onDisconnect;
+      return true;
+    }
     this.disconnect();
     const generation = this.generation;
     let lastError: unknown;
@@ -138,13 +146,10 @@ export class BleWandTransport implements WandTransport {
     // A drop while attaching rejects the attach above and stays inside the retry loop; only a
     // link that reached service discovery reports loss to the client.
     const lost = () => {
-      if (
-        generation !== this.generation ||
-        deviceOwners.get(device.id) !== owner
-      )
-        return;
+      if (deviceOwners.get(device.id) !== owner) return;
+      const notify = this.onDisconnect;
       this.disconnect();
-      onDisconnect({
+      notify?.({
         code: "device_disconnected",
         message: "Badge connection lost.",
         recoverable: true,
@@ -155,6 +160,7 @@ export class BleWandTransport implements WandTransport {
       device.removeEventListener("gattserverdisconnected", lost),
     );
     this.service = service;
+    this.onDisconnect = onDisconnect;
   }
 
   readInfo() {
@@ -178,12 +184,13 @@ export class BleWandTransport implements WandTransport {
     return this.serial(async (service, generation) => {
       const characteristic = await service.getCharacteristic(WAND_UUIDS[kind]);
       this.assertGeneration(generation);
+      this.subscriptions.get(kind)?.();
       const changed = () => {
         if (generation !== this.generation || !characteristic.value) return;
         listener(bytesOf(characteristic.value));
       };
       characteristic.addEventListener("characteristicvaluechanged", changed);
-      this.cleanup.push(() =>
+      this.subscriptions.set(kind, () =>
         characteristic.removeEventListener(
           "characteristicvaluechanged",
           changed,
@@ -214,12 +221,19 @@ export class BleWandTransport implements WandTransport {
   }
 
   private release(): void {
+    this.clearSubscriptions();
     for (const remove of this.cleanup.splice(0)) remove();
+    this.onDisconnect = undefined;
     this.service = undefined;
     if (this.device && this.owner)
       disconnectOwnedDevice(this.device, this.owner);
     this.device = undefined;
     this.owner = undefined;
+  }
+
+  private clearSubscriptions(): void {
+    for (const remove of this.subscriptions.values()) remove();
+    this.subscriptions.clear();
   }
 
   private assertGeneration(generation: number): void {

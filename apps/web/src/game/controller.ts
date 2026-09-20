@@ -25,6 +25,9 @@ export class DuelController {
   source?: Source;
   /** The duel this player started or joined; every referee session is created inside it. */
   roomCode = "";
+  /** Shared gesture profile without personal calibration or required practice casts. */
+  quickPlay = true;
+  battleLobby = false;
   pairingCode = "";
   phoneUrl = "";
   phoneClaim?: HostedClaim;
@@ -99,11 +102,11 @@ export class DuelController {
     this.unsubscribers.push(
       this.speech.onOnset((e) => {
         // Calibration speech cannot become a cast just as the last example ends.
-        if (this.motion.getState().phase === "ready")
+        if (!document.hidden && this.motion.getState().phase === "ready")
           this.fusion.beginUtterance({ ...e, generation: this.generation });
       }),
       this.speech.onSpeech((e) => {
-        if (this.motion.getState().phase === "ready")
+        if (!document.hidden && this.motion.getState().phase === "ready")
           this.fusion.pushUtterance({
             ...e,
             generation: this.generation,
@@ -157,13 +160,25 @@ export class DuelController {
     if (document.hidden) {
       this.generation++;
       this.fusion.reset(this.generation);
+      this.motion.clearPending();
       this.wand?.suspend();
       this.speech.stop();
       this.sendUnhealthyHeartbeat();
-      this.issue = "Paused. Reconnect your wand to continue.";
+      this.issue = "Paused while you’re away.";
       this.onChange();
-    }
+    } else void this.resumeInput();
   };
+  private async resumeInput() {
+    const wand = this.wand;
+    await wand?.resume();
+    if (this.dead || document.hidden || this.wand !== wand) return;
+    this.syncInputState();
+    this.issue = "";
+    this.autoStartMic();
+    if (this.game.issue || (wand?.getSnapshot().phase === "streaming" && !this.game.snapshot))
+      await this.reconnectBattle();
+    this.onChange();
+  }
   private sendUnhealthyHeartbeat() {
     this.game.send({ type: "heartbeat", clientMs: performance.now(), inputGeneration: this.generation, healthy: false });
   }
@@ -205,6 +220,47 @@ export class DuelController {
     this.issue = "";
     this.roomCode = code;
     this.onChange();
+  }
+  enterBattle() {
+    if (this.wand?.getSnapshot().phase !== "streaming") return;
+    this.battleLobby = true;
+    if (!this.practiceComplete()) {
+      this.quickPlay = true;
+      this.generation++;
+      this.fusion.reset(this.generation);
+      this.speech.setRecognitionEnabled(false);
+      this.motion.useDefaultProfile(this.generation);
+      this.practiced.clear();
+      this.calibrationIdentity = "";
+      this.sendUnhealthyHeartbeat();
+    }
+    this.autoStartMic();
+    this.onChange();
+  }
+  async reconnectBattle() {
+    if (this.busy || !this.source || !this.roomCode) return;
+    this.busy = true;
+    this.issue = "";
+    const request = this.attemptGeneration;
+    this.generation++;
+    this.fusion.reset(this.generation);
+    this.speech.setRecognitionEnabled(false);
+    if (this.quickPlay) this.motion.useDefaultProfile(this.generation);
+    else if (!this.motion.resumeCalibration(this.generation)) this.motion.reset();
+    this.onChange();
+    try {
+      const reattached = await this.game.reconnect();
+      if (this.dead || request !== this.attemptGeneration) return;
+      if (!reattached) await this.game.connect(this.source, this.roomCode);
+    } catch (error) {
+      if (!this.dead && request === this.attemptGeneration)
+        this.issue = error instanceof Error ? error.message : "Could not reconnect to the battle.";
+    } finally {
+      if (!this.dead && request === this.attemptGeneration) {
+        this.busy = false;
+        this.onChange();
+      }
+    }
   }
   async connect(source: "ble" | "phone" = "ble") {
     const request = ++this.attemptGeneration;
@@ -292,6 +348,7 @@ export class DuelController {
       if (request !== this.attemptGeneration || this.dead) return;
       const state = this.wand!.getSnapshot();
       if (state.phase === "unsupported") return;
+      if (["suspended", "recovering", "validating"].includes(state.phase)) return;
       if (state.phase === "fault" && state.canRetry) {
         this.pairingCode = this.phoneUrl = "";
         this.phoneClaim = undefined;
@@ -305,8 +362,8 @@ export class DuelController {
       this.phoneUrl = "";
       this.phoneClaim = undefined;
       this.phoneClaimApproved = false;
-      // Calibration deliberately waits for the player's explicit grip/start action.
       this.syncInputState();
+      this.autoStartMic();
     } catch (error) {
       if (request === this.attemptGeneration) {
         this.wand?.disconnect();
@@ -349,6 +406,7 @@ export class DuelController {
         await this.game.connect("ble", this.roomCode);
       if (request !== this.attemptGeneration || this.dead) return;
       this.syncInputState();
+      this.autoStartMic();
     } catch (error) {
       if (request === this.attemptGeneration)
         this.issue = error instanceof Error ? error.message : "Could not reconnect";
@@ -399,7 +457,7 @@ export class DuelController {
     const wand = this.wand!;
     this.unsubscribers.push(
       wand.onSample((sample) => {
-        if (this.wand !== wand) return;
+        if (this.wand !== wand || document.hidden) return;
         this.syncInputState();
         if (sample.breaksGesture) this.fusion.reset(this.generation);
         this.motion.push(sample, this.generation);
@@ -424,7 +482,8 @@ export class DuelController {
       this.observedWandGeneration = state.generation;
       this.generation++;
       this.fusion.reset(this.generation);
-      this.motion.clearPending();
+      if (this.quickPlay) this.motion.useDefaultProfile(this.generation);
+      else this.motion.clearPending();
       this.practiced.clear();
       this.feedbackKey = "";
       this.speech.setRecognitionEnabled(false);
@@ -432,7 +491,8 @@ export class DuelController {
     }
     const streaming = state.phase === "streaming";
     if (streaming && !this.wasStreaming) {
-      if (this.calibrationIdentity && this.calibrationIdentity === this.inputIdentity()) {
+      if (this.quickPlay) this.motion.useDefaultProfile(this.generation);
+      else if (this.calibrationIdentity && this.calibrationIdentity === this.inputIdentity()) {
         if (!this.motion.resumeCalibration(this.generation)) this.motion.reset();
       } else this.motion.reset();
       this.issue = "";
@@ -445,8 +505,20 @@ export class DuelController {
     }
     this.wasStreaming = streaming;
   }
+  /** Quick play starts the microphone as soon as the wand streams; failures show the usual mic step. */
+  private autoStartMic() {
+    if (document.hidden || !this.quickPlay || this.wand?.getSnapshot().phase !== "streaming") return;
+    if (this.speech.getSnapshot().phase !== "off" && this.speech.getSnapshot().phase !== "fault") return;
+    void this.startMic();
+  }
+  /** Whether the player may Ready: quick play needs no practice casts, the personal flow needs both spells. */
+  practiceComplete() {
+    return this.quickPlay || this.practiced.size >= 2;
+  }
   startCalibration() {
     if (this.wand?.getSnapshot().phase !== "streaming") return;
+    this.quickPlay = false;
+    this.battleLobby = false;
     this.syncInputState();
     this.generation++;
     this.practiced.clear();
@@ -523,7 +595,8 @@ export class DuelController {
   }
   ready() {
     const info = this.wand?.getSnapshot().info;
-    if (!info || !this.healthy() || this.practiced.size < 2) return;
+    if (!info || !this.healthy() || !this.practiceComplete()) return;
+    this.battleLobby = true;
     this.game.send({
       type: "ready",
       ready: true,
@@ -534,7 +607,7 @@ export class DuelController {
     });
   }
   private syncGame() {
-    if (this.game.issue) {
+    if (this.game.issue || document.hidden) {
       // Do not perpetually renew an old battle state after losing its authority.
       this.wand?.stopFeedback();
       this.feedbackKey = "";
@@ -555,7 +628,7 @@ export class DuelController {
     const own = state.players[slot],
       other = state.players[slot === "P1" ? "P2" : "P1"];
     if (other?.connected) {
-      const key = `${other.slot}:${state.roomGeneration}`;
+      const key = `${other.slot}:${state.roomGeneration}:${this.game.connectionGeneration}`;
       if (key !== this.videoPeerKey) {
         this.videoPeerKey = key;
         this.peer.start(

@@ -300,16 +300,128 @@ describe("shared wand lifecycle", () => {
     expect(client.getSnapshot().phase).toBe("streaming");
     expect(client.getSnapshot().accepted).toBeGreaterThan(40);
   });
-  it("resynchronizes across device clock wrap without accepting old callbacks", async () => {
+  it("resynchronizes across device clock wrap without accepting suspended callbacks", async () => {
     vi.setSystemTime(0xfffffff0);
     const { client } = await setup();
     await vi.advanceTimersByTimeAsync(5500);
     expect(client.getSnapshot().phase).toBe("streaming");
     expect(client.getSnapshot().accepted).toBe(275);
     client.suspend();
-    expect(client.getSnapshot().phase).toBe("fault");
+    expect(client.getSnapshot().phase).toBe("suspended");
     await vi.advanceTimersByTimeAsync(1000);
-    expect(client.getSnapshot().phase).toBe("fault");
+    expect(client.getSnapshot().phase).toBe("suspended");
+  });
+  it.each(["REAL BLE", "PHONE"] as const)("retains %s pairing while hidden and validates a fresh session once on return", async source => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    const transport: WandTransport = {
+      source, connect: cb => endpoint.connect(cb), recover: vi.fn(async (cb, preserve) => {
+        if (source === "REAL BLE" && preserve) return true;
+        await endpoint.connect(cb);
+      }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb),
+      writeControl: vi.fn(data => endpoint.writeControl(data)),
+      disconnect: vi.fn(() => endpoint.disconnect()),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect(); await vi.advanceTimersByTimeAsync(1100); await connecting;
+    const generation = client.getSnapshot().generation;
+    const closes = vi.mocked(transport.disconnect).mock.calls.length;
+    const delivered = vi.fn(); client.onSample(delivered);
+    client.suspend(); client.suspend();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(client.getSnapshot().phase).toBe("suspended");
+    expect(client.getSnapshot().lastSample).toBeUndefined();
+    expect(client.getSamples()).toHaveLength(0);
+    expect(delivered).not.toHaveBeenCalled();
+    expect(transport.disconnect).toHaveBeenCalledTimes(closes);
+    const first = client.resume(), duplicate = client.resume();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.getSnapshot().phase).toBe("validating");
+    expect(delivered).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(600); await Promise.all([first, duplicate]);
+    expect(client.getSnapshot().phase).toBe("streaming");
+    expect(client.getSnapshot().generation).toBeGreaterThan(generation);
+    expect(transport.recover).toHaveBeenCalledOnce();
+    expect(transport.disconnect).toHaveBeenCalledTimes(closes);
+    expect(delivered.mock.calls[0][0].breaksGesture).toBe(true);
+    const opens = vi.mocked(transport.writeControl).mock.calls.map(([bytes]) => decodeControl(bytes)).filter(command => command.opcode === ControlOpcode.Open);
+    expect(opens).toHaveLength(source === "REAL BLE" ? 1 : 2);
+    if (source === "PHONE") expect(opens[1].linkNonce).not.toBe(opens[0].linkNonce);
+  });
+  it("waits for an in-flight chooser before resuming, and a second suspension cancels validation", async () => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    let completeConnection!: () => void;
+    const transport: WandTransport = {
+      source: "REAL BLE",
+      connect: async cb => { await new Promise<void>(resolve => { completeConnection = resolve; }); await endpoint.connect(cb); },
+      recover: vi.fn(async (cb, preserve) => {
+        if (preserve) return true;
+        await endpoint.connect(cb);
+      }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb), writeControl: data => endpoint.writeControl(data),
+      disconnect: vi.fn(() => endpoint.disconnect()),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect();
+    client.suspend();
+    const resuming = client.resume();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(transport.recover).not.toHaveBeenCalled();
+    completeConnection();
+    await vi.advanceTimersByTimeAsync(500); await connecting;
+    expect(client.getSnapshot().phase).toBe("validating");
+    client.suspend();
+    await resuming;
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(client.getSnapshot().phase).toBe("suspended");
+    expect(transport.disconnect).toHaveBeenCalledTimes(1);
+    const retry = client.resume();
+    await vi.advanceTimersByTimeAsync(1100); await retry;
+    expect(client.getSnapshot().phase).toBe("streaming");
+  });
+  it.each(["carrier", "sync"] as const)("retains the open badge session through a second hide during %s recovery", async interruption => {
+    const endpoint = new VirtualWandTransport(() => Date.now());
+    let release!: () => void;
+    let interrupt = false;
+    const transport: WandTransport = {
+      source: "REAL BLE", connect: cb => endpoint.connect(cb),
+      recover: vi.fn(async (cb, preserve) => {
+        if (interrupt && interruption === "carrier") {
+          interrupt = false;
+          await new Promise<void>(resolve => { release = resolve; });
+        }
+        if (preserve) return true;
+        await endpoint.connect(cb);
+      }),
+      readInfo: () => endpoint.readInfo(), readStatus: () => endpoint.readStatus(),
+      subscribe: (kind, cb) => endpoint.subscribe(kind, cb),
+      writeControl: vi.fn(async data => {
+        endpoint.writeControl(data);
+        if (interrupt && interruption === "sync" && decodeControl(data).opcode === ControlOpcode.Sync) {
+          interrupt = false;
+          await new Promise<void>(resolve => { release = resolve; });
+        }
+      }),
+      disconnect: vi.fn(() => endpoint.disconnect()),
+    };
+    const client = new WandClient(transport, () => Date.now()); clients.push(client);
+    const connecting = client.connect(); await vi.advanceTimersByTimeAsync(1100); await connecting;
+    client.suspend(); interrupt = true;
+    const first = client.resume();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.getSnapshot().phase).toBe(interruption === "carrier" ? "recovering" : "synchronizing");
+    client.suspend();
+    const second = client.resume();
+    release();
+    await vi.advanceTimersByTimeAsync(1100); await Promise.all([first, second]);
+    expect(client.getSnapshot().phase).toBe("streaming");
+    expect(transport.disconnect).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(transport.recover)?.mock.calls.map(([, preserve]) => preserve)).toEqual([true, true]);
+    const commands = vi.mocked(transport.writeControl).mock.calls.map(([bytes]) => decodeControl(bytes));
+    expect(commands.filter(command => command.opcode === ControlOpcode.Open)).toHaveLength(1);
+    expect(new Set(commands.map(command => command.commandSeq)).size).toBe(commands.length);
   });
   it.each([
     { failure: "slow", count: 1 },
