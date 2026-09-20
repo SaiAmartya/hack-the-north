@@ -39,6 +39,23 @@ export type SpeechOnset = {
 
 export type SpeechDiscard = Pick<SpeechOnset, "id" | "generation">;
 
+export type SpeechDiagnostic = {
+  type: "calibrated" | "onset" | "result" | "discard" | "recovered" | "fault";
+  atMs: number;
+  generation: number;
+  utteranceId?: string;
+  detail?: string;
+  spell?: SpeechSpell;
+  inferenceMs?: number;
+  noiseFloor?: number;
+  transcript?: string;
+  voiceStartMs?: number;
+  voiceEndMs?: number;
+  speechDurationMs?: number;
+  avgLogProbability?: number;
+  noSpeechProbability?: number;
+};
+
 type Capture = {
   stop: () => void;
 };
@@ -64,9 +81,9 @@ type Pending = {
   startMs: number;
   endMs: number;
   invalidated: boolean;
-  discardSilently: boolean;
   overlapActive: boolean;
   settled: boolean;
+  backgroundOnly: boolean;
   abort: AbortController;
   deadlineTimer: ReturnType<typeof setTimeout>;
 };
@@ -85,6 +102,13 @@ type HelperResult = {
   generation: number;
   text: string;
   spell: SpeechSpell | null;
+  inferenceMs?: number;
+  accepted?: boolean;
+  transcript?: string;
+  reason?: string;
+  speechDurationMs?: number | null;
+  avgLogProbability?: number | null;
+  noSpeechProbability?: number | null;
 };
 
 const MAX_RESULT_DELAY_MS = 1000;
@@ -106,9 +130,12 @@ export class SpeechClient {
   private pending?: Pending;
   private recognitionEnabled = true;
   private recognitionFromMs = -Infinity;
+  private requestFailures = 0;
+  private captureRecoveries = 0;
   private speechListeners = new Set<(evidence: SpeechEvidence) => void>();
   private onsetListeners = new Set<(onset: SpeechOnset) => void>();
   private discardListeners = new Set<(utterance: SpeechDiscard) => void>();
+  private diagnosticListeners = new Set<(event: SpeechDiagnostic) => void>();
 
   constructor(
     private readonly platform: SpeechClientPlatform = browserSpeechPlatform(),
@@ -133,7 +160,6 @@ export class SpeechClient {
     if (this.draft) this.draft.suppressed = true;
     if (this.pending) {
       this.pending.invalidated = true;
-      this.pending.discardSilently = true;
     }
     if (["listening", "busy"].includes(this.snapshot.phase))
       this.snapshot = { ...this.snapshot, issue: "" };
@@ -152,6 +178,11 @@ export class SpeechClient {
   onDiscard(listener: (utterance: SpeechDiscard) => void): () => void {
     this.discardListeners.add(listener);
     return () => this.discardListeners.delete(listener);
+  }
+
+  onDiagnostic(listener: (event: SpeechDiagnostic) => void): () => void {
+    this.diagnosticListeners.add(listener);
+    return () => this.diagnosticListeners.delete(listener);
   }
 
   async start(): Promise<void> {
@@ -224,7 +255,22 @@ export class SpeechClient {
   ): void {
     if (generation !== this.generation) return;
     this.endpoint ??= new SpeechEndpoint(generation, timeOriginMs);
-    for (const event of this.endpoint.push(frame)) this.endpointEvent(event);
+    for (const event of this.endpoint.push(frame)) {
+      if (event.type === "fault" && event.issue === "Audio frame continuity was lost" && this.captureRecoveries < 2) {
+        this.captureRecoveries++;
+        if (this.draft) this.notifyDiscard(this.draft);
+        if (this.pending) {
+          this.pending.abort.abort();
+          clearTimeout(this.pending.deadlineTimer);
+          this.notifyDiscard(this.pending);
+        }
+        this.pending = undefined;
+        this.draft = undefined;
+        this.endpoint = new SpeechEndpoint(generation, timeOriginMs);
+        this.snapshot = { phase: "calibrating", issue: "", generation };
+        this.diagnostic({ type: "recovered", detail: "Audio gap cleared; recalibrating fresh capture" });
+      } else this.endpointEvent(event);
+    }
   }
 
   private endpointEvent(event: SpeechEndpointEvent): void {
@@ -233,12 +279,14 @@ export class SpeechClient {
       return;
     }
     if (event.type === "calibrated") {
+      this.captureRecoveries = 0;
       this.snapshot = {
         phase: "listening",
         issue: "",
         generation: this.generation,
         noiseFloor: event.noiseFloor,
       };
+      this.diagnostic({ type: "calibrated", noiseFloor: event.noiseFloor });
       return;
     }
     if (event.type === "onset") {
@@ -256,14 +304,14 @@ export class SpeechClient {
         this.snapshot = {
           ...this.snapshot,
           phase: "busy",
-          issue: recognitionAllowed && !this.pending.discardSilently
-            ? "Overlapping speech invalidated the pending utterance"
-            : "",
+          issue: "",
         };
+        this.diagnostic({ type: "discard", utteranceId: this.pending.id, detail: "Overlapping speech invalidated pending utterance" });
       }
       this.draft = { ...onset, suppressed };
       if (recognitionAllowed)
         for (const listener of this.onsetListeners) listener(onset);
+      if (recognitionAllowed) this.diagnostic({ type: "onset", utteranceId: onset.id });
       return;
     }
     this.clip(event);
@@ -293,8 +341,9 @@ export class SpeechClient {
       this.snapshot = {
         ...this.snapshot,
         phase: "listening",
-        issue: LATE_RESULT_ISSUE,
+        issue: "",
       };
+      this.diagnostic({ type: "discard", utteranceId: draft.id, detail: LATE_RESULT_ISSUE });
       return;
     }
     const body = pcm16(event.samples);
@@ -309,9 +358,9 @@ export class SpeechClient {
       startMs: event.startMs,
       endMs: event.endMs,
       invalidated: false,
-      discardSilently: false,
       overlapActive: false,
       settled: false,
+      backgroundOnly: false,
       abort,
       deadlineTimer: setTimeout(
         () => this.deadline(draft.id, draft.generation),
@@ -356,16 +405,19 @@ export class SpeechClient {
         );
         return;
       }
+      if (response.status >= 500 && ++this.requestFailures < 3) {
+        this.discardPending(pending, "Local speech helper temporarily unavailable");
+        return;
+      }
       if (!response.ok) throw new Error("Local speech transcription failed");
+      this.requestFailures = 0;
       const result = (await response.json()) as HelperResult;
       this.result(pending, result);
     } catch (error) {
       if (!pending.abort.signal.aborted && this.isPending(pending)) {
-        this.fail(
-          error instanceof Error
-            ? error.message
-            : "Local speech transcription failed",
-        );
+        if (error instanceof TypeError && ++this.requestFailures < 3)
+          this.discardPending(pending, "Local speech request interrupted");
+        else this.fail("Microphone recognition is unavailable. Try reconnecting it.");
       }
     } finally {
       pending.settled = true;
@@ -388,12 +440,19 @@ export class SpeechClient {
       this.fail("Local speech helper returned stale evidence");
       return;
     }
-    const spell = canonicalSpell(result.text);
+    const spell = result.accepted === false ? null : canonicalSpell(result.text);
     if (result.spell !== spell) {
       this.fail("Local speech helper returned inconsistent evidence");
       return;
     }
+    this.diagnostic({ type: "result", utteranceId: pending.id, spell: spell ?? undefined,
+      inferenceMs: result.inferenceMs, transcript: (result.transcript ?? result.text).slice(0, 512),
+      voiceStartMs: pending.startMs, voiceEndMs: pending.endMs,
+      speechDurationMs: result.speechDurationMs ?? undefined, avgLogProbability: result.avgLogProbability ?? undefined,
+      noSpeechProbability: result.noSpeechProbability ?? undefined,
+      detail: pending.invalidated ? "Overlapping or paused utterance discarded" : result.reason ?? (spell ? "Incantation accepted" : "Non-spell or uncertain audio ignored") });
     if (pending.invalidated) return;
+    pending.backgroundOnly = result.reason === "no-speech";
     if (spell) {
       const evidence: SpeechEvidence = {
         id: pending.id,
@@ -408,7 +467,7 @@ export class SpeechClient {
     } else {
       this.snapshot = {
         ...this.snapshot,
-        issue: "Speech was not one exact incantation",
+        issue: "",
       };
     }
     pending.settled = true;
@@ -430,7 +489,8 @@ export class SpeechClient {
     if (!this.isPending(pending)) return;
     pending.abort.abort();
     pending.settled = true;
-    this.snapshot = { ...this.snapshot, issue };
+    this.diagnostic({ type: "discard", utteranceId: pending.id, detail: issue });
+    this.snapshot = { ...this.snapshot, issue: "" };
     this.completePending(pending);
   }
 
@@ -457,15 +517,11 @@ export class SpeechClient {
     clearTimeout(pending.deadlineTimer);
     this.pending = undefined;
     if (!emitted) this.notifyDiscard(pending);
-    this.endpoint?.resolve();
+    this.endpoint?.resolve(pending.backgroundOnly);
     this.snapshot = {
       ...this.snapshot,
       phase: "listening",
-      issue: pending.discardSilently
-        ? ""
-        : pending.invalidated
-          ? "Overlapping speech was discarded; try again from silence"
-          : this.snapshot.issue,
+      issue: "",
     };
   }
 
@@ -480,11 +536,19 @@ export class SpeechClient {
   }
 
   private fail(issue: string): void {
+    this.diagnostic({ type: "fault", detail: issue });
     this.teardown("fault", issue);
+  }
+
+  private diagnostic(event: Omit<SpeechDiagnostic, "atMs" | "generation">): void {
+    for (const listener of this.diagnosticListeners)
+      listener({ ...event, atMs: this.platform.now(), generation: this.generation });
   }
 
   private teardown(phase: "off" | "fault", issue: string): void {
     this.generation++;
+    this.requestFailures = 0;
+    this.captureRecoveries = 0;
     this.pending?.abort.abort();
     if (this.pending) clearTimeout(this.pending.deadlineTimer);
     this.pending = undefined;
@@ -545,9 +609,9 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: { exact: 1 },
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         },
         video: false,
       });

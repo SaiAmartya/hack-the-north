@@ -28,7 +28,6 @@ MAX_PCM_BYTES = SAMPLE_RATE * 3 * 2
 MAX_PROXY_BYTES = 128 * 1024
 MAX_VOICE_MS = 1_800
 MAX_DEADLINE_MS = 1_000
-DEADLINE_MISS_LIMIT = 3
 SECRET_ENV = "WAND_SPEECH_SECRET"
 MODEL_DIR_ENV = "WAND_SPEECH_MODEL_DIR"
 SECRET_HEADER = "x-wand-speech-secret"
@@ -43,7 +42,7 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class SpeechEngine(Protocol):
-    def transcribe(self, pcm: np.ndarray) -> str: ...
+    def transcribe(self, pcm: np.ndarray) -> str | DecodedSpeech: ...
 
 
 class RuntimeBusy(Exception):
@@ -63,8 +62,18 @@ class SpeechConfigurationError(Exception):
 
 
 @dataclass(frozen=True)
-class InferenceResult:
+class DecodedSpeech:
     text: str
+    accepted: bool = True
+    reason: str = "decoded"
+    speech_duration_ms: int | None = None
+    avg_log_probability: float | None = None
+    no_speech_probability: float | None = None
+
+
+@dataclass(frozen=True)
+class InferenceResult:
+    decoded: DecodedSpeech
     inference_ms: int
 
 
@@ -81,9 +90,18 @@ class FasterWhisperEngine:
             cpu_threads=inference_threads(),
         )
 
-    def transcribe(self, pcm: np.ndarray) -> str:
+    def transcribe(self, pcm: np.ndarray) -> DecodedSpeech:
+        return self._decode(pcm, vad_filter=True)
+
+    def warmup(self) -> None:
+        silence = np.zeros(SAMPLE_RATE // 4, dtype=np.float32)
+        # Warm both models: VAD correctly rejects silence before Whisper runs.
+        self._decode(silence, vad_filter=True)
+        self._decode(silence, vad_filter=False)
+
+    def _decode(self, pcm: np.ndarray, *, vad_filter: bool) -> DecodedSpeech:
         call = cast(Callable[..., tuple[Iterable[object], object]], self._model.transcribe)
-        segments, _info = call(
+        segments, info = call(
             pcm,
             language="en",
             task="transcribe",
@@ -92,12 +110,52 @@ class FasterWhisperEngine:
             temperature=0.0,
             condition_on_previous_text=False,
             initial_prompt=GLOSSARY,
-            vad_filter=False,
+            vad_filter=vad_filter,
+            vad_parameters={
+                "min_speech_duration_ms": 80,
+                "min_silence_duration_ms": 180,
+                "speech_pad_ms": 150,
+            },
             without_timestamps=True,
+            max_new_tokens=24,
         )
-        return " ".join(
-            str(getattr(segment, "text", "")).strip() for segment in list(segments)
-        ).strip()
+        decoded = list(segments)
+        text = " ".join(
+            str(getattr(segment, "text", "")).strip() for segment in decoded
+        ).strip()[:512]
+        log_probability = min(
+            (float(getattr(segment, "avg_logprob", math.nan)) for segment in decoded),
+            default=math.nan,
+        )
+        no_speech_probability = max(
+            (float(getattr(segment, "no_speech_prob", math.nan)) for segment in decoded),
+            default=math.nan,
+        )
+        # A glossary can hallucinate a valid incantation on noise. VAD is the
+        # first gate; reject the whole clip if any decoded segment is uncertain.
+        # Never turn a partial/low-confidence sentence into an accepted command.
+        uncertain = any(
+            not math.isfinite(float(getattr(segment, "avg_logprob", math.nan)))
+            or not math.isfinite(float(getattr(segment, "no_speech_prob", math.nan)))
+            or float(getattr(segment, "avg_logprob", -math.inf)) < -1.0
+            or float(getattr(segment, "no_speech_prob", 1.0)) > 0.6
+            for segment in decoded
+        )
+        duration = float(getattr(info, "duration_after_vad", 0))
+        return DecodedSpeech(
+            text=text,
+            accepted=bool(decoded) and not uncertain,
+            reason=(
+                "no-speech" if not decoded else "low-confidence" if uncertain else "decoded"
+            ),
+            speech_duration_ms=round(duration * 1000) if math.isfinite(duration) else None,
+            avg_log_probability=(
+                log_probability if math.isfinite(log_probability) else None
+            ),
+            no_speech_probability=(
+                no_speech_probability if math.isfinite(no_speech_probability) else None
+            ),
+        )
 
 
 def inference_threads() -> int:
@@ -192,7 +250,6 @@ class SpeechRuntime:
             "warmupMs": self._warmup_ms,
             "loadWarmMs": self._load_warm_ms,
             "deadlineMisses": deadline_misses,
-            "deadlineMissLimit": DEADLINE_MISS_LIMIT,
             "lastInferenceMs": last_inference_ms,
         }
 
@@ -222,7 +279,11 @@ class SpeechRuntime:
         load_started = time.perf_counter()
         engine = self._loader() if self._loader else self._load_local_engine()
         warm_started = time.perf_counter()
-        engine.transcribe(np.zeros(SAMPLE_RATE // 4, dtype=np.float32))
+        warmup = getattr(engine, "warmup", None)
+        if callable(warmup):
+            warmup()
+        else:
+            engine.transcribe(np.zeros(SAMPLE_RATE // 4, dtype=np.float32))
         warmup_ms = round((time.perf_counter() - warm_started) * 1000)
         load_warm_ms = round((time.perf_counter() - load_started) * 1000)
         return engine, warmup_ms, load_warm_ms
@@ -263,9 +324,12 @@ class SpeechRuntime:
         if engine is None:
             raise RuntimeUnavailable
         started = time.perf_counter()
-        text = engine.transcribe(pcm)
+        decoded = engine.transcribe(pcm)
         elapsed = round((time.perf_counter() - started) * 1000)
-        return InferenceResult(text=text, inference_ms=elapsed)
+        return InferenceResult(
+            decoded=DecodedSpeech(decoded) if isinstance(decoded, str) else decoded,
+            inference_ms=elapsed,
+        )
 
     def _inference_done(
         self, future: Future[InferenceResult], deadline_budget_ms: int
@@ -283,11 +347,9 @@ class SpeechRuntime:
             self._busy = False
             self._last_inference_ms = inference_ms
             if missed:
-                # A single late inference drops only its utterance. Repeated misses
-                # indicate that this worker cannot sustain the caller's deadline.
+                # Load spikes discard only their utterance. A later fresh command
+                # can recover without restarting a healthy model process.
                 self._deadline_misses += 1
-                if self._deadline_misses >= DEADLINE_MISS_LIMIT:
-                    issue = "Speech inference missed its caller deadline"
             elif not issue:
                 self._deadline_misses = 0
             if issue:
@@ -378,12 +440,19 @@ def create_app(
             raise HTTPException(
                 status_code=503, detail="Speech inference worker failed"
             ) from None
-        spell = canonical_spell(result.text)
+        decoded = result.decoded
+        spell = canonical_spell(decoded.text) if decoded.accepted else None
         return {
             "utteranceId": utterance_id,
             "generation": generation,
-            "text": normalize_text(result.text),
+            "text": normalize_text(decoded.text),
+            "transcript": decoded.text[:512],
             "spell": spell,
+            "accepted": spell is not None,
+            "reason": "not-an-incantation" if decoded.accepted and spell is None else decoded.reason,
+            "speechDurationMs": decoded.speech_duration_ms,
+            "avgLogProbability": decoded.avg_log_probability,
+            "noSpeechProbability": decoded.no_speech_probability,
             "helperGeneration": speech_runtime.generation,
             "model": MODEL_NAME,
             "modelRevision": MODEL_REVISION,

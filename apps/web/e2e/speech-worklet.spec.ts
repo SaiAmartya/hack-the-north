@@ -93,9 +93,11 @@ test.describe("production browser speech capture", () => {
       const nativeGetUserMedia =
         navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
       let openedTrack: MediaStreamTrack | undefined;
+      let requestedConstraints: MediaStreamConstraints | undefined;
       Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
         configurable: true,
         value: async (constraints: MediaStreamConstraints) => {
+          requestedConstraints = constraints;
           const stream = await nativeGetUserMedia(constraints);
           openedTrack = stream.getAudioTracks()[0];
           return stream;
@@ -158,6 +160,7 @@ test.describe("production browser speech capture", () => {
         reportedTrackChannels: openedTrack?.getSettings().channelCount,
         contextState: openedContext?.state,
         closeCalls,
+        requestedConstraints,
       };
     });
 
@@ -192,5 +195,10 @@ test.describe("production browser speech capture", () => {
     expect(result.trackState).toBe("ended");
     expect(result.contextState).toBe("closed");
     expect(result.closeCalls).toBe(1);
+    expect(result.requestedConstraints).toEqual({
+      audio: { channelCount: { exact: 1 }, echoCancellation: true,
+        noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
   });
 });

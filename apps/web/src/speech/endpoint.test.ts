@@ -40,6 +40,38 @@ function harness() {
 }
 
 describe("speech endpoint", () => {
+  it("ignores brief calibration spikes and hears speech over a steady noisy floor", () => {
+    const test = harness();
+    const calibration = [
+      ...test.many(0.01, 120),
+      ...test.many(0.4, 30),
+      ...test.many(0.01, 100),
+    ];
+    expect(calibration).toEqual([{ type: "calibrated", noiseFloor: 0.01 }]);
+    expect(test.many(0.01, 40)).toEqual([]);
+    const events = [...test.many(0.026, 25), ...test.many(0.01, 25)];
+    expect(events.map((event) => event.type)).toEqual(["onset", "clip"]);
+  });
+
+  it("tracks gradual background changes without treating them as voice", () => {
+    const test = harness();
+    test.many(0.002, 250);
+    const events: SpeechEndpointEvent[] = [];
+    for (let i = 0; i < 1000; i++) events.push(...test.push(0.002 + i * 0.000008));
+    expect(events).toEqual([]);
+    expect([...test.many(0.03, 25), ...test.many(0.01, 25)].map((event) => event.type)).toEqual(["onset", "clip"]);
+  });
+
+  it("learns a sudden steady noise floor only after an explicit no-speech result", () => {
+    const test = harness();
+    test.many(0.002, 250);
+    const noise = test.many(0.03, 225);
+    expect(noise.some((event) => event.type === "clip")).toBe(true);
+    test.endpoint.resolve(true);
+    expect(test.many(0.03, 250)).toEqual([]);
+    const speech = [...test.many(0.08, 25), ...test.many(0.03, 25)];
+    expect(speech.map((event) => event.type)).toEqual(["onset", "clip"]);
+  });
   it("calibrates for two seconds and keeps padded PCM outside the voice interval", () => {
     const test = harness();
     const calibration = test.many(0.002, 250);
@@ -66,7 +98,7 @@ describe("speech endpoint", () => {
     expect(clip?.endMs).toBe(
       1000 + ((voiceStartFrame + 20 * BLOCK) * 1000) / SPEECH_SAMPLE_RATE,
     );
-    expect(clip?.samples.length).toBe(150 * 16 + 20 * BLOCK + 25 * BLOCK);
+    expect(clip?.samples.length).toBe(250 * 16 + 20 * BLOCK + 25 * BLOCK);
   });
 
   it("does not start on less than 60 ms of loud input", () => {

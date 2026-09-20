@@ -2,7 +2,7 @@ export const SPEECH_SAMPLE_RATE = 16_000;
 
 const CALIBRATION_FRAMES = SPEECH_SAMPLE_RATE * 2;
 const START_FRAMES = Math.ceil(SPEECH_SAMPLE_RATE * 0.06);
-const PRE_ROLL_FRAMES = Math.ceil(SPEECH_SAMPLE_RATE * 0.15);
+const PRE_ROLL_FRAMES = Math.ceil(SPEECH_SAMPLE_RATE * 0.25);
 const END_SILENCE_FRAMES = Math.ceil(SPEECH_SAMPLE_RATE * 0.2);
 const MAX_VOICE_FRAMES = Math.ceil(SPEECH_SAMPLE_RATE * 1.8);
 const MAX_CLIP_FRAMES = SPEECH_SAMPLE_RATE * 3;
@@ -36,6 +36,7 @@ type ActiveVoice = {
   clipNextFrame: number;
   silenceStartFrame?: number;
   parts: Float32Array[];
+  levels: number[];
 };
 
 class SampleHistory {
@@ -79,7 +80,7 @@ class SampleHistory {
 
 export class SpeechEndpoint {
   private readonly history = new SampleHistory(HISTORY_FRAMES);
-  private calibrationEnergy = 0;
+  private calibrationLevels: number[] = [];
   private calibrationFrames = 0;
   private noiseFloor = 0;
   private calibrated = false;
@@ -88,6 +89,7 @@ export class SpeechEndpoint {
   private active?: ActiveVoice;
   private failed = false;
   private quietFramesNeeded = 0;
+  private completedNoiseFloor?: number;
 
   constructor(
     private readonly generation: number,
@@ -136,7 +138,7 @@ export class SpeechEndpoint {
       return events;
     }
 
-    if (!this.noiseFrozen && frame.rms <= this.endThreshold()) {
+    if (!this.noiseFrozen && frame.rms < this.startThreshold()) {
       const weight = 0.01;
       this.noiseFloor = Math.sqrt(
         (1 - weight) * this.noiseFloor ** 2 + weight * frame.rms ** 2,
@@ -154,6 +156,7 @@ export class SpeechEndpoint {
           clipStartFrame,
           clipNextFrame: frameEnd,
           parts: [initial],
+          levels: [frame.rms],
         };
         this.candidateStartFrame = undefined;
         this.noiseFrozen = true;
@@ -165,14 +168,22 @@ export class SpeechEndpoint {
     return events;
   }
 
-  resolve(): void {
-    if (!this.active) this.noiseFrozen = false;
+  resolve(backgroundOnly = false): void {
+    if (!this.active) {
+      this.noiseFrozen = false;
+      // Only the neural VAD's explicit no-speech result may teach us that a
+      // sudden persistent sound is the new room floor. Never learn from words.
+      if (backgroundOnly && this.completedNoiseFloor !== undefined)
+        this.noiseFloor = this.completedNoiseFloor;
+    }
+    this.completedNoiseFloor = undefined;
   }
 
   requireQuiet(): void {
     this.active = undefined;
     this.candidateStartFrame = undefined;
     this.noiseFrozen = false;
+    this.completedNoiseFloor = undefined;
     this.quietFramesNeeded = END_SILENCE_FRAMES;
   }
 
@@ -204,13 +215,16 @@ export class SpeechEndpoint {
   }
 
   private calibrate(frame: CapturedAudioFrame): SpeechEndpointEvent[] {
-    this.calibrationEnergy += frame.rms ** 2 * frame.samples.length;
+    this.calibrationLevels.push(frame.rms);
     this.calibrationFrames += frame.samples.length;
     if (this.calibrationFrames < CALIBRATION_FRAMES) return [];
-    this.noiseFloor = Math.max(
-      0.0001,
-      Math.sqrt(this.calibrationEnergy / this.calibrationFrames),
-    );
+    // Brief claps, keyboard clicks, or a word during setup must not permanently
+    // raise the voice threshold. Estimate the steady background, not peak energy.
+    this.calibrationLevels.sort((a, b) => a - b);
+    this.noiseFloor = Math.max(0.0001, this.calibrationLevels[
+      Math.floor((this.calibrationLevels.length - 1) * 0.35)
+    ]);
+    this.calibrationLevels = [];
     this.calibrated = true;
     return [{ type: "calibrated", noiseFloor: this.noiseFloor }];
   }
@@ -218,6 +232,7 @@ export class SpeechEndpoint {
   private appendActive(frame: CapturedAudioFrame): void {
     const active = this.active;
     if (!active) return;
+    active.levels.push(frame.rms);
     const offset = Math.max(0, active.clipNextFrame - frame.startFrame);
     if (offset < frame.samples.length) active.parts.push(frame.samples.slice(offset));
     active.clipNextFrame = Math.max(
@@ -243,6 +258,10 @@ export class SpeechEndpoint {
     }
     this.active = undefined;
     this.candidateStartFrame = undefined;
+    active.levels.sort((a, b) => a - b);
+    this.completedNoiseFloor = Math.max(0.0001, active.levels[
+      Math.floor((active.levels.length - 1) * 0.35)
+    ]);
     return {
       type: "clip",
       startMs: this.toMs(active.voiceStartFrame),
@@ -252,11 +271,11 @@ export class SpeechEndpoint {
   }
 
   private startThreshold(): number {
-    return Math.max(0.02, this.noiseFloor * 3, this.noiseFloor + 0.012);
+    return Math.max(0.01, this.noiseFloor * 1.8, this.noiseFloor + 0.004);
   }
 
   private endThreshold(): number {
-    return Math.max(0.012, this.noiseFloor * 1.8, this.noiseFloor + 0.006);
+    return Math.max(0.006, this.noiseFloor * 1.35, this.noiseFloor + 0.003);
   }
 
   private toMs(frame: number): number {

@@ -4,6 +4,7 @@ import {
   SpeechClient,
   type SpeechClientPlatform,
   type SpeechEvidence,
+  type SpeechDiagnostic,
 } from "./client";
 import {
   SPEECH_SAMPLE_RATE,
@@ -104,6 +105,11 @@ class FakePlatform implements SpeechClientPlatform {
   hide(): void {
     this.invalidated?.("Page hidden or suspended; speech evidence was cleared");
   }
+
+  gap(): void {
+    this.frame += 128;
+    this.feed(0.002, 1);
+  }
 }
 
 async function flush(): Promise<void> {
@@ -135,6 +141,75 @@ describe("speech client lifecycle", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("keeps rejected transcript diagnostics without accepting uncertain spell evidence", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const evidence: SpeechEvidence[] = [];
+    const diagnostics: SpeechDiagnostic[] = [];
+    client.onSpeech((item) => evidence.push(item));
+    client.onDiagnostic((item) => diagnostics.push(item));
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const headers = new Headers(platform.requests.at(-1)!.init?.headers);
+    platform.transcriptions[0].resolve(Response.json({
+      utteranceId: headers.get("X-Wand-Utterance-Id"),
+      generation: Number(headers.get("X-Wand-Generation")),
+      text: "Stupefy", transcript: "Stupefy.", spell: null, accepted: false,
+      reason: "low-confidence", inferenceMs: 200, noSpeechProbability: 0.9,
+    }));
+    await flush();
+    expect(evidence).toEqual([]);
+    expect(client.getSnapshot()).toMatchObject({ phase: "listening", issue: "" });
+    expect(diagnostics.at(-1)).toMatchObject({ type: "result", transcript: "Stupefy.",
+      detail: "low-confidence", inferenceMs: 200, noSpeechProbability: 0.9 });
+    client.stop();
+  });
+
+  it("clears a lost audio interval, recalibrates automatically, and accepts only fresh speech", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const old = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(old, "lost-gesture"));
+    platform.gap();
+    expect(client.getSnapshot()).toMatchObject({ phase: "calibrating", issue: "" });
+    expect(fusion.getState().pendingGesture).toBeUndefined();
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: old.get("X-Wand-Utterance-Id"),
+      generation: Number(old.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(casts).toEqual([]);
+    expect(platform.stopped).toBe(false);
+    platform.calibrate();
+    platform.utterance();
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "fresh-gesture"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(casts).toHaveLength(1);
+    expect(casts[0].gestureId).toBe("fresh-gesture");
+    client.stop();
+  });
+
+  it("surfaces a persistent helper failure only after three fresh attempts", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    await client.start();
+    platform.calibrate();
+    for (let index = 0; index < 3; index++) {
+      platform.utterance();
+      platform.transcriptions[index].resolve(new Response(null, { status: 503 }));
+      await flush();
+      expect(client.getSnapshot().phase).toBe(index < 2 ? "listening" : "fault");
+    }
+    expect(platform.stopped).toBe(true);
+    client.stop();
   });
 
   it.each(["stupefy", "protego", "expelliarmus", "incendio", "episkey"])(
@@ -217,7 +292,7 @@ describe("speech client lifecycle", () => {
     expect(evidence).toEqual([]);
     expect(client.getSnapshot()).toMatchObject({
       phase: "listening",
-      issue: "Overlapping speech was discarded; try again from silence",
+      issue: "",
     });
   });
 
@@ -296,7 +371,7 @@ describe("speech client lifecycle", () => {
       spell: null,
     }));
     await flush();
-    expect(client.getSnapshot().issue).toBe("Speech was not one exact incantation");
+    expect(client.getSnapshot().issue).toBe("");
     client.stop();
   });
 
@@ -316,7 +391,7 @@ describe("speech client lifecycle", () => {
     client.stop();
   });
 
-  it("still surfaces helper and PCM failures while recognition is paused", async () => {
+  it("recovers a transient helper failure silently while paused but surfaces invalid PCM", async () => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
     await client.start();
@@ -326,10 +401,10 @@ describe("speech client lifecycle", () => {
     platform.transcriptions[0].resolve(new Response(null, { status: 503 }));
     await flush();
     expect(client.getSnapshot()).toMatchObject({
-      phase: "fault",
-      issue: "Local speech transcription failed",
+      phase: "listening",
+      issue: "",
     });
-    expect(platform.stopped).toBe(true);
+    expect(platform.stopped).toBe(false);
 
     platform.stopped = false;
     await client.start();
@@ -380,7 +455,7 @@ describe("speech client lifecycle", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(client.getSnapshot()).toMatchObject({
       phase: "listening",
-      issue: "Speech result arrived too late; say it again",
+      issue: "",
       generation,
     });
     expect(platform.stopped).toBe(false);

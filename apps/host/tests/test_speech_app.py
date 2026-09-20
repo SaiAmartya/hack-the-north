@@ -3,12 +3,15 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from phantom_host.speech_app import (
+    DecodedSpeech,
+    FasterWhisperEngine,
     SpeechRuntime,
     canonical_spell,
     create_app,
@@ -103,7 +106,6 @@ def test_health_requires_the_proxy_secret_and_reports_fixed_settings(
         "warmupMs": body["warmupMs"],
         "loadWarmMs": body["loadWarmMs"],
         "deadlineMisses": 0,
-        "deadlineMissLimit": 3,
         "lastInferenceMs": None,
     }
     assert isinstance(body["warmupMs"], int)
@@ -119,7 +121,13 @@ def test_transcribe_accepts_only_bounded_raw_pcm_and_returns_canonical_evidence(
         "utteranceId": "utterance-1",
         "generation": 9,
         "text": "stupefy",
+        "transcript": "Stupefy!",
         "spell": "stupefy",
+        "accepted": True,
+        "reason": "decoded",
+        "speechDurationMs": None,
+        "avgLogProbability": None,
+        "noSpeechProbability": None,
         "helperGeneration": 41,
         "model": "base.en",
         "modelRevision": "3d3d5dee26484f91867d81cb899cfcf72b96be6c",
@@ -217,7 +225,7 @@ def test_single_deadline_miss_keeps_worker_healthy_and_success_resets_streak() -
         assert health["lastInferenceMs"] == response.json()["inferenceMs"]
 
 
-def test_three_consecutive_deadline_misses_make_worker_unhealthy() -> None:
+def test_repeated_deadline_misses_discard_results_but_fresh_request_recovers() -> None:
     runtime = SpeechRuntime(loader=lambda: SlowEngine(), generation=17)
     request_headers = {**headers(), "X-Wand-Deadline-Budget-Ms": "1"}
     with TestClient(create_app(runtime=runtime, secret=SECRET)) as client:
@@ -229,13 +237,68 @@ def test_three_consecutive_deadline_misses_make_worker_unhealthy() -> None:
         health = client.get(
             "/health", headers={"X-Wand-Speech-Secret": SECRET}
         ).json()
-        assert health["status"] == "unhealthy"
-        assert health["workerAvailable"] is False
+        assert health["status"] == "ok"
+        assert health["workerAvailable"] is True
         assert health["deadlineMisses"] == 3
-        assert health["issue"] == "Speech inference missed its caller deadline"
+        assert health["issue"] == ""
         assert client.post(
             "/transcribe", headers=headers(), content=b"\x00\x00" * 1600
-        ).status_code == 503
+        ).status_code == 200
+        assert client.get("/health", headers={"X-Wand-Speech-Secret": SECRET}).json()["deadlineMisses"] == 0
+
+
+@pytest.mark.parametrize(
+    "logprob, no_speech, accepted",
+    [(-0.3, 0.4, True), (-1.1, 0.1, False), (-0.1, 0.8, False),
+     (float("nan"), 0.1, False), (-0.1, float("nan"), False)],
+)
+def test_decoder_gates_glossary_hallucinations_without_fuzzy_spells(
+    logprob: float, no_speech: float, accepted: bool,
+) -> None:
+    calls = []
+
+    def transcribe(pcm, **kwargs):
+        calls.append(kwargs)
+        return iter([SimpleNamespace(text="Stupefy.", avg_logprob=logprob, no_speech_prob=no_speech)]), None
+
+    engine = FasterWhisperEngine.__new__(FasterWhisperEngine)
+    engine._model = SimpleNamespace(transcribe=transcribe)
+    result = engine.transcribe(np.zeros(16000, np.float32))
+    assert result.text == "Stupefy."
+    assert result.accepted is accepted
+    assert calls[0]["vad_filter"] is True
+    assert calls[0]["vad_parameters"]["min_speech_duration_ms"] == 80
+    assert calls[0]["max_new_tokens"] == 24
+    assert calls[0]["beam_size"] == 1
+
+
+def test_uncertain_canonical_transcript_is_available_for_debug_but_not_a_spell() -> None:
+    class UncertainEngine:
+        def transcribe(self, _pcm):
+            return DecodedSpeech("Stupefy.", accepted=False, reason="low-confidence", no_speech_probability=0.9)
+
+    with TestClient(create_app(runtime=SpeechRuntime(loader=UncertainEngine), secret=SECRET)) as client:
+        response = client.post("/transcribe", headers=headers(), content=b"\x00\x00" * 1600)
+        assert response.status_code == 200
+        result = response.json()
+        assert result["text"] == "stupefy"
+        assert result["transcript"] == "Stupefy."
+        assert result["spell"] is None
+        assert result["accepted"] is False
+        assert result["noSpeechProbability"] == 0.9
+
+
+def test_warmup_exercises_vad_and_whisper_before_accepting_commands() -> None:
+    calls = []
+
+    def transcribe(pcm, **kwargs):
+        calls.append(kwargs["vad_filter"])
+        return iter([]), None
+
+    engine = FasterWhisperEngine.__new__(FasterWhisperEngine)
+    engine._model = SimpleNamespace(transcribe=transcribe)
+    engine.warmup()
+    assert calls == [True, False]
 
 
 @pytest.mark.parametrize("cores, expected", [(1, 2), (4, 4), (128, 8), (None, 4)])
