@@ -166,8 +166,8 @@ class QaPlayer {
     };
   }
 
-  async connect(): Promise<void> {
-    await this.game.connect("replay");
+  async connect(code: string): Promise<void> {
+    await this.game.connect("replay", code);
     this.unsubscribe = this.wand.onSample((sample) =>
       this.motion.push(sample, this.generation),
     );
@@ -328,8 +328,9 @@ export class GameQaHarness {
   async run(): Promise<GameQaReport> {
     try {
       this.update({ stage: "running", detail: "Connecting two QA players" });
-      await this.first.connect();
-      await this.second.connect();
+      const code = await this.first.game.createRoom();
+      await this.first.connect(code);
+      await this.second.connect(code);
       if (this.first.game.slot !== "P1" || this.second.game.slot !== "P2")
         throw new Error("QA players did not receive ordinary P1/P2 slots");
       this.update({ detail: "Calibrating two paced raw-motion replays" });

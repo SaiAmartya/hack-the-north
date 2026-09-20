@@ -15,7 +15,8 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 
-from phantom_host.duel_engine import TICK_MS
+from phantom_host.duel_engine import TICK_MS, ruleset
+from phantom_host.duel_ice import IceProvider, IceSettings
 from phantom_host.duel_models import (
     AuthMessage,
     CastMessage,
@@ -31,11 +32,13 @@ from phantom_host.duel_models import (
     RELAY_PHONE_MESSAGE_ADAPTER,
     RelayOwnerAuth,
     RelayPhoneAuth,
+    RoomResponse,
     SessionRequest,
     SessionResponse,
     SignalMessage,
     wire_dict,
 )
+from phantom_host.duel_registry import RoomRegistry
 from phantom_host.duel_relay import DevWandRelay, RelayPeer
 from phantom_host.duel_room import DuelRoom, GamePeer, OutboundMailbox, RoomError
 
@@ -71,6 +74,7 @@ class DuelSettings:
     allow_replay: bool = False
     expelliarmus_enabled: bool = False
     start_background_tick: bool = True
+    ice: IceSettings = IceSettings()
 
     @classmethod
     def from_environment(cls) -> DuelSettings:
@@ -94,6 +98,7 @@ class DuelSettings:
             expelliarmus_enabled=_environment_flag(
                 "WAND_ENABLE_EXPELLIARMUS"
             ),
+            ice=IceSettings.from_environment(),
         )
 
 
@@ -104,7 +109,7 @@ def create_app(
 ) -> FastAPI:
     active_settings = settings or DuelSettings.from_environment()
     active_clock = clock_ms or _monotonic_ms
-    room = DuelRoom(
+    registry = RoomRegistry(
         clock_ms=active_clock,
         allow_phone=active_settings.dev_relay_enabled,
         allow_replay=active_settings.allow_replay,
@@ -112,14 +117,15 @@ def create_app(
     )
     relay = DevWandRelay(
         clock_ms=active_clock,
-        session_lookup=room.session_for_token,
+        session_lookup=registry.session_for_token,
     )
+    ice = IceProvider(active_settings.ice)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         tick_task: asyncio.Task[None] | None = None
         if active_settings.start_background_tick:
-            tick_task = asyncio.create_task(_tick_loop(room))
+            tick_task = asyncio.create_task(_tick_loop(registry))
         try:
             yield
         finally:
@@ -135,7 +141,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.duel_settings = active_settings
-    app.state.duel_room = room
+    app.state.duel_rooms = registry
     app.state.duel_relay = relay
 
     @app.get("/api/game/health", response_model=HealthResponse)
@@ -147,7 +153,18 @@ def create_app(
 
     @app.get("/api/game/rules")
     async def game_rules():
-        return room.rules
+        return ruleset(expelliarmus_enabled=active_settings.expelliarmus_enabled)
+
+    @app.post("/api/game/room", response_model=RoomResponse)
+    async def create_room(request: Request) -> RoomResponse:
+        _require_origin(request.headers.get("origin"), active_settings)
+        try:
+            return RoomResponse(code=registry.create_room())
+        except RoomError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail=error.code,
+            ) from None
 
     @app.post("/api/game/session", response_model=SessionResponse)
     async def create_session(
@@ -155,6 +172,9 @@ def create_app(
         request: Request,
     ) -> SessionResponse:
         _require_origin(request.headers.get("origin"), active_settings)
+        room = registry.room_for_code(payload.code)
+        if room is None:
+            raise HTTPException(status_code=404, detail="room_not_found")
         try:
             return await room.create_session(name=payload.name, source=payload.source)
         except RoomError as error:
@@ -170,6 +190,9 @@ def create_app(
     ) -> Response:
         _require_origin(request.headers.get("origin"), active_settings)
         token = _bearer_token(authorization)
+        room = registry.room_for_token(token)
+        if room is None:
+            raise HTTPException(status_code=401, detail="invalid_token")
         try:
             await room.release_session(token=token, now_ms=active_clock())
         except RoomError as error:
@@ -206,6 +229,7 @@ def create_app(
         peer = GamePeer()
         writer: asyncio.Task[None] | None = None
         explicitly_left = False
+        room: DuelRoom | None = None
         try:
             raw_auth = await asyncio.wait_for(
                 websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS
@@ -214,11 +238,15 @@ def create_app(
                 await websocket.close(code=1009)
                 return
             auth = AuthMessage.model_validate_json(raw_auth)
+            room = registry.room_for_token(auth.token)
+            if room is None:
+                raise RoomError("invalid_token", status_code=401)
             welcome = await room.attach(
                 token=auth.token,
                 peer=peer,
                 now_ms=active_clock(),
             )
+            welcome = welcome.model_copy(update={"ice_servers": await ice.servers()})
             await websocket.send_json(wire_dict(welcome))
             writer = asyncio.create_task(_socket_writer(websocket, peer.mailbox))
 
@@ -276,7 +304,7 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            if not explicitly_left:
+            if room is not None and not explicitly_left:
                 await room.detach(peer=peer, now_ms=active_clock())
             if writer is not None:
                 writer.cancel()
@@ -355,10 +383,10 @@ def create_app(
     return app
 
 
-async def _tick_loop(room: DuelRoom) -> None:
+async def _tick_loop(registry: RoomRegistry) -> None:
     while True:
         await asyncio.sleep(TICK_MS / 1_000)
-        await room.tick()
+        await registry.tick_all()
 
 
 async def _socket_writer(

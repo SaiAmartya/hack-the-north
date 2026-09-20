@@ -273,6 +273,41 @@ def test_saved_defaults_only_carry_the_phone_fields(tmp_path: Path) -> None:
     assert "secret" not in saved["phone_service"]
 
 
+def test_referee_origin_accepts_private_http_and_public_https_only() -> None:
+    assert run_game._referee_origin("http://192.168.1.20:8000") == "http://192.168.1.20:8000"
+    assert run_game._referee_origin("http://10.0.0.4:8000/") == "http://10.0.0.4:8000"
+    assert run_game._referee_origin("https://wandduel-referee.onrender.com/") == "https://wandduel-referee.onrender.com"
+    assert run_game._referee_origin(" https://quick.trycloudflare.com ") == "https://quick.trycloudflare.com"
+    for rejected in (
+        "http://8.8.8.8:8000",
+        "http://192.168.1.20:8001",
+        "http://192.168.1.20",
+        "http://0.0.0.0:8000",
+        "https://user:pw@host.example",
+        "https://host.example/api",
+        "https://host.example/?x=1",
+        "ws://host.example",
+        "host.example",
+    ):
+        with pytest.raises(ValueError):
+            run_game._referee_origin(rejected)
+
+
+def test_saved_defaults_merge_the_hosted_referee_with_phone_fields(tmp_path: Path) -> None:
+    path = tmp_path / "launcher.json"
+    run_game._save_defaults(None, None, path, referee="https://referee.example")
+    assert run_game._load_defaults(path) == {"referee": "https://referee.example"}
+    run_game._save_defaults("https://wands.example", tmp_path / "secret", path)
+    assert run_game._load_defaults(path) == {
+        "phone_service": "https://wands.example",
+        "phone_secret_file": str((tmp_path / "secret").resolve()),
+        "referee": "https://referee.example",
+    }
+    run_game._save_defaults(None, None, path, referee="https://other.example")
+    assert run_game._load_defaults(path)["referee"] == "https://other.example"
+    assert run_game._load_defaults(path)["phone_service"] == "https://wands.example"
+
+
 def test_previous_stack_is_only_stopped_when_the_pid_is_this_launcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     pidfile = tmp_path / "launcher.pid"
     assert run_game._stop_previous(pidfile) is False

@@ -4,9 +4,13 @@ is downloaded on first use if it is missing.
     python3 tools/run_game.py                      # full stack with the saved phone defaults
     python3 tools/run_game.py --save-defaults --phone-service https://... --phone-secret-file <file>
     python3 tools/run_game.py --no-phone           # badge/replay only, ignore saved phone defaults (--badge-only also skips them)
+    python3 tools/run_game.py --referee https://<hosted-referee> [--save-defaults]   # play over the internet
+    python3 tools/run_game.py --local-referee      # ignore a saved hosted referee for this run
 
 A previous stack started by this launcher is stopped automatically before the new one starts;
-ports held by anything else still block startup.
+ports held by anything else still block startup. With a hosted https referee only the frontend
+and the speech helper run here; the launcher wakes the referee before printing Game ready and
+keeps it awake while the stack runs.
 """
 from __future__ import annotations
 
@@ -42,6 +46,10 @@ REFEREE_PORT = 8000
 SPEECH_PORT = 8001
 STARTUP_TIMEOUT_SECONDS = 60.0
 HEALTH_REQUEST_TIMEOUT_SECONDS = 1.0
+# A hosted free-tier referee sleeps when idle and takes about a minute to wake.
+HOSTED_STARTUP_TIMEOUT_SECONDS = 150.0
+HOSTED_HEALTH_REQUEST_TIMEOUT_SECONDS = 5.0
+HOSTED_KEEPALIVE_SECONDS = 240.0
 MAX_HEALTH_BYTES = 64 * 1024
 
 
@@ -58,18 +66,49 @@ def _load_defaults(path: Path | None = None) -> dict[str, str]:
         return {}
     if not isinstance(payload, dict):
         return {}
-    allowed = {"phone_service", "phone_secret_file"}
+    allowed = {"phone_service", "phone_secret_file", "referee"}
     return {key: value for key, value in payload.items() if key in allowed and isinstance(value, str) and value}
 
 
-def _save_defaults(phone_service: str, phone_secret_file: Path, path: Path | None = None) -> None:
+def _save_defaults(
+    phone_service: str | None,
+    phone_secret_file: Path | None,
+    path: Path | None = None,
+    *,
+    referee: str | None = None,
+) -> None:
+    """Merge the given defaults into the launcher file; fields not given keep their saved value."""
     path = path or DEFAULTS_FILE
+    saved = _load_defaults(path)
+    if phone_service and phone_secret_file:
+        saved["phone_service"] = phone_service
+        saved["phone_secret_file"] = str(phone_secret_file.resolve())
+    if referee:
+        saved["referee"] = referee
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = path.with_suffix(".json.pending")
-    pending.write_text(json.dumps({"phone_service": phone_service, "phone_secret_file": str(phone_secret_file.resolve())}, indent=2) + "\n")
+    pending.write_text(json.dumps(saved, indent=2) + "\n")
     if os.name != "nt":
         os.chmod(pending, 0o600)
     pending.replace(path)
+
+
+def _referee_origin(value: str) -> str:
+    """Accept laptop A's private http://IP:8000 or one public https:// origin; nothing else."""
+    parts = urlsplit(value.strip())
+    if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment or not parts.hostname:
+        raise ValueError("Select one referee origin without a path, query or credentials")
+    if parts.scheme == "https":
+        return f"https://{parts.netloc}"
+    if parts.scheme == "http":
+        try:
+            address = ipaddress.ip_address(parts.hostname)
+        except ValueError:
+            raise ValueError("A plain-http referee must be a private IPv4 address on port 8000") from None
+        if address.version != 4 or not address.is_private or address.is_unspecified or parts.port != REFEREE_PORT:
+            raise ValueError("A plain-http referee must be a private IPv4 address on port 8000")
+        return f"http://{parts.hostname}:{REFEREE_PORT}"
+    raise ValueError("Referee must be http://PRIVATE_IP:8000 or an https:// origin")
 
 
 SPEECH_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt", ".wand-speech-model.json")
@@ -195,6 +234,7 @@ def _request_health(
     url: str,
     headers: dict[str, str] | None = None,
     ssl_context: ssl.SSLContext | None = None,
+    timeout: float = HEALTH_REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
     request = Request(url, headers=headers or {})
     opener = build_opener(
@@ -203,7 +243,7 @@ def _request_health(
         HTTPSHandler(context=ssl_context),
     )
     try:
-        with opener.open(request, timeout=HEALTH_REQUEST_TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise StartupError(f"health endpoint returned HTTP {response.status}")
             body = response.read(MAX_HEALTH_BYTES + 1)
@@ -238,6 +278,7 @@ def _readiness_issues(
     referee_health_url: str,
     speech_secret: str,
     frontend_ssl_context: ssl.SSLContext | None = None,
+    game_timeout: float = HEALTH_REQUEST_TIMEOUT_SECONDS,
 ) -> list[str]:
     issues: list[str] = []
     for label, url in (
@@ -248,6 +289,7 @@ def _readiness_issues(
             payload = _request_health(
                 url,
                 ssl_context=frontend_ssl_context if label == "frontend" else None,
+                timeout=game_timeout,
             )
             if not (
                 payload.get("version") == 1
@@ -278,8 +320,10 @@ def _wait_for_readiness(
     referee_health_url: str,
     speech_secret: str,
     frontend_ssl_context: ssl.SSLContext | None = None,
+    game_timeout: float = HEALTH_REQUEST_TIMEOUT_SECONDS,
+    startup_timeout: float = STARTUP_TIMEOUT_SECONDS,
 ) -> None:
-    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+    deadline = time.monotonic() + startup_timeout
     issues = ["startup checks have not completed"]
     while time.monotonic() < deadline:
         for label, process in processes:
@@ -293,6 +337,7 @@ def _wait_for_readiness(
             referee_health_url,
             speech_secret,
             frontend_ssl_context,
+            game_timeout,
         )
         if not issues:
             for label, process in processes:
@@ -304,7 +349,7 @@ def _wait_for_readiness(
             return
         time.sleep(0.25)
     raise StartupError(
-        f"readiness timed out after {STARTUP_TIMEOUT_SECONDS:.0f}s: "
+        f"readiness timed out after {startup_timeout:.0f}s: "
         + "; ".join(issues)
     )
 
@@ -314,7 +359,8 @@ def main() -> int:
     parser.add_argument("--phone-host", help="Approved private laptop IP; requires trusted TLS cert/key")
     parser.add_argument("--cert", type=Path)
     parser.add_argument("--key", type=Path)
-    parser.add_argument("--referee", help="Laptop A's explicitly approved http://PRIVATE_IP:8000")
+    parser.add_argument("--referee", help="Use a referee elsewhere: laptop A's http://PRIVATE_IP:8000 or the hosted https:// origin")
+    parser.add_argument("--local-referee", action="store_true", help="Ignore a saved hosted referee for this run")
     parser.add_argument("--referee-bind", help="Explicitly expose only the referee on this private IP; frontend stays localhost")
     parser.add_argument("--serve-referee", action="store_true", help="Explicitly expose referee on --phone-host for a second laptop")
     parser.add_argument("--allow-origin", action="append", default=[], help="Exact second laptop HTTPS origin; no wildcard")
@@ -327,14 +373,25 @@ def main() -> int:
     parser.add_argument("--no-phone", action="store_true", help="Ignore saved phone defaults for this run")
     parser.add_argument("--dev", action="store_true", help="Opt into hot reload; default is a stable build for human QA")
     args = parser.parse_args()
-    if args.save_defaults:
-        if not (args.phone_service and args.phone_secret_file): parser.error("--save-defaults needs --phone-service and --phone-secret-file")
-    elif not args.no_phone and not args.phone_service and not args.phone_secret_file and not args.badge_only:
+    phone_flags = bool(args.phone_service or args.phone_secret_file)
+    if args.save_defaults and not (args.phone_service and args.phone_secret_file) and not args.referee:
+        parser.error("--save-defaults needs --phone-service and --phone-secret-file, --referee, or both")
+    if not args.no_phone and not phone_flags and not args.badge_only:
         saved = _load_defaults()
         if saved.get("phone_service") and saved.get("phone_secret_file"):
             args.phone_service = saved["phone_service"]
             args.phone_secret_file = Path(saved["phone_secret_file"])
             print(f"Using saved phone defaults from {DEFAULTS_FILE}", flush=True)
+    if args.referee:
+        try:
+            args.referee = _referee_origin(args.referee)
+        except ValueError as error:
+            parser.error(str(error))
+    elif not (args.referee_bind or args.serve_referee or args.local_referee):
+        saved_referee = _load_defaults().get("referee")
+        if saved_referee:
+            args.referee = saved_referee
+            print(f"Using saved referee {args.referee} from {DEFAULTS_FILE} (--local-referee ignores it)", flush=True)
     phone_secret = None
     if bool(args.phone_service) != bool(args.phone_secret_file):
         parser.error("Hosted phone needs --phone-service and --phone-secret-file")
@@ -351,7 +408,7 @@ def main() -> int:
         if len(phone_secret) != 64 or any(c not in "0123456789abcdef" for c in phone_secret):
             parser.error("Enrollment secret must be 32 random bytes encoded as lowercase hex")
         if args.badge_only: parser.error("Badge-only qualification cannot enable hosted phone")
-        if args.save_defaults:
+        if args.save_defaults and phone_flags:
             _save_defaults(args.phone_service, args.phone_secret_file)
             print(f"Saved phone defaults to {DEFAULTS_FILE}; plain `python3 tools/run_game.py` now uses them.", flush=True)
     if bool(args.cert) != bool(args.key): parser.error("Both --cert and --key are required")
@@ -367,11 +424,15 @@ def main() -> int:
         if args.referee or args.serve_referee: parser.error("Choose exactly one referee mode")
     for origin in args.allow_origin:
         if not origin.startswith("https://") or "*" in origin or not origin.endswith(":5173"): parser.error("Use exact HTTPS origins on port 5173")
+    hosted_referee = bool(args.referee and args.referee.startswith("https://"))
+    if args.save_defaults and args.referee:
+        _save_defaults(None, None, referee=args.referee)
+        print(f"Saved referee default {args.referee} to {DEFAULTS_FILE}; `--local-referee` ignores it for one run.", flush=True)
     python = ROOT / "apps/host/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not python.exists() or not npm: parser.error("Install the documented Python 3.11 environment and web dependencies first")
     env = os.environ.copy()
-    for name in ("WAND_HOST", "WAND_FRONTEND_HOST", "WAND_REFEREE_URL", "WAND_TLS_CERT", "WAND_TLS_KEY", "WAND_ALLOWED_ORIGINS", "WAND_ALLOW_REPLAY", "WAND_DEV_RELAY", "WAND_ENABLE_EXPELLIARMUS", "WAND_SPEECH_SECRET", "WAND_SPEECH_MODEL_DIR", "VITE_WAND_QA", "WAND_PHONE_SERVICE", "WAND_PHONE_CREATE_SECRET", "WAND_QA_PORTS", "WAND_GAME_BUILD_DIR"):
+    for name in ("WAND_HOST", "WAND_FRONTEND_HOST", "WAND_REFEREE_URL", "WAND_TLS_CERT", "WAND_TLS_KEY", "WAND_ALLOWED_ORIGINS", "WAND_ALLOW_REPLAY", "WAND_DEV_RELAY", "WAND_ENABLE_EXPELLIARMUS", "WAND_SPEECH_SECRET", "WAND_SPEECH_MODEL_DIR", "VITE_WAND_QA", "WAND_PHONE_SERVICE", "WAND_PHONE_CREATE_SECRET", "WAND_QA_PORTS", "WAND_GAME_BUILD_DIR", "WAND_ICE_SERVERS", "WAND_TURN_KEY_ID", "WAND_TURN_API_TOKEN", "PORT"):
         env.pop(name, None)
     env["WAND_SPEECH_SECRET"] = secrets.token_urlsafe(32)
     env["WAND_FRONTEND_HOST"] = args.phone_host or "127.0.0.1"
@@ -436,17 +497,30 @@ def main() -> int:
             processes.append(("referee", subprocess.Popen([str(python), "-m", "phantom_host.duel_app"], cwd=ROOT/"apps/host", env=env)))
         processes.append(("speech helper", subprocess.Popen([str(python), "-m", "phantom_host.speech_app"], cwd=ROOT/"apps/host", env=env)))
         processes.append(("frontend", subprocess.Popen([npm, "run", "dev" if args.dev else "preview"], cwd=ROOT/"apps/web", env=frontend_env)))
+        referee_health_url = f"{referee_url}/api/game/health"
+        if hosted_referee:
+            print(f"Waking the hosted referee at {referee_url} (a sleeping free instance takes about a minute) ...", flush=True)
         _wait_for_readiness(
             processes,
             f"{origin}/api/game/health",
-            f"{referee_url}/api/game/health",
+            referee_health_url,
             env["WAND_SPEECH_SECRET"],
             frontend_ssl_context,
+            HOSTED_HEALTH_REQUEST_TIMEOUT_SECONDS if hosted_referee else HEALTH_REQUEST_TIMEOUT_SECONDS,
+            HOSTED_STARTUP_TIMEOUT_SECONDS if hosted_referee else STARTUP_TIMEOUT_SECONDS,
         )
         print(f"Game ready: {origin}", flush=True)
+        if hosted_referee: print(f"Hosted referee: {referee_url} (kept awake while this stack runs).", flush=True)
         print("Hot reload enabled." if args.dev else "Stable QA build; source edits and automated tests do not replace this session.", flush=True)
         print("Ctrl+C stops this stack. No device or certificate settings were changed.", flush=True)
-        while all(process.poll() is None for _, process in processes): time.sleep(0.25)
+        next_keepalive = time.monotonic() + HOSTED_KEEPALIVE_SECONDS
+        while all(process.poll() is None for _, process in processes):
+            time.sleep(0.25)
+            if hosted_referee and time.monotonic() >= next_keepalive:
+                # Traffic keeps a free-tier instance awake; a miss only means the next connect waits.
+                try: _request_health(referee_health_url, timeout=HOSTED_HEALTH_REQUEST_TIMEOUT_SECONDS)
+                except StartupError: pass
+                next_keepalive = time.monotonic() + HOSTED_KEEPALIVE_SECONDS
         return 1
     except KeyboardInterrupt:
         return 0

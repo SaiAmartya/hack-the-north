@@ -52,6 +52,12 @@ helper, not physical gameplay. The default stable build does not hot-reload; res
 changing source. **Ctrl+C** stops this stack. First-time phone setup is in
 [the setup guide](docs/TEAM-SETUP.md#3-connect-an-iphone).
 
+On the page, one player chooses **Start a duel** and reads the six-character code to the
+other, who chooses **Join with code**; each then connects a badge or iPhone. One referee
+serves several duels at once, one per code. To play from different networks, point both
+laptops at the hosted referee with `tools/run_game.py --referee https://<name>.onrender.com
+--save-defaults`; see [play over the internet](docs/TEAM-SETUP.md#5-play-over-the-internet-hosted-referee).
+
 Badge firmware 0.2.1 is flashed on WAND-B602 and awaiting its physical QA card; the iPhone
 path is the parallel physical option. Neither physical path is qualified for a demo yet.
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fixture from "../../../host/tests/fixtures/game-welcome-v1.json";
-import { parseRules, parseSnapshot } from "./contracts";
+import { parseIceServers, parseRules, parseSnapshot } from "./contracts";
 
 describe("Python/TypeScript wire fixture", () => {
   it("accepts the exact Pydantic welcome, including not-yet-ready null fields", () => {
@@ -13,6 +13,21 @@ describe("Python/TypeScript wire fixture", () => {
     expect(
       parseSnapshot(fixture.snapshot).recentEvents[0].stateVersion,
     ).toBeGreaterThan(0);
+    expect(parseIceServers(fixture.iceServers)).toEqual([
+      { urls: ["stun:stun.cloudflare.com:3478"] },
+    ]);
+  });
+  it("keeps TURN credentials, tolerates an older referee and rejects junk ICE servers", () => {
+    expect(parseIceServers(undefined)).toEqual([]);
+    expect(
+      parseIceServers([
+        { urls: "turns:turn.example:443?transport=tcp", username: "u", credential: "c" },
+      ]),
+    ).toEqual([
+      { urls: ["turns:turn.example:443?transport=tcp"], username: "u", credential: "c" },
+    ]);
+    for (const junk of [{}, [1], [{ urls: [] }], [{ urls: ["http://x"] }]])
+      expect(() => parseIceServers(junk)).toThrow();
   });
   it("rejects malformed clocks, players, projectiles and missing event versions", () => {
     expect(() =>

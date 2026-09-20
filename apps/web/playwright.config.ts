@@ -20,7 +20,13 @@ export default defineConfig({
         process.platform === "win32"
           ? "cd ../host && .venv\\Scripts\\python.exe -m uvicorn phantom_host.duel_app:app --host 127.0.0.1 --port 18000"
           : "cd ../host && .venv/bin/python -m uvicorn phantom_host.duel_app:app --host 127.0.0.1 --port 18000",
-      env: { WAND_ALLOW_REPLAY: "true", WAND_DEV_RELAY: "true", WAND_ALLOWED_ORIGINS: "http://127.0.0.1:15173" },
+      env: {
+        WAND_ALLOW_REPLAY: "true",
+        WAND_DEV_RELAY: "true",
+        WAND_ALLOWED_ORIGINS: "http://127.0.0.1:15173",
+        // Browser tests stay offline: no STUN lookups during in-page negotiation.
+        WAND_ICE_SERVERS: "[]",
+      },
       url: "http://127.0.0.1:18000/api/game/health",
       reuseExistingServer: false,
     },

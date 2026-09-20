@@ -16,11 +16,11 @@ export class VideoLink {
     private readonly onIssue: (issue: string) => void,
   ) {}
 
-  start(local: MediaStream, polite: boolean) {
+  start(local: MediaStream, polite: boolean, iceServers: RTCIceServer[] = []) {
     this.stop();
     const epoch = this.epoch;
     const videoGeneration = (this.localVideoGeneration += 1);
-    const pc = (this.pc = new RTCPeerConnection({ iceServers: [] }));
+    const pc = (this.pc = new RTCPeerConnection({ iceServers }));
     const track = local.getVideoTracks()[0];
     this.video = track
       ? pc.addTransceiver(track, {

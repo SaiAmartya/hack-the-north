@@ -31,7 +31,7 @@ The badge is the wand, not a controller. During combat there are no spell button
 | Input contract | Exact canonical incantation plus compatible fresh motion; neither alone casts |
 | Game | Stupefy, Protego, then Expelliarmus only after the two-spell core passes |
 | Authority | One Python referee on laptop A owns health, cooldowns, projectile deadlines, impacts and results |
-| Media | Browser-to-browser WebRTC video only; no peer audio and no TURN service in MVP |
+| Media | Browser-to-browser WebRTC video only; no peer audio. ICE servers come from the referee's welcome: STUN by default, Cloudflare TURN when the hosted referee has a TURN key |
 | Rendering | Opponent HTML video plus one transparent plain-Three.js fixed-anchor effects canvas and a DOM HUD |
 | State | In-memory room and browser-local calibration; no accounts, database or match recovery |
 
@@ -255,7 +255,7 @@ The player journey is explicit:
 5. **Countdown/Play:** microphone worklet, local helper and motion streams are already healthy before zero; no mid-round source switching.
 6. **Result:** shared result/recap, stop one-shot effects, then explicit Rematch or Leave.
 
-Use one video-only `RTCPeerConnection` per client with the perfect-negotiation pattern, authorized/generation-scoped signalling and queued ICE until a remote description exists. Start at 720p/30 fps; low quality uses 480p. Mute self-preview. No peer audio, public TURN, recording or reconnect-resume system. Stop every media track and clear signalling generations on Leave.
+Use one video-only `RTCPeerConnection` per client with the perfect-negotiation pattern, authorized/generation-scoped signalling and queued ICE until a remote description exists. Start at 720p/30 fps; low quality uses 480p. Mute self-preview. No peer audio, recording or reconnect-resume system. The peer connection uses the ICE servers from the welcome message (STUN by default, short-lived TURN credentials minted by the hosted referee when configured). Stop every media track and clear signalling generations on Leave.
 
 ### 3.7 Visual and audio specification
 

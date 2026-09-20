@@ -58,9 +58,18 @@ class WireModel(BaseModel):
     )
 
 
+RoomCode = Annotated[str, Field(min_length=6, max_length=6, pattern=r"^[A-Z0-9]{6}$")]
+RoomId = Annotated[str, Field(min_length=4, max_length=8, pattern=r"^[A-Za-z0-9]+$")]
+
+
+class RoomResponse(WireModel):
+    code: RoomCode
+
+
 class SessionRequest(WireModel):
     name: str = Field(min_length=1, max_length=24)
     source: Source
+    code: RoomCode
 
     @field_validator("name")
     @classmethod
@@ -74,7 +83,7 @@ class SessionRequest(WireModel):
 class SessionResponse(WireModel):
     token: str
     slot: Slot
-    room_id: Literal["main"] = "main"
+    room_id: RoomId = "main"
 
 
 class PairResponse(WireModel):
@@ -245,7 +254,7 @@ class DuelEvent(WireModel):
 
 
 class Snapshot(WireModel):
-    room_id: Literal["main"] = "main"
+    room_id: RoomId = "main"
     room_generation: int
     round_id: int
     state_version: int
@@ -265,14 +274,25 @@ class SnapshotMessage(WireModel):
     snapshot: Snapshot
 
 
+class IceServer(WireModel):
+    """One browser `RTCIceServer`: STUN needs no credentials, TURN carries short-lived ones."""
+
+    urls: tuple[Annotated[str, Field(min_length=1, max_length=256)], ...] = Field(
+        min_length=1, max_length=8
+    )
+    username: str | None = Field(default=None, max_length=512)
+    credential: str | None = Field(default=None, max_length=512)
+
+
 class WelcomeMessage(WireModel):
     v: Literal[1] = 1
     type: Literal["welcome"] = "welcome"
     slot: Slot
-    room_id: Literal["main"] = "main"
+    room_id: RoomId = "main"
     connection_generation: int
     rules: RulesetWire
     snapshot: Snapshot
+    ice_servers: tuple[IceServer, ...] = Field(default=(), max_length=8)
 
 
 class AckMessage(WireModel):

@@ -50,6 +50,7 @@ afterEach(() => {
 
 it("stops renewing badge feedback and clears evidence when the referee is lost", () => {
   const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
   const stopFeedback = vi.fn();
   controller.wand = {
     stopFeedback,
@@ -74,6 +75,7 @@ it("does not admit speech beginning during calibration into fusion", () => {
     return () => {};
   });
   const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
   const begin = vi.spyOn(controller.fusion, "beginUtterance");
   onset({ id: "calibrating", generation: 1, startMs: 0 });
   expect(begin).not.toHaveBeenCalled();
@@ -100,6 +102,7 @@ it("keeps recognition paused through motion calibration and enables it for pract
   vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
   vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
   const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
   const recognition = vi.spyOn(controller.speech, "setRecognitionEnabled");
   const microphone = vi.spyOn(controller.speech, "start").mockResolvedValue();
   await controller.startMic();
@@ -152,6 +155,7 @@ it("uses POST-only local brokers and requires explicit hosted phone approval", a
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
   const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
 
   const connecting = controller.connect("phone");
   await flushPromises();
@@ -219,6 +223,7 @@ it("keeps the trusted-LAN code flow when hosted pairing is disabled", async () =
     expiresAtMs: 60_000,
   });
   const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
 
   const connecting = controller.connect("phone");
   await flushPromises();
@@ -246,10 +251,11 @@ it("re-establishes the referee session when a badge retry succeeds after an init
   const gameConnect = vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
   vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
   const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
   await controller.connect("ble");
   expect(gameConnect).not.toHaveBeenCalled();
   await controller.retryWand();
-  expect(gameConnect).toHaveBeenCalledWith("ble");
+  expect(gameConnect).toHaveBeenCalledWith("ble", "K7X2PD");
   expect(controller.busy).toBe(false);
   controller.destroy();
 });

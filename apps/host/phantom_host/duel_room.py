@@ -144,10 +144,12 @@ class DuelRoom:
         allow_phone: bool = False,
         allow_replay: bool = False,
         expelliarmus_enabled: bool = False,
+        room_id: str = "main",
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
+        self.room_id = room_id
         self.engine = DuelEngine(expelliarmus_enabled=expelliarmus_enabled)
         self._rules = ruleset(expelliarmus_enabled=expelliarmus_enabled)
         self._sessions: dict[str, PlayerSession] = {}
@@ -169,6 +171,9 @@ class DuelRoom:
 
     def session_for_token(self, token: str) -> PlayerSession | None:
         return self._sessions.get(token)
+
+    def has_sessions(self) -> bool:
+        return bool(self._sessions)
 
     async def create_session(self, *, name: str, source: Source) -> SessionResponse:
         if source is Source.PHONE and not self.allow_phone:
@@ -206,7 +211,7 @@ class DuelRoom:
             snapshot = self._snapshot_locked(now_ms)
             peers = self._peers_locked()
         self._broadcast_snapshot(peers, snapshot)
-        return SessionResponse(token=token, slot=available)
+        return SessionResponse(token=token, slot=available, room_id=self.room_id)
 
     async def attach(self, *, token: str, peer: GamePeer, now_ms: int) -> WelcomeMessage:
         async with self._lock:
@@ -231,6 +236,7 @@ class DuelRoom:
             snapshot = self._snapshot_locked(now_ms)
             welcome = WelcomeMessage(
                 slot=session.slot,
+                room_id=self.room_id,
                 connection_generation=session.connection_generation,
                 rules=self._rules,
                 snapshot=snapshot,
@@ -689,6 +695,7 @@ class DuelRoom:
                 },
             )
         return Snapshot(
+            room_id=self.room_id,
             room_generation=self.room_generation,
             round_id=self.engine.round_id,
             state_version=self.engine.state_version,

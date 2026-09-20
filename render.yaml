@@ -1,0 +1,34 @@
+# Render Blueprint: the hosted Wandduel referee (one two-player-room-per-code game server).
+#
+# Free web service, no card required. It sleeps after 15 idle minutes and wakes in about a
+# minute; tools/run_game.py --referee https://<name>.onrender.com wakes it before "Game ready"
+# and keeps it awake while a stack runs. Everything else (frontend, speech helper, phone Worker)
+# stays where it is today. Exactly one instance: room state lives in this process.
+services:
+  - type: web
+    name: wandduel-referee
+    runtime: python
+    plan: free
+    region: ohio
+    rootDir: apps/host
+    buildCommand: pip install .
+    startCommand: uvicorn phantom_host.duel_app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/game/health
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      # Each laptop's local Vite proxy forwards the browser's own origin unchanged.
+      - key: WAND_ALLOWED_ORIGINS
+        value: http://127.0.0.1:5173,http://localhost:5173
+      # iPhone players need the phone source; scripted replay stays off in production.
+      - key: WAND_DEV_RELAY
+        value: "true"
+      - key: WAND_ALLOW_REPLAY
+        value: "false"
+      # Optional Cloudflare Realtime TURN key for opponent video across NATs. Leave unset for
+      # STUN-only. Set both in the Render dashboard; never commit them.
+      - key: WAND_TURN_KEY_ID
+        sync: false
+      - key: WAND_TURN_API_TOKEN
+        sync: false

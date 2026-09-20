@@ -84,6 +84,11 @@ still wrong: permissions/origin checks are scoped to the selected origin. Startu
 frontend, referee and warm speech worker; it is not a declaration that physical calibration or
 multiplayer has passed.
 
+On the page, one player chooses **Start a duel** and reads the six-character duel code to the
+other, who chooses **Join with code**; both then connect a wand. The referee keeps one room
+per code, so several pairs can duel on the same referee; a room nobody occupies for ten
+minutes disappears. **Leave duel** returns to the code screen.
+
 The default launcher builds a stable temporary frontend snapshot. Source edits do not replace
 a running session. **Ctrl+C**, wait for shutdown, then rerun after updates. `--dev` opts into
 hot reload for engineering only. Rerunning the launcher first stops a stack it started itself
@@ -195,7 +200,67 @@ with `--no-phone` (saved phone defaults would otherwise still apply) and select 
 Badge-only qualification can use `--badge-only` instead, which also skips them.
 A badge on a 0.1.x diagnostic image cannot pass Ready; flash the current 0.2.x image (0.2.1) rather than changing browser gates.
 
-## 5. Repeatable checks and useful failure reports
+## 5. Play over the internet (hosted referee)
+
+Two laptops on different networks share one hosted referee instead of laptop A's private IP.
+Each laptop still runs its own frontend and speech helper; only game traffic (`/api/game`,
+`/ws/game`) leaves the laptop, over HTTPS/WSS through the local proxy. Phones keep using the
+public phone service, and opponent video stays a direct WebRTC connection that now receives a
+STUN server, or short-lived TURN credentials, from the referee.
+
+### Deploy the referee once (Render, free)
+
+[`render.yaml`](../render.yaml) at the repository root describes the service: a free Python
+web service (no card needed on the Hobby workspace), region Ohio, `rootDir apps/host`, health
+check `/api/game/health`, one instance. The service owner does this once:
+
+1. Sign in at render.com, connect the GitHub repository, choose **New → Blueprint** and pick
+   this repository and branch. Wait for the first deploy to report healthy and note the URL,
+   `https://<name>.onrender.com`.
+2. Optional, for video across strict NATs: in the Cloudflare dashboard open **Realtime →
+   TURN**, create a TURN key, and enter its key id and API token as the service's
+   `WAND_TURN_KEY_ID` and `WAND_TURN_API_TOKEN` environment variables in Render. Never commit
+   or paste them anywhere else. Without them the referee hands out STUN only, which is enough
+   for most home networks and always for a shared hotspot.
+3. A deploy replaces the instance and drops every live game socket. `autoDeploy` is off in
+   the blueprint, so deploy manually between matches.
+
+The free instance sleeps after 15 idle minutes and takes about a minute to wake. The launcher
+wakes it before printing `Game ready` and keeps it awake while your stack runs, so only the
+first player after a quiet period waits longer at startup.
+
+### Run each laptop against it
+
+macOS:
+
+```sh
+apps/host/.venv/bin/python tools/run_game.py --referee https://<name>.onrender.com --save-defaults
+```
+
+Windows PowerShell:
+
+```powershell
+.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --referee https://<name>.onrender.com --save-defaults
+```
+
+`--save-defaults` remembers the referee in `launcher.json` next to the phone defaults, so a
+plain `tools/run_game.py` uses it from then on; `--local-referee` ignores it for one run and
+starts the usual local referee. Saved phone defaults still apply. Each player opens their own
+`http://127.0.0.1:5173`; one starts a duel and reads the code to the other.
+
+### No account at all: tunnel laptop A
+
+For a rehearsal without deploying anything, laptop A runs the normal local stack and exposes
+its referee with a Cloudflare quick tunnel (no account, no uptime guarantee, development use):
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+Laptop B then runs `tools/run_game.py --referee https://<random>.trycloudflare.com` with the
+printed hostname. Laptop A must stay up for the whole session.
+
+## 6. Repeatable checks and useful failure reports
 
 Install the test browser once (not needed merely to play):
 
@@ -231,7 +296,9 @@ in [the input rebuild report](qa/input-rebuild.md).
 | Badge missing after a cold boot | A badge still on 0.1.8 boots with BLE off after any power cycle. Flash the current 0.2.x image (0.2.1: radio on for every reset, advertising watchdog, brownout soft start); check `id` on the console, not repeated blind reconnects. |
 | Badge says firmware needs repair / diagnostic INFO only | The badge is on a 0.1.x image or a diagnostic boot row (`profile creator|rate`). Flash 0.2.1 or select `profile range on`; never restore capability bits in the browser. |
 | Laptop says Reconnecting your badge… | Normal bounded auto-reconnect after a dropped link (up to three per minute). If it ends in Reconnect badge, press it once; if that fails, power-cycle the badge and report `status`. |
-| Camera or multiplayer peers cannot connect | Confirm both clients selected the same referee, their own local origin, network approval and peer reachability. No public TURN fallback is configured. |
+| Camera or multiplayer peers cannot connect | Confirm both clients selected the same referee, their own local origin, network approval and peer reachability. Video relays through TURN only when the hosted referee has a TURN key; otherwise it needs a direct or STUN-reachable path. |
+| `No duel with that code.` | The code was mistyped, the room sat empty for ten minutes, or the two laptops point at different referees. Compare the referee printed at `Game ready` on both laptops, then start a new duel and share the fresh code. |
+| `Waking the hosted referee…` then `readiness timed out` | The free instance takes about a minute to wake; rerun once. If it repeats, open `https://<name>.onrender.com/api/game/health` in a browser and check the Render dashboard for a failed deploy. |
 | Port occupied | A stack started by this launcher is stopped automatically on the next run; anything else holding `5173`, `8000` or `8001` must be stopped by whoever owns it. Do not kill every Node/Python process or print full process environments/arguments. |
 
 Keep the next physical card small: **Sensor active → Reaching laptop → visible stillness →

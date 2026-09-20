@@ -394,10 +394,11 @@ test("phone relay performs the byte handshake, motion, feedback, and page-hide t
     );
     const { WandClient } = await import(/* @vite-ignore */ clientPath);
     const game = new GameClient();
+    const code = await game.createRoom();
     const deadline = performance.now() + 7_000;
     while (true) {
       try {
-        await game.connect("phone");
+        await game.connect("phone", code);
         break;
       } catch (error) {
         if (

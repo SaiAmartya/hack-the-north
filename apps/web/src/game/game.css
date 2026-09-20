@@ -167,6 +167,36 @@ input:focus-visible {
   font-size: 24px;
   line-height: 20px;
 }
+.join-form {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 300px;
+}
+.join-form input {
+  flex: 1 1 140px;
+  min-width: 0;
+  min-height: 50px;
+  padding: 0 14px;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  text-align: center;
+  color: #29243d;
+  background: #fffefb;
+  border: 2px solid #d8cdea;
+  border-radius: 17px;
+  font-variant-numeric: tabular-nums;
+}
+.join-form input::placeholder {
+  letter-spacing: 0;
+  font-weight: 600;
+  color: #9a90aa;
+  text-transform: none;
+}
 .quality-choice {
   display: flex;
   align-items: center;

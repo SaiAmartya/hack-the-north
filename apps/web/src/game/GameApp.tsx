@@ -96,15 +96,27 @@ export function GameApp() {
   const [, redraw] = useState(0);
   const [low, setLow] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [codeInput, setCodeInput] = useState("");
+  // Survives "Choose another wand", which rebuilds the controller; "Leave duel" clears it.
+  const roomCode = useRef("");
   const canvas = useRef<HTMLCanvasElement>(null),
     effects = useRef<DuelEffects>();
   const [renderIssue, setRenderIssue] = useState("");
   useEffect(() => {
     const c = new DuelController();
-    c.onChange = () => redraw((n) => n + 1);
+    c.roomCode = roomCode.current;
+    c.onChange = () => {
+      roomCode.current = c.roomCode;
+      redraw((n) => n + 1);
+    };
     setController(c);
     return () => c.destroy();
   }, [revision]);
+  const leaveDuel = () => {
+    roomCode.current = "";
+    setCodeInput("");
+    setRevision((n) => n + 1);
+  };
   useEffect(() => {
     if (!controller || !canvas.current) return;
     try {
@@ -302,13 +314,61 @@ export function GameApp() {
                   </button>
                 )}
               </>
-            ) : !c?.source ? (
+            ) : !c?.roomCode ? (
               <>
                 <div className="wand-illustration" aria-hidden="true">
                   <span>✦</span>
                   <i />
                   <b>✧</b>
                 </div>
+                <h1>Find your opponent.</h1>
+                <div className="connection-choices">
+                  <button
+                    onClick={() => void c?.startDuel()}
+                    disabled={!c || c.busy}
+                  >
+                    <span aria-hidden="true">✦</span> Start a duel
+                  </button>
+                </div>
+                <form
+                  className="join-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    c?.joinDuel(codeInput);
+                  }}
+                >
+                  <input
+                    aria-label="Duel code"
+                    placeholder="Duel code"
+                    value={codeInput}
+                    onChange={(event) =>
+                      setCodeInput(event.target.value.toUpperCase())
+                    }
+                    maxLength={7}
+                    autoComplete="off"
+                    autoCapitalize="characters"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="submit"
+                    className="secondary"
+                    disabled={!c || c.busy}
+                  >
+                    Join with code
+                  </button>
+                </form>
+                <p className="pair-status">
+                  One player starts; the other joins with the code.
+                </p>
+              </>
+            ) : !c?.source ? (
+              <>
+                <output className="pair-code" aria-label="Duel code">
+                  {c.roomCode}
+                </output>
+                <p className="pair-status" role="status">
+                  Give this code to your opponent.
+                </p>
                 <h1>Wands at the ready.</h1>
                 <div className="connection-choices">
                   <button onClick={() => void c?.connect("ble")} disabled={!c}>
@@ -322,6 +382,9 @@ export function GameApp() {
                     <span aria-hidden="true">▯</span> Connect iPhone
                   </button>
                 </div>
+                <button className="quiet" onClick={leaveDuel}>
+                  Leave duel
+                </button>
                 <label className="quality-choice">
                   <input
                     type="checkbox"
@@ -514,6 +577,9 @@ export function GameApp() {
                       ? "Cast each spell once."
                       : "Ready to duel?"}
                 </h1>
+                <p className="pair-status" role="status">
+                  Duel code {c.roomCode}
+                </p>
                 <div className="ready-actions">
                   {!c.localVideo && (
                     <button

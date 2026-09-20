@@ -22,11 +22,19 @@ def _receive_type(websocket, expected: str, attempts: int = 20):
     raise AssertionError(f"did not receive {expected!r}")
 
 
-def _session(client: TestClient, name: str, source: str = "ble") -> dict:
+def _room(client: TestClient) -> str:
+    response = client.post("/api/game/room", headers=ORIGIN_HEADERS)
+    assert response.status_code == 200, response.text
+    return response.json()["code"]
+
+
+def _session(
+    client: TestClient, name: str, source: str = "ble", code: str | None = None
+) -> dict:
     response = client.post(
         "/api/game/session",
         headers=ORIGIN_HEADERS,
-        json={"name": name, "source": source},
+        json={"name": name, "source": source, "code": code or _room(client)},
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -35,29 +43,84 @@ def _session(client: TestClient, name: str, source: str = "ble") -> dict:
 def test_http_mutations_require_exact_origin_and_virtual_modes_are_off_by_default():
     settings = DuelSettings(start_background_tick=False)
     with TestClient(create_app(settings)) as client:
+        assert client.post("/api/game/room").status_code == 403
         assert client.post(
             "/api/game/session",
-            json={"name": "No origin", "source": "ble"},
+            json={"name": "No origin", "source": "ble", "code": "ABCDEF"},
         ).status_code == 403
         assert client.post(
             "/api/game/session",
             headers={"origin": "http://localhost:51730"},
-            json={"name": "Wrong origin", "source": "ble"},
+            json={"name": "Wrong origin", "source": "ble", "code": "ABCDEF"},
+        ).status_code == 403
+        code = _room(client)
+        assert client.post(
+            "/api/game/session",
+            headers=ORIGIN_HEADERS,
+            json={"name": "Phone", "source": "phone", "code": code},
         ).status_code == 403
         assert client.post(
             "/api/game/session",
             headers=ORIGIN_HEADERS,
-            json={"name": "Phone", "source": "phone"},
-        ).status_code == 403
-        assert client.post(
-            "/api/game/session",
-            headers=ORIGIN_HEADERS,
-            json={"name": "Replay", "source": "replay"},
+            json={"name": "Replay", "source": "replay", "code": code},
         ).status_code == 403
         assert client.post(
             "/api/game/pair",
             headers={**ORIGIN_HEADERS, "authorization": "Bearer secret"},
         ).status_code == 404
+
+
+def test_join_codes_address_independent_rooms():
+    settings = DuelSettings(start_background_tick=False)
+    with TestClient(create_app(settings)) as client:
+        first_room = _room(client)
+        second_room = _room(client)
+        assert first_room != second_room
+        assert len(first_room) == 6 and first_room.isupper()
+        assert first_room.isalnum() and not set(first_room) & set("01IO")
+
+        harry = _session(client, "Harry", code=first_room)
+        draco = _session(client, "Draco", code=second_room)
+        assert harry["slot"] == "P1" and harry["roomId"] == first_room
+        assert draco["slot"] == "P1" and draco["roomId"] == second_room
+        assert _session(client, "Ron", code=first_room)["slot"] == "P2"
+        full = client.post(
+            "/api/game/session",
+            headers=ORIGIN_HEADERS,
+            json={"name": "Hermione", "source": "ble", "code": first_room},
+        )
+        assert full.status_code == 409 and full.json() == {"detail": "room_full"}
+        assert _session(client, "Hermione", code=second_room)["slot"] == "P2"
+
+        unknown = client.post(
+            "/api/game/session",
+            headers=ORIGIN_HEADERS,
+            json={"name": "Lost", "source": "ble", "code": "ZZZZZZ"},
+        )
+        assert unknown.status_code == 404
+        assert unknown.json() == {"detail": "room_not_found"}
+        assert client.post(
+            "/api/game/session",
+            headers=ORIGIN_HEADERS,
+            json={"name": "Lost", "source": "ble", "code": "abc-12"},
+        ).status_code == 422
+
+        with client.websocket_connect("/ws/game", headers=ORIGIN_HEADERS) as one:
+            one.send_json({"v": 1, "type": "auth", "token": harry["token"]})
+            welcome = one.receive_json()
+            assert welcome["roomId"] == first_room
+            assert welcome["snapshot"]["roomId"] == first_room
+            assert welcome["snapshot"]["players"]["P2"]["name"] == "Ron"
+
+
+def test_room_creation_is_capped_per_process():
+    settings = DuelSettings(start_background_tick=False)
+    with TestClient(create_app(settings)) as client:
+        for _ in range(32):
+            _room(client)
+        capped = client.post("/api/game/room", headers=ORIGIN_HEADERS)
+        assert capped.status_code == 429
+        assert capped.json() == {"detail": "too_many_rooms"}
 
 
 def test_session_release_requires_origin_and_own_bearer_token():
@@ -85,7 +148,7 @@ def test_session_release_requires_origin_and_own_bearer_token():
             headers={**ORIGIN_HEADERS, **bearer},
         ).status_code == 401
 
-        replacement = _session(client, "Replacement")
+        replacement = _session(client, "Replacement", code=session["roomId"])
         assert replacement["slot"] == "P1"
 
 
@@ -93,8 +156,9 @@ def test_session_release_rejects_live_socket_but_can_free_other_reservation():
     settings = DuelSettings(start_background_tick=False)
     app = create_app(settings)
     with TestClient(app) as client:
-        active = _session(client, "Harry")
-        orphaned = _session(client, "Draco")
+        code = _room(client)
+        active = _session(client, "Harry", code=code)
+        orphaned = _session(client, "Draco", code=code)
         with client.websocket_connect(
             "/ws/game", headers=ORIGIN_HEADERS
         ) as websocket:
@@ -121,7 +185,7 @@ def test_session_release_rejects_live_socket_but_can_free_other_reservation():
                 },
             )
             assert orphan_release.status_code == 204
-            stored = app.state.duel_room.session_for_token(active["token"])
+            stored = app.state.duel_rooms.session_for_token(active["token"])
             assert stored is not None
             assert stored.connected is True
 
@@ -140,6 +204,13 @@ def test_game_websocket_auth_first_welcome_and_monotonic_pong():
             assert welcome["slot"] == "P1"
             assert welcome["rules"]["tickMs"] == 50
             assert welcome["snapshot"]["players"]["P2"] is None
+            assert welcome["iceServers"] == [
+                {
+                    "urls": ["stun:stun.cloudflare.com:3478"],
+                    "username": None,
+                    "credential": None,
+                }
+            ]
 
             websocket.send_json(
                 {
@@ -193,8 +264,9 @@ def test_game_websocket_rejects_wrong_origin_and_non_auth_first_message():
 
 def test_authenticated_signal_is_forwarded_only_to_the_opponent():
     with TestClient(create_app()) as client:
-        first = _session(client, "Harry")
-        second = _session(client, "Draco")
+        code = _room(client)
+        first = _session(client, "Harry", code=code)
+        second = _session(client, "Draco", code=code)
         with client.websocket_connect(
             "/ws/game", headers=ORIGIN_HEADERS
         ) as one, client.websocket_connect(
@@ -250,7 +322,7 @@ def test_heartbeat_timeout_closes_real_socket_at_exact_deadline():
                     websocket.receive_json()
         # Give the socket finalizer one scheduler turn before inspecting state.
         time.sleep(0.06)
-        stored = app.state.duel_room.session_for_token(session["token"])
+        stored = app.state.duel_rooms.session_for_token(session["token"])
         assert stored is not None
         assert stored.connected is False
 

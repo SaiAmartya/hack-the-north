@@ -1,5 +1,6 @@
 import { socketUrl } from "../phone/relay";
 import {
+  parseIceServers,
   parseRules,
   parseSnapshot,
   type Rules,
@@ -7,11 +8,17 @@ import {
   type Snapshot,
   type Source,
 } from "./contracts";
+/** Six characters from an alphabet without look-alikes; typed input is normalized first. */
+export const ROOM_CODE_PATTERN = /^[A-Z0-9]{6}$/;
+export function normalizeRoomCode(input: string): string {
+  return input.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
 export class GameClient {
   token = "";
   slot?: Slot;
   rules?: Rules;
   snapshot?: Snapshot;
+  iceServers: RTCIceServer[] = [];
   connectionGeneration = 0;
   issue = "";
   private socket?: WebSocket;
@@ -30,10 +37,37 @@ export class GameClient {
   now() {
     return performance.now() + (this.offset ?? 0);
   }
-  async connect(source: Source) {
+  /** Open a fresh duel room; the returned code is what the opponent types to join. */
+  async createRoom(): Promise<string> {
+    const lifecycle = this.lifecycle,
+      abort = new AbortController();
+    this.requests.add(abort);
+    try {
+      const response = await fetch("/api/game/room", {
+        method: "POST",
+        signal: abort.signal,
+      });
+      if (!response.ok)
+        throw new Error(
+          response.status === 429
+            ? "Too many duels right now. Try again soon."
+            : "Start the game server to connect.",
+        );
+      const room = await response.json();
+      if (lifecycle !== this.lifecycle) throw new Error("Connection cancelled");
+      if (typeof room.code !== "string" || !ROOM_CODE_PATTERN.test(room.code))
+        throw new Error("Invalid duel code");
+      return room.code;
+    } finally {
+      this.requests.delete(abort);
+    }
+  }
+  async connect(source: Source, code: string) {
     this.disconnect();
     const lifecycle = this.lifecycle;
     this.issue = "";
+    if (!ROOM_CODE_PATTERN.test(code))
+      throw new Error("Enter the six-character duel code.");
     const abort = new AbortController();
     this.requests.add(abort);
     let session;
@@ -41,14 +75,16 @@ export class GameClient {
       const response = await fetch("/api/game/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Wizard", source }),
+        body: JSON.stringify({ name: "Wizard", source, code }),
         signal: abort.signal,
       });
       if (!response.ok)
         throw new Error(
           response.status === 409
             ? "This duel is full."
-            : "Start the game server to connect.",
+            : response.status === 404
+              ? "No duel with that code."
+              : "Start the game server to connect.",
         );
       session = await response.json();
     } finally {
@@ -87,6 +123,7 @@ export class GameClient {
           if (message.type === "welcome") {
             this.rules = parseRules(message.rules);
             this.snapshot = parseSnapshot(message.snapshot);
+            this.iceServers = parseIceServers(message.iceServers);
             this.connectionGeneration = message.connectionGeneration;
             this.offset = this.snapshot.serverNowMs - performance.now();
             clearTimeout(timeout);
@@ -223,6 +260,7 @@ export class GameClient {
     this.token = "";
     this.slot = undefined;
     this.snapshot = undefined;
+    this.iceServers = [];
     this.offset = undefined;
     this.bestRtt = Infinity;
   }

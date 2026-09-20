@@ -11,7 +11,7 @@ import {
 import { MotionRecognizer, type SpellName } from "../input/motion";
 import { CastFusion } from "../input/fusion";
 import { SpeechClient } from "../speech/client";
-import { GameClient } from "./client";
+import { GameClient, ROOM_CODE_PATTERN, normalizeRoomCode } from "./client";
 import { VideoLink } from "./video";
 import { CueEffect, PresentationPhase, SpellCode, StateStatusFlag, formatDeviceId } from "../wand/protocol";
 import type { Source } from "./contracts";
@@ -23,6 +23,8 @@ export class DuelController {
   readonly fusion: CastFusion;
   wand?: WandClient;
   source?: Source;
+  /** The duel this player started or joined; every referee session is created inside it. */
+  roomCode = "";
   pairingCode = "";
   phoneUrl = "";
   phoneClaim?: HostedClaim;
@@ -176,6 +178,34 @@ export class DuelController {
       this.renderingReady
     );
   }
+  /** Open a new room on the referee and show its code for the opponent. */
+  async startDuel() {
+    if (this.busy || this.roomCode) return;
+    this.busy = true;
+    this.issue = "";
+    this.onChange();
+    try {
+      this.roomCode = await this.game.createRoom();
+    } catch (error) {
+      this.issue = error instanceof Error ? error.message : "Could not start a duel";
+    } finally {
+      this.busy = false;
+      this.onChange();
+    }
+  }
+  /** Accept a code the opponent shared; the referee confirms it exists when the wand connects. */
+  joinDuel(input: string) {
+    if (this.busy || this.roomCode) return;
+    const code = normalizeRoomCode(input);
+    if (!ROOM_CODE_PATTERN.test(code)) {
+      this.issue = "Enter the six-character duel code.";
+      this.onChange();
+      return;
+    }
+    this.issue = "";
+    this.roomCode = code;
+    this.onChange();
+  }
   async connect(source: "ble" | "phone" = "ble") {
     const request = ++this.attemptGeneration;
     this.busy = true;
@@ -205,6 +235,7 @@ export class DuelController {
     this.videoPeerKey = "";
     this.remoteVideo = undefined;
     try {
+      if (!this.roomCode) throw new Error("Start or join a duel first.");
       // Start the chooser inside the user's click, before any HTTP request.
       if (source === "ble") {
         if (!navigator.bluetooth)
@@ -218,7 +249,7 @@ export class DuelController {
         const hosted = await hostedPhoneEnabled(phoneRequest.signal);
         if (!hosted && location.protocol !== "https:")
           throw new Error("Phone control needs the trusted HTTPS setup.");
-        await this.game.connect("phone");
+        await this.game.connect("phone", this.roomCode);
         if (request !== this.attemptGeneration || this.dead) return;
         const hostedPair = hosted
           ? await createHostedPair(phoneRequest.signal)
@@ -268,7 +299,7 @@ export class DuelController {
       }
       if (state.phase !== "streaming")
         throw new Error(state.issue || "Wand connection failed");
-      if (source === "ble") await this.game.connect("ble");
+      if (source === "ble") await this.game.connect("ble", this.roomCode);
       if (request !== this.attemptGeneration || this.dead) return;
       this.pairingCode = "";
       this.phoneUrl = "";
@@ -314,7 +345,8 @@ export class DuelController {
         if (state.phase === "fault" && !state.canRetry) this.issue = state.issue || "Wand connection failed";
         return;
       }
-      if (this.source === "ble" && !this.game.snapshot) await this.game.connect("ble");
+      if (this.source === "ble" && !this.game.snapshot)
+        await this.game.connect("ble", this.roomCode);
       if (request !== this.attemptGeneration || this.dead) return;
       this.syncInputState();
     } catch (error) {
@@ -526,7 +558,11 @@ export class DuelController {
       const key = `${other.slot}:${state.roomGeneration}`;
       if (key !== this.videoPeerKey) {
         this.videoPeerKey = key;
-        this.peer.start(this.localVideo ?? new MediaStream(), slot === "P2");
+        this.peer.start(
+          this.localVideo ?? new MediaStream(),
+          slot === "P2",
+          this.game.iceServers,
+        );
       }
     }
     if (!other?.connected && this.videoPeerKey) {

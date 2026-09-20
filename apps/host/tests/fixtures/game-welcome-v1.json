@@ -95,5 +95,12 @@
         "reason": null
       }
     ]
-  }
+  },
+  "iceServers": [
+    {
+      "urls": ["stun:stun.cloudflare.com:3478"],
+      "username": null,
+      "credential": null
+    }
+  ]
 }

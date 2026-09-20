@@ -109,6 +109,36 @@ export function parseRules(value: unknown): Rules {
     throw new Error("Unsupported game rules");
   return value as Rules;
 }
+/** ICE servers the referee hands both players; absent on an older referee means host candidates only. */
+export function parseIceServers(value: unknown): RTCIceServer[] {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 8)
+    throw new Error("Invalid ICE servers");
+  return value.map((server) => {
+    if (!object(server)) throw new Error("Invalid ICE servers");
+    const urls = Array.isArray(server.urls)
+      ? server.urls
+      : typeof server.urls === "string"
+        ? [server.urls]
+        : [];
+    if (
+      !urls.length ||
+      urls.length > 8 ||
+      !urls.every(
+        (url) =>
+          typeof url === "string" &&
+          url.length <= 256 &&
+          /^(stun|stuns|turn|turns):/.test(url),
+      )
+    )
+      throw new Error("Invalid ICE servers");
+    const parsed: RTCIceServer = { urls: urls as string[] };
+    if (typeof server.username === "string") parsed.username = server.username;
+    if (typeof server.credential === "string")
+      parsed.credential = server.credential;
+    return parsed;
+  });
+}
 export function parseSnapshot(value: unknown): Snapshot {
   if (
     !object(value) ||
