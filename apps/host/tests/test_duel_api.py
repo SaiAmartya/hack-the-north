@@ -135,8 +135,9 @@ def test_session_without_code_creates_and_reserves_a_room_in_one_request():
             assert welcome["roomId"] == welcome["snapshot"]["roomId"] == code
 
 
-@pytest.mark.parametrize("source", ["phone", "replay"])
-def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(source):
+@pytest.mark.parametrize("source", ["phone", "replay", "bot"])
+@pytest.mark.parametrize("mode", ["duel", "solo"])
+def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(source, mode):
     from phantom_host.duel_registry import MAX_ROOMS
 
     app = create_app(DuelSettings(start_background_tick=False))
@@ -144,7 +145,7 @@ def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(s
         for _ in range(MAX_ROOMS + 1):
             rejected = client.post(
                 "/api/game/session", headers=ORIGIN_HEADERS,
-                json={"name": "Unavailable", "source": source, "code": None},
+                json={"name": "Unavailable", "source": source, "code": None, "mode": mode},
             )
             assert rejected.status_code == 403
             assert len(app.state.duel_rooms) == 0
@@ -153,6 +154,36 @@ def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(s
             json={"name": "Wizard", "source": "ble"},
         )
         assert accepted.status_code == 200 and len(app.state.duel_rooms) == 1
+
+
+def test_solo_session_is_atomic_private_and_identified_on_the_wire():
+    app = create_app(DuelSettings(start_background_tick=False))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/game/session", headers=ORIGIN_HEADERS,
+            json={"name": "Harry", "source": "ble", "mode": "solo"},
+        )
+        assert response.status_code == 200
+        session = response.json()
+        assert session["mode"] == "solo" and session["slot"] == "P1"
+        assert len(app.state.duel_rooms) == 1
+        room = app.state.duel_rooms.room_for_code(session["roomId"])
+        assert room.session_for_token("") is None, "the bot must not acquire a player token"
+        for mode, expected in [("duel", "solo_room_private"), ("solo", "solo_requires_new_room")]:
+            outsider = client.post(
+                "/api/game/session", headers=ORIGIN_HEADERS,
+                json={"name": "Intruder", "source": "ble", "code": session["roomId"], "mode": mode},
+            )
+            assert outsider.status_code in (400, 409)
+            assert outsider.json() == {"detail": expected}
+        with client.websocket_connect("/ws/game", headers=ORIGIN_HEADERS) as game:
+            game.send_json({"v": 1, "type": "auth", "token": session["token"]})
+            welcome = game.receive_json()
+            assert welcome["mode"] == welcome["snapshot"]["mode"] == "solo"
+            opponent = welcome["snapshot"]["players"]["P2"]
+            assert opponent["name"] == "Practice Wizard"
+            assert opponent["source"] == "bot" and opponent["connected"] is True
+            assert opponent["hp"] == 100 and opponent["ready"] is False
 
 
 def test_referee_brokers_wand_first_pairing_and_preserves_legacy_session_auth():
@@ -320,13 +351,8 @@ def test_game_websocket_auth_first_welcome_and_monotonic_pong():
             assert welcome["slot"] == "P1"
             assert welcome["rules"]["tickMs"] == 50
             assert welcome["snapshot"]["players"]["P2"] is None
-            assert welcome["iceServers"] == [
-                {
-                    "urls": ["stun:stun.cloudflare.com:3478"],
-                    "username": None,
-                    "credential": None,
-                }
-            ]
+            assert "iceServers" not in welcome
+            assert "connectionGeneration" not in welcome
 
             websocket.send_json(
                 {
@@ -378,22 +404,16 @@ def test_game_websocket_rejects_wrong_origin_and_non_auth_first_message():
             assert websocket.receive_json()["type"] == "welcome"
 
 
-def test_authenticated_signal_is_forwarded_only_to_the_opponent():
+def test_game_socket_rejects_removed_camera_signaling_and_keeps_gameplay_connected():
     with TestClient(create_app()) as client:
-        code = _room(client)
-        first = _session(client, "Harry", code=code)
-        second = _session(client, "Draco", code=code)
+        session = _session(client, "Harry")
         with client.websocket_connect(
             "/ws/game", headers=ORIGIN_HEADERS
-        ) as one, client.websocket_connect(
-            "/ws/game", headers=ORIGIN_HEADERS
-        ) as two:
-            one.send_json({"v": 1, "type": "auth", "token": first["token"]})
-            two.send_json({"v": 1, "type": "auth", "token": second["token"]})
-            assert one.receive_json()["type"] == "welcome"
-            assert two.receive_json()["type"] == "welcome"
+        ) as game:
+            game.send_json({"v": 1, "type": "auth", "token": session["token"]})
+            assert game.receive_json()["type"] == "welcome"
 
-            one.send_json(
+            game.send_json(
                 {
                     "v": 1,
                     "type": "signal",
@@ -402,21 +422,12 @@ def test_authenticated_signal_is_forwarded_only_to_the_opponent():
                     "payload": {"description": {"type": "offer", "sdp": "fixture"}},
                 }
             )
-            ack = _receive_type(one, "ack")
-            assert ack["command"] == "signal"
-            assert ack["requestId"] == "offer-1"
-            assert ack["accepted"] is True
-            forwarded = _receive_type(two, "signal")
-            assert forwarded == {
-                "v": 1,
-                "type": "signal",
-                "from": "P1",
-                "generation": 7,
-                "signalId": "offer-1",
-                "payload": {
-                    "description": {"type": "offer", "sdp": "fixture"}
-                },
-            }
+            assert _receive_type(game, "error") == {"v": 1, "type": "error", "code": "invalid_message"}
+            game.send_json({
+                "v": 1, "type": "heartbeat", "clientMs": 123,
+                "inputGeneration": 1, "healthy": True,
+            })
+            assert _receive_type(game, "pong")["clientMs"] == 123
 
 
 def test_heartbeat_timeout_closes_real_socket_at_exact_deadline():

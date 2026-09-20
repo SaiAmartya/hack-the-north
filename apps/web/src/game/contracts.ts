@@ -2,6 +2,7 @@ export type Slot = "P1" | "P2";
 export const SPELLS = ["stupefy", "protego", "expelliarmus", "incendio", "episkey"] as const;
 export type Spell = (typeof SPELLS)[number];
 export type Source = "phone" | "ble" | "replay";
+export type GameMode = "duel" | "solo";
 export type SpellRule = {
   spell: Spell;
   enabled: boolean;
@@ -21,7 +22,7 @@ export type Rules = {
 export type Player = {
   slot: Slot;
   name: string;
-  source: Source;
+  source: Source | "bot";
   connected: boolean;
   ready: boolean;
   inputHealthy: boolean;
@@ -62,6 +63,7 @@ export type GameEvent = {
 };
 export type Snapshot = {
   roomId: string;
+  mode: GameMode;
   roomGeneration: number;
   roundId: number;
   stateVersion: number;
@@ -109,40 +111,11 @@ export function parseRules(value: unknown): Rules {
     throw new Error("Unsupported game rules");
   return value as Rules;
 }
-/** ICE servers the referee hands both players; absent on an older referee means host candidates only. */
-export function parseIceServers(value: unknown): RTCIceServer[] {
-  if (value == null) return [];
-  if (!Array.isArray(value) || value.length > 8)
-    throw new Error("Invalid ICE servers");
-  return value.map((server) => {
-    if (!object(server)) throw new Error("Invalid ICE servers");
-    const urls = Array.isArray(server.urls)
-      ? server.urls
-      : typeof server.urls === "string"
-        ? [server.urls]
-        : [];
-    if (
-      !urls.length ||
-      urls.length > 8 ||
-      !urls.every(
-        (url) =>
-          typeof url === "string" &&
-          url.length <= 256 &&
-          /^(stun|stuns|turn|turns):/.test(url),
-      )
-    )
-      throw new Error("Invalid ICE servers");
-    const parsed: RTCIceServer = { urls: urls as string[] };
-    if (typeof server.username === "string") parsed.username = server.username;
-    if (typeof server.credential === "string")
-      parsed.credential = server.credential;
-    return parsed;
-  });
-}
 export function parseSnapshot(value: unknown): Snapshot {
   if (
     !object(value) ||
     typeof value.roomId !== "string" ||
+    !["duel", "solo"].includes(String(value.mode)) ||
     !["roomGeneration", "roundId", "stateVersion", "serverNowMs"].every((k) =>
       finite(value[k]),
     ) ||
@@ -161,7 +134,8 @@ export function parseSnapshot(value: unknown): Snapshot {
       !object(p) ||
       p.slot !== key ||
       typeof p.name !== "string" ||
-      !["phone", "ble", "replay"].includes(String(p.source)) ||
+      !["phone", "ble", "replay", "bot"].includes(String(p.source)) ||
+      (p.source === "bot" && (value.mode !== "solo" || key !== "P2")) ||
       !["connected", "ready", "inputHealthy"].every(
         (k) => typeof p[k] === "boolean",
       ) ||

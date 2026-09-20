@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fixture from "../../../host/tests/fixtures/game-welcome-v1.json";
-import { parseIceServers, parseRules, parseSnapshot } from "./contracts";
+import { parseRules, parseSnapshot } from "./contracts";
 
 describe("Python/TypeScript wire fixture", () => {
   it("accepts the exact Pydantic welcome, including not-yet-ready null fields", () => {
@@ -14,21 +14,6 @@ describe("Python/TypeScript wire fixture", () => {
     expect(
       parseSnapshot(fixture.snapshot).recentEvents[0].stateVersion,
     ).toBeGreaterThan(0);
-    expect(parseIceServers(fixture.iceServers)).toEqual([
-      { urls: ["stun:stun.cloudflare.com:3478"] },
-    ]);
-  });
-  it("keeps TURN credentials, tolerates an older referee and rejects junk ICE servers", () => {
-    expect(parseIceServers(undefined)).toEqual([]);
-    expect(
-      parseIceServers([
-        { urls: "turns:turn.example:443?transport=tcp", username: "u", credential: "c" },
-      ]),
-    ).toEqual([
-      { urls: ["turns:turn.example:443?transport=tcp"], username: "u", credential: "c" },
-    ]);
-    for (const junk of [{}, [1], [{ urls: [] }], [{ urls: ["http://x"] }]])
-      expect(() => parseIceServers(junk)).toThrow();
   });
   it("rejects malformed clocks, players, projectiles and missing event versions", () => {
     expect(() =>
@@ -56,5 +41,15 @@ describe("Python/TypeScript wire fixture", () => {
         P1: { ...fixture.snapshot.players.P1, cooldownUntilMs: { stupefy: 0, protego: 0 } },
       },
     })).toThrow();
+  });
+  it("accepts a bot only in the opponent slot of a solo room", () => {
+    const solo = { ...fixture.snapshot, mode: "solo", players: {
+      ...fixture.snapshot.players,
+      P2: { ...fixture.snapshot.players.P1, slot: "P2", source: "bot" },
+    } };
+    expect(parseSnapshot(solo).players.P2?.source).toBe("bot");
+    expect(() => parseSnapshot({ ...solo, mode: "duel" })).toThrow();
+    expect(() => parseSnapshot({ ...solo, players: { ...solo.players, P1: { ...solo.players.P1, source: "bot" } } })).toThrow();
+    expect(() => parseSnapshot({ ...solo, mode: "unknown" })).toThrow();
   });
 });

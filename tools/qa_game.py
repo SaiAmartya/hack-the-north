@@ -24,4 +24,4 @@ for cwd, command in checks:
     result = subprocess.run(command, cwd=cwd)
     if result.returncode:
         sys.exit(result.returncode)
-print("Software QA passed. Physical badge, speech, camera and Windows gates remain separate.")
+print("Software QA passed. Physical badge, speech and Windows gates remain separate.")

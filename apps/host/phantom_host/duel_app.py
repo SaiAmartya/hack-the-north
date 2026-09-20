@@ -16,7 +16,6 @@ from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 
 from phantom_host.duel_engine import TICK_MS, ruleset
-from phantom_host.duel_ice import IceProvider, IceSettings
 from phantom_host.duel_phone import Fetch as PhoneFetch, PhoneBroker, PhoneSettings
 from phantom_host.duel_models import (
     AuthMessage,
@@ -35,7 +34,6 @@ from phantom_host.duel_models import (
     RoomResponse,
     SessionRequest,
     SessionResponse,
-    SignalMessage,
     Source,
     wire_dict,
 )
@@ -74,7 +72,6 @@ class DuelSettings:
     dev_relay_enabled: bool = False
     allow_replay: bool = False
     start_background_tick: bool = True
-    ice: IceSettings = IceSettings()
     phone: PhoneSettings = PhoneSettings()
 
     @classmethod
@@ -96,7 +93,6 @@ class DuelSettings:
             allowed_origins=origins,
             dev_relay_enabled=_environment_flag("WAND_DEV_RELAY"),
             allow_replay=_environment_flag("WAND_ALLOW_REPLAY"),
-            ice=IceSettings.from_environment(),
             phone=PhoneSettings.from_environment(),
         )
 
@@ -119,7 +115,6 @@ def create_app(
         clock_ms=active_clock,
         session_lookup=registry.session_for_token,
     )
-    ice = IceProvider(active_settings.ice)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -175,7 +170,8 @@ def create_app(
         _require_origin(request.headers.get("origin"), active_settings)
         try:
             return await registry.create_session(
-                name=payload.name, source=payload.source, code=payload.code
+                name=payload.name, source=payload.source, code=payload.code,
+                mode=payload.mode,
             )
         except RoomError as error:
             raise HTTPException(
@@ -274,7 +270,6 @@ def create_app(
                 peer=peer,
                 now_ms=active_clock(),
             )
-            welcome = welcome.model_copy(update={"ice_servers": await ice.servers()})
             await websocket.send_json(wire_dict(welcome))
             writer = asyncio.create_task(_socket_writer(websocket, peer.mailbox))
 
@@ -312,8 +307,6 @@ def create_app(
                         message=message,
                         receipt_ms=receipt_ms,
                     )
-                elif isinstance(message, SignalMessage):
-                    response = await room.forward_signal(peer=peer, message=message)
                 elif isinstance(message, LeaveMessage):
                     explicitly_left = True
                     await room.leave(peer=peer, now_ms=receipt_ms)

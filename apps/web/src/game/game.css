@@ -331,8 +331,7 @@ h1 {
   width: 100%;
   margin: 0 auto 14px;
 }
-.error-banner,
-.warning-banner {
+.error-banner {
   display: inline-block;
   padding: 10px 18px;
   color: #913f3b;
@@ -660,39 +659,19 @@ meter::-moz-meter-bar {
   color: #7d705d;
   margin: 9px 0;
 }
-.lobby-instruction {
-  font-size: 9px;
-  line-height: 1.6;
-  max-width: 290px;
-  margin: 10px auto 15px;
-  color: #7e7060;
-}
 .ready-actions {
   display: flex;
   justify-content: center;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
   margin-top: 12px;
 }
 .ready-actions > button:first-child {
   min-width: 170px;
 }
-.ready-actions .quiet {
-  font-size: 9px;
-}
 .setup-card > button {
   font-size: 10px;
   min-height: 40px;
   padding: 8px 14px;
-}
-.setup-preview {
-  width: 100px;
-  height: 60px;
-  object-fit: cover;
-  display: block;
-  margin: 10px auto 0;
-  transform: scaleX(-1);
 }
 .result-score {
   font-size: 9px;
@@ -718,20 +697,6 @@ meter::-moz-meter-bar {
 }
 .result-overlay .result-emblem {
   font-size: 38px;
-}
-.camera-portraits {
-  position: absolute;
-  left: 12px;
-  bottom: 10px;
-  z-index: 5;
-  display: flex;
-  gap: 6px;
-}
-.camera-portraits video {
-  width: 70px;
-  height: 50px;
-  object-fit: cover;
-  border: 2px solid #cabd9a;
 }
 .countdown {
   position: absolute;
@@ -1089,19 +1054,8 @@ meter::-moz-meter-bar {
   .pair-status {
     font-size: 9px;
   }
-  .ready-actions {
-    gap: 7px;
-  }
   .ready-actions > button:first-child {
     min-width: 150px;
-  }
-  .camera-portraits {
-    left: 8px;
-    bottom: 8px;
-  }
-  .camera-portraits video {
-    width: 46px;
-    height: 32px;
   }
   .result-overlay .setup-card {
     padding: 20px;

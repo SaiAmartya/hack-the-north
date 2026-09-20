@@ -1,9 +1,9 @@
 import { socketUrl } from "../phone/relay";
 import {
-  parseIceServers,
   parseRules,
   parseSnapshot,
   type Rules,
+  type GameMode,
   type Slot,
   type Snapshot,
   type Source,
@@ -18,11 +18,10 @@ export class GameClient {
   slot?: Slot;
   rules?: Rules;
   snapshot?: Snapshot;
-  iceServers: RTCIceServer[] = [];
-  connectionGeneration = 0;
   issue = "";
   private socket?: WebSocket;
   private roomId = "";
+  private mode: GameMode = "duel";
   private offset?: number;
   private bestRtt = Infinity;
   private heartbeat?: ReturnType<typeof setInterval>;
@@ -31,8 +30,6 @@ export class GameClient {
   private pendingConnect?: () => void;
   private requests = new Set<AbortController>();
   onChange = () => {};
-  onSignal: (payload: Record<string, unknown>, generation: number) => void =
-    () => {};
   onAck: (message: Record<string, unknown>) => void = () => {};
   getHealth = () => ({ healthy: false, inputGeneration: 0 });
   now() {
@@ -63,10 +60,13 @@ export class GameClient {
       this.requests.delete(abort);
     }
   }
-  async connect(source: Source, code?: string): Promise<void> {
+  async connect(source: Source, code?: string, mode: GameMode = "duel"): Promise<void> {
     this.disconnect();
     const lifecycle = this.lifecycle;
     this.issue = "";
+    this.mode = mode;
+    if (mode === "solo" && code !== undefined)
+      throw new Error("Start a new solo duel.");
     if (code !== undefined && !ROOM_CODE_PATTERN.test(code))
       throw new Error("Enter the six-character duel code.");
     const abort = new AbortController();
@@ -76,7 +76,7 @@ export class GameClient {
       const response = await fetch("/api/game/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Wizard", source, code }),
+        body: JSON.stringify({ name: "Wizard", source, code, ...(mode === "solo" ? { mode } : {}) }),
         signal: abort.signal,
       });
       if (!response.ok)
@@ -98,6 +98,7 @@ export class GameClient {
       !["P1", "P2"].includes(session.slot) ||
       typeof session.roomId !== "string" ||
       !ROOM_CODE_PATTERN.test(session.roomId) ||
+      (session.mode ?? "duel") !== mode ||
       (code !== undefined && session.roomId !== code)
     ) {
       if (typeof session.token === "string") this.release(session.token);
@@ -184,12 +185,10 @@ export class GameClient {
           this.lastMessage = performance.now();
           if (message.type === "welcome") {
             const snapshot = parseSnapshot(message.snapshot);
-            if (message.roomId !== this.roomId || snapshot.roomId !== this.roomId)
+            if (message.roomId !== this.roomId || snapshot.roomId !== this.roomId || snapshot.mode !== this.mode)
               throw new Error("Unexpected duel room");
             this.rules = parseRules(message.rules);
             this.snapshot = snapshot;
-            this.iceServers = parseIceServers(message.iceServers);
-            this.connectionGeneration = message.connectionGeneration;
             this.offset = this.snapshot.serverNowMs - performance.now();
             this.bestRtt = Infinity;
             this.issue = "";
@@ -200,7 +199,7 @@ export class GameClient {
             resolve(true);
           } else if (message.type === "snapshot") {
             const next = parseSnapshot(message.snapshot);
-            if (next.roomId !== this.roomId) throw new Error("Unexpected duel room");
+            if (next.roomId !== this.roomId || next.mode !== this.mode) throw new Error("Unexpected duel room");
             if (
               !this.snapshot ||
               next.stateVersion >= this.snapshot.stateVersion
@@ -218,9 +217,7 @@ export class GameClient {
               this.offset =
                 message.serverMs - (message.clientMs + performance.now()) / 2;
             }
-          } else if (message.type === "signal")
-            this.onSignal(message.payload, message.generation);
-          else if (message.type === "ack") this.onAck(message);
+          } else if (message.type === "ack") this.onAck(message);
           else if (message.type === "error") {
             if (!welcomed && message.code === "auth_failed") {
               clearTimeout(timeout);
@@ -314,14 +311,6 @@ export class GameClient {
       this.requests.delete(abort);
     }
   }
-  signal(payload: Record<string, unknown>) {
-    this.send({
-      type: "signal",
-      generation: this.connectionGeneration,
-      signalId: crypto.randomUUID(),
-      payload,
-    });
-  }
   disconnect() {
     this.lifecycle++;
     this.pendingConnect?.();
@@ -342,7 +331,6 @@ export class GameClient {
     this.roomId = "";
     this.slot = undefined;
     this.snapshot = undefined;
-    this.iceServers = [];
     this.offset = undefined;
     this.bestRtt = Infinity;
   }

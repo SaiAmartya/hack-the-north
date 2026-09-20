@@ -10,7 +10,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable
 
-from phantom_host.duel_models import SessionResponse, Source
+from phantom_host.duel_models import Mode, SessionResponse, Source
 from phantom_host.duel_room import DuelRoom, GamePeer, PlayerSession, RoomError
 
 ROOM_CODE_LENGTH = 6
@@ -39,7 +39,7 @@ class RoomRegistry:
     def rooms(self) -> list[DuelRoom]:
         return list(self._rooms.values())
 
-    def create_room(self) -> str:
+    def create_room(self, *, mode: Mode = Mode.DUEL) -> str:
         if len(self._rooms) >= MAX_ROOMS:
             raise RoomError("too_many_rooms", status_code=429)
         code = self._new_code()
@@ -48,6 +48,7 @@ class RoomRegistry:
             allow_phone=self.allow_phone,
             allow_replay=self.allow_replay,
             room_id=code,
+            mode=mode,
         )
         self._empty_since_ms[code] = self.clock_ms()
         return code
@@ -56,14 +57,19 @@ class RoomRegistry:
         return self._rooms.get(code)
 
     async def create_session(
-        self, *, name: str, source: Source, code: str | None = None
+        self, *, name: str, source: Source, code: str | None = None,
+        mode: Mode = Mode.DUEL,
     ) -> SessionResponse:
+        if mode is Mode.SOLO and code is not None:
+            raise RoomError("solo_requires_new_room")
         created = code is None
         if code is None:
-            code = self.create_room()
+            code = self.create_room(mode=mode)
         room = self._rooms.get(code)
         if room is None:
             raise RoomError("room_not_found", status_code=404)
+        if not created and room.mode is Mode.SOLO:
+            raise RoomError("solo_room_private", status_code=409)
         try:
             return await room.create_session(name=name, source=source)
         except BaseException:

@@ -356,7 +356,7 @@ export function DeviceLab() {
               <strong>A practice bench, not a spell lesson. Yet.</strong>
               <p>
                 Diagnostic build — no spell recognition, speech, phone pairing
-                or multiplayer yet. No microphone or camera is requested.
+                or multiplayer yet. No microphone is requested.
               </p>
             </div>
           </div>

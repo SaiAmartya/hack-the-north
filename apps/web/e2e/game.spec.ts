@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { scriptedLaptop, connectBadge, snapshot, cast } from "./scripted-laptop";
 
 test("the homepage requires a wand before offering duel creation or a code", async ({ page }) => {
   await page.goto("/");
@@ -217,5 +218,111 @@ test("raw wand evidence drives attack, block, abort, and rematch", async ({
   await expect(page.getByTestId("qa-health")).toHaveText("100");
   await expect(page.getByTestId("qa-abort")).toHaveText("aborted");
   await expect(page.getByTestId("qa-rematch")).not.toHaveText("—");
+  expect(errors).toEqual([]);
+});
+
+test("a paired wand plays five spells against the real solo bot, rematches, and reconnects", async ({ page, context }) => {
+  test.setTimeout(100_000);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const laptop = await scriptedLaptop(page);
+  await expect(page.getByRole("button", { name: "Duel a bot", exact: true })).toHaveCount(0);
+  await connectBadge(page);
+  await page.screenshot({ path: "/tmp/wandduel-mode-selection.png", fullPage: true });
+  const creating = page.waitForRequest(request =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/game/session",
+  );
+  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
+  expect((await creating).postDataJSON()).toMatchObject({ mode: "solo", source: "ble" });
+  await expect(page.getByRole("heading", { name: "Solo duel", exact: true })).toBeVisible();
+  await expect(page.getByText("Speak + jab to attack. Speak + raise to shield or heal.", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Duel code")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /camera/i })).toHaveCount(0);
+  await expect(page.locator("video")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeDisabled();
+  await expect.poll(async () => (await snapshot(page)).players.P2?.source).toBe("bot");
+  expect((await snapshot(page)).mode).toBe("solo");
+  expect((await snapshot(page)).players.P2?.name).toBe("Practice Wizard");
+  expect(context.pages()).toHaveLength(1);
+  const roomId = (await snapshot(page)).roomId;
+  laptop.enableSpeech();
+  await page.getByRole("button", { name: "Enable microphone", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeEnabled({ timeout: 10_000 });
+  await page.screenshot({ path: "/tmp/wandduel-solo-lobby.png", fullPage: true });
+  await page.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
+  const roundId = (await snapshot(page)).roundId;
+  await expect(page.getByRole("button", { name: /camera/i })).toHaveCount(0);
+  await expect(page.locator("video")).toHaveCount(0);
+
+  // React to the actual first projectile; the bot remains active throughout the match.
+  await expect.poll(async () => (await snapshot(page)).projectiles.some(projectile =>
+    projectile.caster === "P2" && projectile.spell === "stupefy",
+  ), { intervals: [50] }).toBe(true);
+  expect((await cast(page, "protego")).accepted).toBe(true);
+  await expect(page.getByLabel(/^Protego: recharging/)).toBeVisible();
+  await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
+    event.type === "impactBlocked" && event.actor === "P2" && event.target === "P1",
+  ), { intervals: [50] }).toBe(true);
+  await expect(page.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "100");
+
+  expect((await cast(page, "expelliarmus")).accepted).toBe(true);
+  await expect(page.getByLabel(/^Expelliarmus: recharging/)).toBeVisible();
+  await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
+    event.type === "offenseLocked" && event.actor === "P1" && event.target === "P2",
+  ), { intervals: [50] }).toBe(true);
+  await expect(page.getByLabel("Rival wizard").getByText(/DISARMED/)).toBeVisible();
+  expect((await snapshot(page)).recentEvents).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "damage", actor: "P1", spell: "expelliarmus", amount: 10 }),
+  ]));
+  await page.screenshot({ path: "/tmp/wandduel-solo-battle.png", fullPage: true });
+
+  expect((await cast(page, "incendio")).accepted).toBe(true);
+  await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
+  await expect.poll(async () => (await snapshot(page)).players.P1!.hp).toBeLessThanOrEqual(82);
+  expect((await cast(page, "episkey")).accepted).toBe(true);
+  await expect(page.getByLabel(/^Episkey: recharging/)).toBeVisible();
+  expect((await snapshot(page)).recentEvents).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "healed", actor: "P1", spell: "episkey", amount: 18 }),
+  ]));
+  expect((await cast(page, "stupefy")).accepted).toBe(true);
+  await expect(page.getByLabel(/^Stupefy: recharging/)).toBeVisible();
+  await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
+  expect(await cast(page, "stupefy")).toMatchObject({ accepted: false, reason: "cooldown" });
+  await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
+    event.type === "damage" && event.actor === "P1" && event.spell === "incendio" && event.amount === 30,
+  )).toBe(true);
+  const acceptedSpells = (await snapshot(page)).recentEvents
+    .filter(event => event.type === "castAccepted" && event.actor === "P1")
+    .map(event => event.spell).sort();
+  expect(acceptedSpells).toEqual(["episkey", "expelliarmus", "incendio", "protego", "stupefy"]);
+  await expect(page.getByRole("progressbar")).toHaveCount(5);
+
+  // Stop defending and let the real opponent finish, proving its attacks reach a normal result.
+  await expect(page.getByRole("heading", { name: "Defeat!", exact: true })).toBeVisible({ timeout: 45_000 });
+  expect((await snapshot(page)).result).toMatchObject({ outcome: "win", winner: "P2" });
+  await expect(page.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "0");
+  await expect(page.getByLabel("Duel code")).toHaveCount(0);
+  await page.screenshot({ path: "/tmp/wandduel-solo-result.png", fullPage: true });
+  await page.getByRole("button", { name: "Rematch", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
+  const rematch = await snapshot(page);
+  expect(rematch.roundId).toBeGreaterThan(roundId);
+  expect(rematch.players.P1?.hp).toBe(100);
+  expect(rematch.players.P2?.hp).toBe(100);
+  expect(rematch.players.P2?.source).toBe("bot");
+
+  await page.evaluate(() => Reflect.get(window, "__battleSocket").close());
+  await expect(page.getByRole("heading", { name: "Duel paused", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reconnect battle", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Rematch", exact: true })).toBeEnabled();
+  expect((await snapshot(page)).roomId).toBe(roomId);
+  expect((await snapshot(page)).mode).toBe("solo");
+  await expect(page.getByLabel("Duel code")).toHaveCount(0);
+  await page.getByRole("button", { name: "Leave duel", exact: true }).click();
+  await expect(page.getByRole("heading", { name: /Your wand.*is ready/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Duel a bot", exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => Reflect.get(window, "__scriptedBadge").chooser)).toBe(1);
+  expect(context.pages()).toHaveLength(1);
   expect(errors).toEqual([]);
 });

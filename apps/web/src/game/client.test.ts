@@ -47,21 +47,21 @@ class FakeWebSocket {
   }
 }
 
-async function connectedClient(create = false) {
+async function connectedClient(create = false, mode: "duel" | "solo" = "duel") {
   vi.useFakeTimers();
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal("location", new URL("http://127.0.0.1:5173"));
   const request = vi.fn().mockImplementation(() =>
-    Promise.resolve(Response.json({ token: "test-only-session", slot: "P1", roomId: "K7X2PD" })),
+    Promise.resolve(Response.json({ token: "test-only-session", slot: "P1", roomId: "K7X2PD", mode })),
   );
   vi.stubGlobal("fetch", request);
   const client = new GameClient();
-  const connecting = client.connect("ble", create ? undefined : "K7X2PD");
+  const connecting = client.connect("ble", create ? undefined : "K7X2PD", mode);
   await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
   const socket = FakeWebSocket.instances[0];
   socket.open();
-  socket.message(welcome);
+  socket.message({ ...welcome, mode, snapshot: { ...welcome.snapshot, mode } });
   await connecting;
   return { client, socket, request };
 }
@@ -72,6 +72,16 @@ it("creates and reserves a duel with one session request and uses its verified r
   expect(request.mock.calls[0][0]).toBe("/api/game/session");
   expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ name: "Wizard", source: "ble" });
   expect(client.snapshot?.roomId).toBe("K7X2PD");
+  client.disconnect();
+});
+
+it("reserves solo mode and rejects a snapshot that changes its room mode", async () => {
+  const { client, socket, request } = await connectedClient(true, "solo");
+  expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ name: "Wizard", source: "ble", mode: "solo" });
+  expect(client.snapshot?.mode).toBe("solo");
+  socket.message({ v: 1, type: "snapshot", snapshot: welcome.snapshot });
+  expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+  expect(client.snapshot?.mode).toBe("solo");
   client.disconnect();
 });
 
@@ -185,16 +195,14 @@ it("reattaches the same session and ignores every callback from its replaced soc
   ]);
   replacement.message({
     ...welcome,
-    connectionGeneration: 2,
     snapshot: { ...welcome.snapshot, stateVersion: 10, serverNowMs: 20_000 },
   });
   await expect(reconnecting).resolves.toBe(true);
-  stale.message?.({ data: JSON.stringify({ ...welcome, connectionGeneration: 99 }) });
+  stale.message?.({ data: JSON.stringify({ ...welcome, snapshot: { ...welcome.snapshot, stateVersion: 99 } }) });
   stale.error?.();
   stale.close?.();
   expect(client.token).toBe("test-only-session");
   expect(client.slot).toBe("P1");
-  expect(client.connectionGeneration).toBe(2);
   expect(client.snapshot?.stateVersion).toBe(10);
   expect(client.now()).toBeCloseTo(20_000);
   expect(client.issue).toBe("");
@@ -242,7 +250,7 @@ it("still closes a reattached game connection when authoritative messages stop",
   const reconnecting = client.reconnect();
   const replacement = FakeWebSocket.instances[1];
   replacement.open();
-  replacement.message({ ...welcome, connectionGeneration: 2 });
+  replacement.message(welcome);
   await reconnecting;
   await vi.advanceTimersByTimeAsync(2_000);
   expect(replacement.readyState).toBe(3);
@@ -258,14 +266,14 @@ it.each(["open", "closing"])("waits for an %s socket to close before reattaching
   const reconnecting = client.reconnect();
   await vi.advanceTimersByTimeAsync(500);
   expect(FakeWebSocket.instances).toHaveLength(1);
-  staleMessage?.({ data: JSON.stringify({ ...welcome, connectionGeneration: 99 }) });
-  expect(client.connectionGeneration).toBe(1);
+  staleMessage?.({ data: JSON.stringify({ ...welcome, snapshot: { ...welcome.snapshot, stateVersion: 99 } }) });
+  expect(client.snapshot?.stateVersion).toBe(welcome.snapshot.stateVersion);
   expect(client.issue).toContain("Reconnecting");
   socket.finishClose();
   await Promise.resolve();
   const replacement = FakeWebSocket.instances[1];
   replacement.open();
-  replacement.message({ ...welcome, connectionGeneration: 2 });
+  replacement.message(welcome);
   await expect(reconnecting).resolves.toBe(true);
   expect(request).toHaveBeenCalledTimes(1);
   expect(socket.send.mock.calls.some(([raw]) => JSON.parse(raw).type === "leave")).toBe(false);

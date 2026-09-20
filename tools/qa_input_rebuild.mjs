@@ -82,8 +82,7 @@ try {
     const Socket = window.WebSocket;
     window.WebSocket = new Proxy(Socket, { construct(Target, args) { const s = new Target(...args); s.addEventListener("message", e => receive(e.data)); return s; } });
     const Peer = window.RTCPeerConnection;
-    // For relay QA, withhold host candidates instead of removing the browser API
-    // (the game also owns an independent, optional video peer connection).
+    // For relay QA, withhold host candidates while retaining the phone RTC API.
     window.RTCPeerConnection = new Proxy(Peer, { construct(Target, args) {
       if (route === "relay") args[0] = { ...args[0], iceTransportPolicy: "relay" };
       const peer = new Target(...args), create = peer.createDataChannel.bind(peer);

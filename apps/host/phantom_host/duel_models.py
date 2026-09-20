@@ -28,6 +28,12 @@ class Source(str, Enum):
     PHONE = "phone"
     BLE = "ble"
     REPLAY = "replay"
+    BOT = "bot"
+
+
+class Mode(str, Enum):
+    DUEL = "duel"
+    SOLO = "solo"
 
 
 class Spell(str, Enum):
@@ -72,6 +78,7 @@ class SessionRequest(WireModel):
     name: str = Field(min_length=1, max_length=24)
     source: Source
     code: RoomCode | None = None
+    mode: Mode = Mode.DUEL
 
     @field_validator("name")
     @classmethod
@@ -86,6 +93,7 @@ class SessionResponse(WireModel):
     token: str
     slot: Slot
     room_id: RoomId = "main"
+    mode: Mode = Mode.DUEL
 
 
 class PairResponse(WireModel):
@@ -166,21 +174,13 @@ class CastMessage(WireModel):
     input_generation: InputGeneration
 
 
-class SignalMessage(WireModel):
-    v: Literal[1] = 1
-    type: Literal["signal"] = "signal"
-    generation: int = Field(ge=1, le=2_147_483_647)
-    signal_id: Identifier
-    payload: dict[str, Any]
-
-
 class LeaveMessage(WireModel):
     v: Literal[1] = 1
     type: Literal["leave"] = "leave"
 
 
 GameMessage = Annotated[
-    HeartbeatMessage | ReadyMessage | CastMessage | SignalMessage | LeaveMessage,
+    HeartbeatMessage | ReadyMessage | CastMessage | LeaveMessage,
     Field(discriminator="type"),
 ]
 GAME_MESSAGE_ADAPTER: TypeAdapter[GameMessage] = TypeAdapter(GameMessage)
@@ -258,6 +258,7 @@ class DuelEvent(WireModel):
 
 class Snapshot(WireModel):
     room_id: RoomId = "main"
+    mode: Mode = Mode.DUEL
     room_generation: int
     round_id: int
     state_version: int
@@ -277,31 +278,20 @@ class SnapshotMessage(WireModel):
     snapshot: Snapshot
 
 
-class IceServer(WireModel):
-    """One browser `RTCIceServer`: STUN needs no credentials, TURN carries short-lived ones."""
-
-    urls: tuple[Annotated[str, Field(min_length=1, max_length=256)], ...] = Field(
-        min_length=1, max_length=8
-    )
-    username: str | None = Field(default=None, max_length=512)
-    credential: str | None = Field(default=None, max_length=512)
-
-
 class WelcomeMessage(WireModel):
     v: Literal[1] = 1
     type: Literal["welcome"] = "welcome"
     slot: Slot
     room_id: RoomId = "main"
-    connection_generation: int
+    mode: Mode = Mode.DUEL
     rules: RulesetWire
     snapshot: Snapshot
-    ice_servers: tuple[IceServer, ...] = Field(default=(), max_length=8)
 
 
 class AckMessage(WireModel):
     v: Literal[1] = 1
     type: Literal["ack"] = "ack"
-    command: Literal["ready", "cast", "signal"]
+    command: Literal["ready", "cast"]
     request_id: str | None = None
     accepted: bool
     reason: str | None = None
@@ -315,15 +305,6 @@ class PongMessage(WireModel):
     type: Literal["pong"] = "pong"
     client_ms: float
     server_ms: int
-
-
-class ForwardedSignalMessage(WireModel):
-    v: Literal[1] = 1
-    type: Literal["signal"] = "signal"
-    from_slot: Slot = Field(alias="from")
-    generation: int
-    signal_id: str
-    payload: dict[str, Any]
 
 
 class ErrorMessage(WireModel):

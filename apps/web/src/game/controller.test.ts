@@ -4,6 +4,8 @@ import { SpeechClient, type SpeechDiscard, type SpeechOnset } from "../speech/cl
 import { WandClient } from "../wand/client";
 import { GameClient } from "./client";
 import { PresentationPhase } from "../wand/protocol";
+import { parseSnapshot } from "./contracts";
+import welcome from "../../../host/tests/fixtures/game-welcome-v1.json";
 
 class FakeWebSocket {
   static readonly OPEN = 1;
@@ -362,6 +364,42 @@ it.each([true, false])("restores the battle independently of the wand (retained 
   expect(ready).not.toHaveBeenCalled();
   expect(controller.motion.getState().phase).toBe("ready");
   expect(controller.busy).toBe(false);
+  controller.destroy();
+});
+
+it("replaces an expired solo reservation with a new solo room and retains the wand", async () => {
+  const controller = new DuelController();
+  controller.mode = "solo";
+  controller.roomCode = "OLD123";
+  controller.source = "ble";
+  vi.spyOn(controller.game, "reconnect").mockResolvedValue(false);
+  const connect = vi.spyOn(controller.game, "connect").mockImplementation(async () => {
+    controller.game.snapshot = parseSnapshot({ ...welcome.snapshot, roomId: "NEW123", mode: "solo" });
+  });
+  const pair = vi.spyOn(controller, "connect");
+  await controller.reconnectBattle();
+  expect(connect).toHaveBeenCalledWith("ble", undefined, "solo");
+  expect(controller.roomCode).toBe("NEW123");
+  expect(pair).not.toHaveBeenCalled();
+  controller.leaveRoom();
+  expect(controller.mode).toBe("duel");
+  controller.destroy();
+});
+
+it("accepts new-room feedback even when a replacement solo room reuses event IDs", () => {
+  const controller = new DuelController();
+  controller.game.slot = "P1";
+  vi.spyOn(controller.game, "now").mockReturnValue(100);
+  const state = { ...welcome.snapshot, mode: "solo", roundId: 1, phase: "playing", recentEvents: [{
+    id: "g1:r1:e3", type: "castAccepted", atMs: 100, roundId: 1, stateVersion: 3, actor: "P1", spell: "stupefy",
+  }] };
+  controller.game.snapshot = parseSnapshot({ ...state, roomId: "OLD123" });
+  controller.game.onChange();
+  expect(controller.lastSpell).toBe("stupefy");
+  controller.lastSpell = undefined;
+  controller.game.snapshot = parseSnapshot({ ...state, roomId: "NEW123" });
+  controller.game.onChange();
+  expect(controller.lastSpell).toBe("stupefy");
   controller.destroy();
 });
 

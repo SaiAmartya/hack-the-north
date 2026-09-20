@@ -5,34 +5,6 @@ import { DuelEffects } from "./effects";
 import type { GameEvent, Player, Spell, SpellRule } from "./contracts";
 import "./game.css";
 
-function Video({
-  stream,
-  className,
-  label,
-}: {
-  stream?: MediaStream;
-  className?: string;
-  label: string;
-}) {
-  const ref = useRef<HTMLVideoElement>(null);
-  useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream ?? null;
-    return () => {
-      if (ref.current) ref.current.srcObject = null;
-    };
-  }, [stream]);
-  return (
-    <video
-      ref={ref}
-      className={className}
-      autoPlay
-      playsInline
-      muted
-      aria-label={label}
-    />
-  );
-}
-
 function PhoneQr({ value }: { value: string }) {
   const drawing = useMemo(() => {
     const code = qrcode(0, "M");
@@ -103,7 +75,7 @@ function HealthPanel({
       aria-label={own ? "Your wizard" : "Rival wizard"}
     >
       <div className="health-name">
-        <strong>{own ? "YOU" : "RIVAL"}</strong>
+        <strong>{own ? "YOU" : player?.source === "bot" ? "PRACTICE" : "RIVAL"}</strong>
         <span>
           WIZARD <b>✦</b>
         </span>
@@ -203,7 +175,7 @@ export function GameApp() {
   useEffect(() => {
     effects.current?.update(game, slot);
   }, [game, slot]);
-  const live = game?.phase === "playing" || game?.phase === "countdown";
+  const live = !c?.game.issue && (game?.phase === "playing" || game?.phase === "countdown");
   const wand = c?.wand?.getSnapshot(),
     wandReady = wand?.phase === "streaming";
   const mic = c?.speech.getSnapshot(),
@@ -211,6 +183,7 @@ export function GameApp() {
   const phone = c?.phoneSession?.getState();
   const pairingPhone = c?.source === "phone" && c.busy && !wandReady;
   const inRoom = !!c?.roomCode;
+  const solo = c?.mode === "solo";
   const result = game?.result;
   const now = c?.game.now() ?? 0;
   const issue =
@@ -266,7 +239,7 @@ export function GameApp() {
       ? c?.retryWand()
       : c?.connect(c.source === "phone" ? "phone" : "ble"));
   const roomHeading =
-    result?.outcome === "aborted"
+    c?.game.issue || result?.outcome === "aborted"
       ? "Duel paused"
       : result?.outcome === "draw"
         ? "An even match!"
@@ -275,8 +248,8 @@ export function GameApp() {
             ? "Victory!"
             : "Defeat!"
           : me?.ready
-            ? "Waiting for your rival…"
-            : "Battle lobby";
+            ? solo ? "Wands up…" : "Waiting for your rival…"
+            : solo ? "Solo duel" : "Battle lobby";
   return (
     <main className={`game-shell ${inRoom ? "in-duel" : "at-home"}`}>
       <header className="game-top">
@@ -393,9 +366,14 @@ export function GameApp() {
                   <br />
                   is ready.
                 </h1>
-                <button onClick={() => void c.startDuel()} disabled={c.busy}>
-                  Start a duel <span aria-hidden="true">→</span>
-                </button>
+                <div className="connection-choices">
+                  <button onClick={() => void c.startDuel()} disabled={c.busy}>
+                    Start a duel <span aria-hidden="true">→</span>
+                  </button>
+                  <button className="secondary" onClick={() => void c.startDuel("solo")} disabled={c.busy}>
+                    Duel a bot <span aria-hidden="true">→</span>
+                  </button>
+                </div>
                 <form
                   className="join-form"
                   onSubmit={(event) => {
@@ -473,10 +451,10 @@ export function GameApp() {
           {inRoom && (
             <div className="arena-title">
               <span>
-                <i /> THE MOONLIT COURTYARD
+                <i /> {solo ? "SOLO DUEL" : "THE MOONLIT COURTYARD"}
               </span>
               <span>ROUND {game?.roundId || 1}</span>
-              {game?.phase === "playing" && (
+              {live && game?.phase === "playing" && (
                 <time className="round-clock" aria-label="Time remaining">
                   {Math.max(
                     0,
@@ -557,29 +535,26 @@ export function GameApp() {
                     result.outcome === "aborted" ||
                     c?.game.issue) && (
                     <>
-                      <div className="room-invite">
+                      {!solo && <div className="room-invite">
                         <span>DUEL CODE</span>
                         <output className="pair-code" aria-label="Duel code">
                           {c?.roomCode}
                         </output>
-                      </div>
+                      </div>}
                       <p className="pair-status" role="status">
                         {c?.game.issue
                           ? "Battle connection interrupted."
                           : result?.outcome === "aborted"
                             ? "Reconnect, then ready up for a fresh round."
-                            : opponent?.connected
+                            : solo
+                              ? "Practice Wizard awaits."
+                              : opponent?.connected
                               ? opponent.ready
                                 ? "Your rival is ready."
                                 : "Your rival has joined."
                               : "Share this code with your rival."}
                       </p>
                     </>
-                  )}
-                  {!result && (
-                    <p className="lobby-instruction">
-                      Speak + jab to attack. Speak + raise to shield or heal.
-                    </p>
                   )}
                   {c?.game.issue ? (
                     <button
@@ -616,38 +591,13 @@ export function GameApp() {
                       onClick={() => c?.ready()}
                     >
                       {me?.ready
-                        ? "Waiting for opponent…"
+                        ? solo ? "Wands up…" : "Waiting for opponent…"
                         : result
                           ? "Rematch"
                           : "Ready"}
                     </button>
-                    {!result && !c?.localVideo && (
-                      <button
-                        className="quiet"
-                        onClick={() => void c?.startCamera(low)}
-                      >
-                        Enable camera
-                      </button>
-                    )}
                   </div>
-                  {!result && c?.localVideo && (
-                    <Video
-                      stream={c.localVideo}
-                      className="setup-preview"
-                      label="Your camera"
-                    />
-                  )}
                 </section>
-              </div>
-            )}
-            {live && (c?.localVideo || c?.remoteVideo) && (
-              <div className="camera-portraits">
-                {c.remoteVideo && (
-                  <Video stream={c.remoteVideo} label="Opponent camera" />
-                )}
-                {c.localVideo && (
-                  <Video stream={c.localVideo} label="Your camera" />
-                )}
               </div>
             )}
           </div>
@@ -736,8 +686,6 @@ export function GameApp() {
               ? "Your wand connection was interrupted. Reconnect to continue."
               : issue}
           </span>
-        ) : c?.cameraIssue ? (
-          <span className="warning-banner">{c.cameraIssue}</span>
         ) : null}
       </div>
     </main>

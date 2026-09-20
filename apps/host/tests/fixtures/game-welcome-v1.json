@@ -3,7 +3,7 @@
   "type": "welcome",
   "slot": "P1",
   "roomId": "main",
-  "connectionGeneration": 1,
+  "mode": "duel",
   "rules": {
     "version": 1,
     "tickMs": 50,
@@ -67,6 +67,7 @@
   },
   "snapshot": {
     "roomId": "main",
+    "mode": "duel",
     "roomGeneration": 2,
     "roundId": 0,
     "stateVersion": 3,
@@ -118,14 +119,5 @@
         "reason": null
       }
     ]
-  },
-  "iceServers": [
-    {
-      "urls": [
-        "stun:stun.cloudflare.com:3478"
-      ],
-      "username": null,
-      "credential": null
-    }
-  ]
+  }
 }

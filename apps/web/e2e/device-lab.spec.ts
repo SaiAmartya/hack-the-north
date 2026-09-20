@@ -65,7 +65,7 @@ test("initial replay lab is permission-free and never presents a cast-ready stat
   await openLab(page);
 
   await expect(
-    page.getByText("No microphone or camera is requested.", { exact: false }),
+    page.getByText("No microphone is requested.", { exact: false }),
   ).toBeVisible();
   await expect(page.getByTestId("source-label")).toHaveText("REPLAY");
   await expect(page.getByTestId("phase")).toHaveText("disconnected");

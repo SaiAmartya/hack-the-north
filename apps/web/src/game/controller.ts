@@ -12,7 +12,6 @@ import { MotionRecognizer } from "../input/motion";
 import { CastFusion } from "../input/fusion";
 import { SpeechClient } from "../speech/client";
 import { GameClient, ROOM_CODE_PATTERN, normalizeRoomCode } from "./client";
-import { VideoLink } from "./video";
 import {
   CueEffect,
   PresentationPhase,
@@ -20,7 +19,7 @@ import {
   StateStatusFlag,
   formatDeviceId,
 } from "../wand/protocol";
-import type { Source, Spell } from "./contracts";
+import type { GameMode, Source, Spell } from "./contracts";
 
 export class DuelController {
   readonly game = new GameClient();
@@ -31,6 +30,7 @@ export class DuelController {
   source?: Source;
   /** The duel this player started or joined; every referee session is created inside it. */
   roomCode = "";
+  mode: GameMode = "duel";
   /** The battle lobby opens as soon as the wand streams; Ready still needs healthy input. */
   battleLobby = false;
   pairingCode = "";
@@ -43,14 +43,9 @@ export class DuelController {
   noticeAt = 0;
   busy = false;
   generation = 0;
-  localVideo?: MediaStream;
-  remoteVideo?: MediaStream;
-  cameraIssue = "";
   lastSpell?: Spell;
   lastSpellAt = 0;
   renderingReady = false;
-  private peer: VideoLink;
-  private videoPeerKey = "";
   private timer: ReturnType<typeof setInterval>;
   private unsubscribers: (() => void)[] = [];
   private seen = new Set<string>();
@@ -60,7 +55,6 @@ export class DuelController {
     crypto.getRandomValues(new Uint32Array(1))[0] || 1;
   private dead = false;
   private attemptGeneration = 0;
-  private cameraAttempt = 0;
   private phoneRelay?: PhoneRelayChannel;
   phoneSession?: PhoneSession;
   private observedWandGeneration = -1;
@@ -144,20 +138,6 @@ export class DuelController {
         this.onChange();
       }
     };
-    this.peer = new VideoLink(
-      (message) => this.game.signal(message),
-      (stream) => {
-        this.remoteVideo = stream;
-        this.cameraIssue = "";
-        this.onChange();
-      },
-      (issue) => {
-        this.cameraIssue = issue;
-        this.onChange();
-      },
-    );
-    this.game.onSignal = (payload, generation) =>
-      this.peer.receive(payload, generation);
     document.addEventListener("visibilitychange", this.visibility);
     this.timer = setInterval(() => {
       this.syncInputState();
@@ -213,7 +193,7 @@ export class DuelController {
     );
   }
   /** Open a new room on the referee and show its code for the opponent. */
-  async startDuel() {
+  async startDuel(mode: GameMode = "duel") {
     if (
       this.busy ||
       this.roomCode ||
@@ -222,10 +202,12 @@ export class DuelController {
     )
       return;
     this.busy = true;
+    this.mode = mode;
     this.issue = "";
     this.onChange();
     try {
-      await this.game.connect(this.source);
+      if (mode === "solo") await this.game.connect(this.source, undefined, mode);
+      else await this.game.connect(this.source);
       this.roomCode = this.game.snapshot!.roomId;
     } catch (error) {
       this.game.disconnect();
@@ -253,6 +235,7 @@ export class DuelController {
     }
     this.issue = "";
     this.busy = true;
+    this.mode = "duel";
     this.onChange();
     try {
       await this.game.connect(this.source, code);
@@ -270,9 +253,7 @@ export class DuelController {
     this.game.disconnect();
     this.game.issue = "";
     this.roomCode = "";
-    this.peer.stop();
-    this.videoPeerKey = "";
-    this.remoteVideo = undefined;
+    this.mode = "duel";
     this.context = "";
     this.feedbackKey = "";
     this.seen.clear();
@@ -296,7 +277,7 @@ export class DuelController {
     try {
       const reattached = await this.game.reconnect();
       if (this.dead || request !== this.attemptGeneration) return;
-      if (!reattached) await this.game.connect(this.source, this.roomCode);
+      if (!reattached) await this.reopenRoom(this.source);
     } catch (error) {
       if (!this.dead && request === this.attemptGeneration)
         this.issue =
@@ -309,6 +290,12 @@ export class DuelController {
         this.onChange();
       }
     }
+  }
+  private async reopenRoom(source: Source) {
+    if (this.mode === "solo") {
+      await this.game.connect(source, undefined, "solo");
+      this.roomCode = this.game.snapshot!.roomId;
+    } else await this.game.connect(source, this.roomCode);
   }
   async connect(source: "ble" | "phone" = "ble") {
     const request = ++this.attemptGeneration;
@@ -333,9 +320,6 @@ export class DuelController {
     this.phoneRelay = undefined;
     this.phoneSession = undefined;
     this.wasStreaming = false;
-    this.peer.stop();
-    this.videoPeerKey = "";
-    this.remoteVideo = undefined;
     try {
       // Start the chooser inside the user's click, before any HTTP request.
       if (source === "ble") {
@@ -400,7 +384,7 @@ export class DuelController {
       }
       if (state.phase !== "streaming")
         throw new Error(state.issue || "Wand connection failed");
-      if (this.roomCode) await this.game.connect(source, this.roomCode);
+      if (this.roomCode) await this.reopenRoom(source);
       if (request !== this.attemptGeneration || this.dead) return;
       this.pairingCode = "";
       this.phoneUrl = "";
@@ -449,7 +433,7 @@ export class DuelController {
         return;
       }
       if (this.source === "ble" && this.roomCode && !this.game.snapshot)
-        await this.game.connect("ble", this.roomCode);
+        await this.reopenRoom("ble");
       if (request !== this.attemptGeneration || this.dead) return;
       this.syncInputState();
       this.autoStartMic();
@@ -591,38 +575,6 @@ export class DuelController {
     }
     this.onChange();
   }
-  async startCamera(low = false) {
-    const attempt = ++this.cameraAttempt;
-    this.cameraIssue = "";
-    let acquired: MediaStream | undefined;
-    try {
-      const stream = (acquired = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          width: { ideal: low ? 640 : 1280 },
-          height: { ideal: low ? 480 : 720 },
-          frameRate: { ideal: 30, max: 30 },
-        },
-      }));
-      if (this.dead || attempt !== this.cameraAttempt) {
-        stopTracks(stream);
-        return;
-      }
-      await this.peer.setLocalStream(stream);
-      if (this.dead || attempt !== this.cameraAttempt) {
-        stopTracks(stream);
-        return;
-      }
-      stopTracks(this.localVideo);
-      this.localVideo = stream;
-      this.syncGame();
-    } catch {
-      stopTracks(acquired);
-      if (!this.dead && attempt === this.cameraAttempt)
-        this.cameraIssue = "Camera unavailable";
-    }
-    this.onChange();
-  }
   ready() {
     const info = this.wand?.getSnapshot().info;
     if (!info || !this.healthy()) return;
@@ -648,7 +600,7 @@ export class DuelController {
     const state = this.game.snapshot,
       slot = this.game.slot;
     const context =
-      state && slot ? `${state.roundId}:${state.phase}` : "paired";
+      state && slot ? `${state.roomId}:${state.roundId}:${state.phase}` : "paired";
     if (context !== this.context) {
       this.context = context;
       this.presentationEpoch = (this.presentationEpoch + 1) >>> 0 || 1;
@@ -672,24 +624,7 @@ export class DuelController {
       }
       return;
     }
-    const own = state.players[slot],
-      other = state.players[slot === "P1" ? "P2" : "P1"];
-    if (other?.connected) {
-      const key = `${other.slot}:${state.roomGeneration}:${this.game.connectionGeneration}`;
-      if (key !== this.videoPeerKey) {
-        this.videoPeerKey = key;
-        this.peer.start(
-          this.localVideo ?? new MediaStream(),
-          slot === "P2",
-          this.game.iceServers,
-        );
-      }
-    }
-    if (!other?.connected && this.videoPeerKey) {
-      this.peer.stop();
-      this.videoPeerKey = "";
-      this.remoteVideo = undefined;
-    }
+    const own = state.players[slot];
     if (own && this.wand?.getSnapshot().phase === "streaming") {
       const phase =
         state.phase === "playing"
@@ -725,8 +660,9 @@ export class DuelController {
       }
     }
     for (const event of state.recentEvents) {
-      if (this.seen.has(event.id)) continue;
-      this.seen.add(event.id);
+      const eventKey = `${state.roomId}:${event.id}`;
+      if (this.seen.has(eventKey)) continue;
+      this.seen.add(eventKey);
       if (event.roundId !== state.roundId || this.game.now() - event.atMs > 300)
         continue;
       if (
@@ -767,9 +703,7 @@ export class DuelController {
     document.removeEventListener("visibilitychange", this.visibility);
     this.wand?.disconnect();
     this.speech.stop();
-    this.peer.stop();
     this.game.disconnect();
-    stopTracks(this.localVideo);
     for (const off of this.unsubscribers) off();
     this.unsubscribers = [];
   }
@@ -861,8 +795,6 @@ async function createHostedPair(
     );
   return parseHostedPair(await response.json());
 }
-const stopTracks = (stream?: MediaStream) =>
-  stream?.getTracks().forEach((track) => track.stop());
 export const nameOf = (spell: Spell) => spell[0].toUpperCase() + spell.slice(1);
 const codeOf = (spell: Spell) =>
   spell === "stupefy"

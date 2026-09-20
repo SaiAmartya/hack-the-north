@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from phantom_host.duel_bot import PracticeBot
 from phantom_host.duel_engine import (
     HEARTBEAT_TIMEOUT_MS,
     AbortCommand,
@@ -23,14 +24,13 @@ from phantom_host.duel_models import (
     AckMessage,
     CastMessage,
     ErrorMessage,
-    ForwardedSignalMessage,
     HeartbeatMessage,
+    Mode,
     Phase,
     PlayerSnapshot,
     PongMessage,
     ReadyMessage,
     SessionResponse,
-    SignalMessage,
     Slot,
     Snapshot,
     SnapshotMessage,
@@ -144,11 +144,14 @@ class DuelRoom:
         allow_phone: bool = False,
         allow_replay: bool = False,
         room_id: str = "main",
+        mode: Mode = Mode.DUEL,
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
         self.room_id = room_id
+        self.mode = mode
+        self._bot = PracticeBot() if mode is Mode.SOLO else None
         self.engine = DuelEngine()
         self._rules = ruleset()
         self._sessions: dict[str, PlayerSession] = {}
@@ -175,11 +178,15 @@ class DuelRoom:
         return bool(self._sessions)
 
     async def create_session(self, *, name: str, source: Source) -> SessionResponse:
+        if source is Source.BOT:
+            raise RoomError("bot_source_reserved", status_code=403)
         if source is Source.PHONE and not self.allow_phone:
             raise RoomError("phone_source_disabled", status_code=403)
         if source is Source.REPLAY and not self.allow_replay:
             raise RoomError("virtual_source_disabled", status_code=403)
         async with self._lock:
+            if self.mode is Mode.SOLO and self._sessions:
+                raise RoomError("solo_room_private", status_code=409)
             available = next(
                 (slot for slot in (Slot.P1, Slot.P2) if slot not in self._slots),
                 None,
@@ -197,6 +204,12 @@ class DuelRoom:
             )
             self._sessions[token] = session
             self._slots[available] = session
+            if self._bot is not None:
+                # Bots occupy a combat slot, but have no bearer token or browser session.
+                self._slots[Slot.P2] = PlayerSession(
+                    token="", slot=Slot.P2, name="Practice Wizard", source=Source.BOT,
+                    lease_started_at_ms=None, connected=True, input_healthy=True,
+                )
             self.room_generation += 1
             self._clear_queued_commands_locked()
             self.engine.reset_lobby(
@@ -207,10 +220,12 @@ class DuelRoom:
             self.engine.record_membership(
                 now_ms=now_ms, slot=available, joined=True
             )
+            if self._bot is not None:
+                self.engine.record_membership(now_ms=now_ms, slot=Slot.P2, joined=True)
             snapshot = self._snapshot_locked(now_ms)
             peers = self._peers_locked()
         self._broadcast_snapshot(peers, snapshot)
-        return SessionResponse(token=token, slot=available, room_id=self.room_id)
+        return SessionResponse(token=token, slot=available, room_id=self.room_id, mode=self.mode)
 
     async def attach(self, *, token: str, peer: GamePeer, now_ms: int) -> WelcomeMessage:
         async with self._lock:
@@ -236,7 +251,7 @@ class DuelRoom:
             welcome = WelcomeMessage(
                 slot=session.slot,
                 room_id=self.room_id,
-                connection_generation=session.connection_generation,
+                mode=self.mode,
                 rules=self._rules,
                 snapshot=snapshot,
             )
@@ -314,6 +329,15 @@ class DuelRoom:
                     ),
                 )
             )
+            if self._bot is not None:
+                command_id, order = self._next_ids_locked()
+                self._queued.append(QueuedCommand(
+                    token=None, request_id=None,
+                    command=ReadyCommand(
+                        command_id=command_id, slot=Slot.P2, at_ms=receipt_ms,
+                        order=order, ready=message.ready,
+                    ),
+                ))
             return None
 
     async def submit_cast(
@@ -360,50 +384,6 @@ class DuelRoom:
             )
             return None
 
-    async def forward_signal(
-        self, *, peer: GamePeer, message: SignalMessage
-    ) -> AckMessage:
-        slow_peer: GamePeer | None = None
-        async with self._lock:
-            session = self._session_for_peer_locked(peer)
-            if session is None:
-                return self._ack_error_locked(
-                    "signal", "not_authenticated", request_id=message.signal_id
-                )
-            opponent_slot = Slot.P2 if session.slot is Slot.P1 else Slot.P1
-            opponent = self._slots.get(opponent_slot)
-            if opponent is None or opponent.peer is None:
-                return self._ack_error_locked(
-                    "signal", "opponent_offline", request_id=message.signal_id
-                )
-            forwarded = wire_dict(
-                ForwardedSignalMessage(
-                    **{
-                        "from": session.slot,
-                        "generation": message.generation,
-                        "signal_id": message.signal_id,
-                        "payload": message.payload,
-                    }
-                )
-            )
-            if not opponent.peer.mailbox.offer_reliable(forwarded):
-                slow_peer = opponent.peer
-                ack = self._ack_error_locked(
-                    "signal", "opponent_slow", request_id=message.signal_id
-                )
-            else:
-                ack = AckMessage(
-                    command="signal",
-                    request_id=message.signal_id,
-                    accepted=True,
-                    state_version=self.engine.state_version,
-                )
-        if slow_peer is not None:
-            await self.detach(
-                peer=slow_peer, now_ms=self.clock_ms(), reason="slow_writer"
-            )
-        return ack
-
     async def leave(self, *, peer: GamePeer, now_ms: int) -> None:
         async with self._lock:
             session = self._session_for_peer_locked(peer)
@@ -439,6 +419,8 @@ class DuelRoom:
         peers_to_close: list[GamePeer] = []
         async with self._lock:
             for session in self._slots.values():
+                if session.source is Source.BOT:
+                    continue
                 if (
                     session.connected
                     and now_ms - session.last_heartbeat_ms >= HEARTBEAT_TIMEOUT_MS
@@ -465,6 +447,7 @@ class DuelRoom:
             decisions = self.engine.advance(
                 now_ms=now_ms, commands=[queued.command for queued in ready]
             )
+            self._advance_bot_locked(now_ms)
             queued_by_id = {
                 queued.command.command_id: queued
                 for queued in ready
@@ -524,6 +507,21 @@ class DuelRoom:
             return self._snapshot_locked(
                 self.clock_ms() if now_ms is None else now_ms
             )
+
+    def _advance_bot_locked(self, now_ms: int) -> None:
+        human = self._slots.get(Slot.P1)
+        if self._bot is None or human is None or not human.connected or not human.input_healthy:
+            return
+        spell = self._bot.choose(self.engine, now_ms)
+        if spell is None:
+            return
+        command_id, order = self._next_ids_locked()
+        evidence = f"bot:{self.engine.round_id}:{command_id}"
+        self.engine.advance(now_ms=now_ms, commands=[CastCommand(
+            command_id=command_id, slot=Slot.P2, at_ms=now_ms, order=order,
+            round_id=self.engine.round_id, attempt_id=evidence, spell=spell,
+            gesture_id=f"{evidence}:gesture", speech_id=f"{evidence}:speech",
+        )])
 
     def _apply_generation_locked(
         self,
@@ -606,6 +604,10 @@ class DuelRoom:
             removed.append(session)
         if not removed:
             return
+        if self._bot is not None and not self._sessions:
+            bot = self._slots.pop(Slot.P2, None)
+            if bot is not None:
+                removed.append(bot)
         self.room_generation += 1
         self._clear_queued_commands_locked()
         self.engine.reset_lobby(
@@ -694,6 +696,7 @@ class DuelRoom:
             )
         return Snapshot(
             room_id=self.room_id,
+            mode=self.mode,
             room_generation=self.room_generation,
             round_id=self.engine.round_id,
             state_version=self.engine.state_version,
