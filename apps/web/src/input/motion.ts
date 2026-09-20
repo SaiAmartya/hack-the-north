@@ -1,5 +1,10 @@
 import type { CapturedMotion } from "../wand/client";
 import { MotionFlag } from "../wand/protocol";
+import {
+  dtwDistance,
+  prepareImpulseTrace,
+  type PreparedImpulseTrace,
+} from "./dtw";
 
 export type SpellName = "stupefy" | "protego" | "expelliarmus";
 
@@ -84,8 +89,15 @@ type Features = {
   startPose: Vector;       // resting pose the movement started from
   endPose: Vector;         // pose held (or reached) at the end
   endQuiet: boolean;       // the movement ended in a still hold (guards need this)
+  impulseTrace: PreparedImpulseTrace;
 };
-type ImpulseTemplate = { kind: "impulse"; direction: Vector; peak: number };
+type ImpulseTemplate = {
+  kind: "impulse";
+  direction: Vector;
+  traces: readonly PreparedImpulseTrace[];
+  peak: number;
+  acceptanceDistance: number;
+};
 type GuardTemplate = { kind: "guard"; direction: Vector; tiltDeg: number; peak: number };
 type GestureTemplate = ImpulseTemplate | GuardTemplate;
 
@@ -126,7 +138,10 @@ const GUARD_PREFER_PEAK_MG = 1_500; // below this a matching guard beats a match
 const AWAY_FROM_GRIP_DEG = 8;       // guard examples must move the hand away from the resting grip on average
 const CONSISTENCY_DEG = 50;
 const SEPARATION_DEG = 50;
-const AMBIGUITY_MARGIN_DEG = 15;
+const DTW_AMBIGUITY_MARGIN = 0.12;
+const DTW_MIN_ACCEPTANCE_DISTANCE = 0.3;
+const DTW_MAX_ACCEPTANCE_DISTANCE = 0.55;
+const DTW_COHESION_SCALE = 2.5;
 const REST_TAU_MS = 500;
 const LOBE_FRACTION = 0.5;
 
@@ -554,6 +569,7 @@ export class MotionRecognizer {
       startPose: burst.rest,
       endPose,
       endQuiet,
+      impulseTrace: prepareImpulseTrace(linear),
     };
   }
 
@@ -645,10 +661,23 @@ export class MotionRecognizer {
         peak: median(examples.map((example) => example.peak)),
       });
     } else {
+      const traces = examples.map((example) => example.impulseTrace);
+      const pairwiseDistances: number[] = [];
+      for (let left = 0; left < traces.length; left++)
+        for (let right = left + 1; right < traces.length; right++)
+          pairwiseDistances.push(dtwDistance(traces[left], traces[right]));
       this.templates.set(spell, {
         kind: "impulse",
         direction: normalized(mean(examples.map((example) => example.direction))),
+        traces,
         peak: median(examples.map((example) => example.peak)),
+        acceptanceDistance: Math.min(
+          DTW_MAX_ACCEPTANCE_DISTANCE,
+          Math.max(
+            DTW_MIN_ACCEPTANCE_DISTANCE,
+            median(pairwiseDistances) * DTW_COHESION_SCALE,
+          ),
+        ),
       });
     }
     this.calibratingSpell = undefined;
@@ -699,7 +728,7 @@ export class MotionRecognizer {
   }
 
   private classify(features: Features): { spell?: SpellName; quality: number; reason?: MotionRejectionReason; message: string } {
-    const impulses: { spell: SpellName; angle: number; template: ImpulseTemplate }[] = [];
+    const impulses: { spell: SpellName; score: number; template: ImpulseTemplate }[] = [];
     let guard: { spell: SpellName; quality: number; template: GuardTemplate } | undefined;
     // A held tilt whose stroke is no stronger than its own gravity change is the wand being
     // re-oriented (raised or lowered), never a jab or sweep, whatever direction it points.
@@ -711,10 +740,11 @@ export class MotionRecognizer {
       if (!template) continue;
       if (template.kind === "impulse") {
         if (reorientation) continue;
-        const angle = angleDegrees(features.direction, template.direction);
-        if (angle <= DIRECTION_TOLERANCE_DEG && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
-          features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35))
-          impulses.push({ spell, angle, template });
+        if (features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
+          features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35)) {
+          const score = median(template.traces.map((trace) => dtwDistance(features.impulseTrace, trace)));
+          impulses.push({ spell, score, template });
+        }
       } else if (features.endQuiet) {
         const angle = angleDegrees(features.tiltDirection, template.direction);
         if (features.tiltDeg >= GUARD_MIN_TILT_DEG && angle >= LOWERING_DEG) lowering = true;
@@ -724,13 +754,15 @@ export class MotionRecognizer {
       }
     }
     if (lowering && !guard) return { quality: 0, message: "" };  // lowering the guard is never a cast
-    impulses.sort((a, b) => a.angle - b.angle);
+    impulses.sort((a, b) => a.score - b.score);
     const best = impulses[0];
-    if (best && impulses[1] && impulses[1].angle - best.angle < AMBIGUITY_MARGIN_DEG)
+    if (best && impulses[1] && impulses[1].score - best.score < DTW_AMBIGUITY_MARGIN)
       return { quality: 0, reason: "ambiguous", message: "That movement matched two spells. Make it clearer." };
     // A matching guard wins unless the stroke is far too strong to be a raise.
-    if (best && (!guard || features.peak > Math.max(guard.template.peak * 2, GUARD_PREFER_PEAK_MG))) {
-      const quality = clamp01(0.5 + (DIRECTION_TOLERANCE_DEG - best.angle) / (2 * DIRECTION_TOLERANCE_DEG) + Math.min(0.25, features.peak / best.template.peak / 4));
+    if (best && best.score <= best.template.acceptanceDistance &&
+      (!guard || features.peak > Math.max(guard.template.peak * 2, GUARD_PREFER_PEAK_MG))) {
+      const quality = clamp01(0.75 - best.score / Math.max(best.template.acceptanceDistance, 0.001) * 0.5 +
+        Math.min(0.25, features.peak / best.template.peak / 4));
       return { spell: best.spell, quality, message: "" };
     }
     if (guard) return { spell: guard.spell, quality: guard.quality, message: "" };
