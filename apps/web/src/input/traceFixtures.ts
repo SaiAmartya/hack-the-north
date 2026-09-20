@@ -9,14 +9,15 @@ type Pose = readonly [number, number, number];
  * impulse spells sit on three axes, so every pair is at least 90 degrees apart.
  */
 export const STROKE_DIRECTIONS: Readonly<Record<
-  "stupefy" | "expelliarmus" | "incendio" | "sectumsempra" | "petrificus-totalus", Pose
+  "stupefy" | "expelliarmus" | "incendio" | "sectumsempra", Pose
 >> = {
   stupefy: [1, 0, 0],                // jab forward
   expelliarmus: [-1, 0, 0],          // pull back
   sectumsempra: [0, -1, 0],          // slash sideways
   incendio: [0, 0, 1],               // flick up (against gravity)
-  "petrificus-totalus": [0, 0, -1],  // chop down
 };
+/** Synthetic line of the Protego shake: across the wand, shared with nothing that reverses five times. */
+export const SHAKE_AXIS: Pose = [0, 1, 0];
 
 export type SevenSpellFixtures = {
   stillness: readonly CapturedMotion[];
@@ -198,6 +199,36 @@ export class RawMotionTraceBuilder {
     });
   }
 
+  /** Three quick wiggles along `axis`: six alternating lobes of equal impulse, then stop. */
+  shake(amplitude = 700, wiggles = 3, axis: Pose = SHAKE_AXIS): readonly CapturedMotion[] {
+    return this.capture(() => {
+      this.rest(300);
+      for (let half = 0; half < wiggles * 2; half++) {
+        const sign = half % 2 === 0 ? 1 : -1;
+        for (const amount of [0.5, 1, 0.5]) {
+          const value = sign * amount * amplitude;
+          this.point([this.pose[0] + axis[0] * value, this.pose[1] + axis[1] * value, this.pose[2] + axis[2] * value]);
+        }
+      }
+      this.driftPoints(this.pose, this.pose, 100);
+      this.rest(320);
+    });
+  }
+
+  /** Roll the wand about its own (y) axis by `degrees` and back, smoothly, like a key in a lock. */
+  twist(degrees = 80, movementMs = 500): readonly CapturedMotion[] {
+    return this.capture(() => {
+      this.rest(300);
+      const start = this.pose;
+      const steps = Math.round(movementMs / 20);
+      for (let step = 1; step <= steps; step++) {
+        const k = step / steps;
+        this.point(this.pitched(start, degrees * Math.sin(k * Math.PI)));
+      }
+      this.rest(320, start);
+    });
+  }
+
   /** Lower a raised guard back to a pose; not a spell. */
   lower(degrees = 35, movementMs = 360, about: "x" | "y" = "x"): readonly CapturedMotion[] {
     return this.capture(() => {
@@ -306,8 +337,7 @@ export function createCoreMotionFixtures(): CoreMotionFixtures {
     stillness: builder.stillness(),
     calibration: {
       stupefy: [builder.jab(820), builder.jab(900), builder.jab(980)],
-      // Lowering between guards is part of the recording: the recognizer must ignore it.
-      protego: [builder.guard(33), builder.lower(33), builder.guard(36), builder.lower(36), builder.guard(39), builder.lower(39)],
+      protego: [builder.shake(650), builder.shake(700), builder.shake(750)],
       expelliarmus: [
         builder.jab(820, 0, STROKE_DIRECTIONS.expelliarmus),
         builder.jab(900, 0, STROKE_DIRECTIONS.expelliarmus),
@@ -316,7 +346,7 @@ export function createCoreMotionFixtures(): CoreMotionFixtures {
     },
     heldOut: {
       stupefy: builder.jab(760),
-      protego: builder.guard(31),
+      protego: builder.shake(680),
       expelliarmus: builder.jab(800, 0, STROKE_DIRECTIONS.expelliarmus),
     },
   };
@@ -333,20 +363,20 @@ export function createSevenSpellFixtures(): SevenSpellFixtures {
     stillness: builder.stillness(),
     calibration: {
       stupefy: strokes("stupefy"),
-      protego: [builder.guard(33), builder.lower(33), builder.guard(36), builder.lower(36), builder.guard(39), builder.lower(39)],
+      protego: [builder.shake(650), builder.shake(700), builder.shake(750)],
       expelliarmus: strokes("expelliarmus"),
       incendio: strokes("incendio"),
       sectumsempra: strokes("sectumsempra"),
-      "petrificus-totalus": strokes("petrificus-totalus"),
+      "petrificus-totalus": [builder.twist(80), builder.twist(85), builder.twist(75)],
       "expecto-patronum": [builder.circle(600, 900), builder.circle(700, 800), builder.circle(650, 1_000)],
     },
     heldOut: {
       stupefy: builder.jab(760, 0, STROKE_DIRECTIONS.stupefy, 1, -6),
-      protego: builder.guard(31),
+      protego: builder.shake(680),
       expelliarmus: builder.jab(800, 0, STROKE_DIRECTIONS.expelliarmus, 1, 6),
       incendio: builder.jab(840, 0, STROKE_DIRECTIONS.incendio, 1, -6),
       sectumsempra: builder.jab(880, 0, STROKE_DIRECTIONS.sectumsempra, 1, 6),
-      "petrificus-totalus": builder.jab(860, 0, STROKE_DIRECTIONS["petrificus-totalus"], 1, -6),
+      "petrificus-totalus": builder.twist(78),
       "expecto-patronum": builder.circle(620, 950),
     },
   };

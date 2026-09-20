@@ -187,14 +187,11 @@ class QaPlayer {
     await this.transport.playTrace(this.traces.jab(980));
     this.requireCalibrationExample("stupefy", 3);
     this.motion.beginGestureCalibration("protego");
-    await this.transport.playTrace(this.traces.guard(33));
-    await this.transport.playTrace(this.traces.lower(33));
+    await this.transport.playTrace(this.traces.shake(650));
     this.requireCalibrationExample("protego", 1);
-    await this.transport.playTrace(this.traces.guard(36));
-    await this.transport.playTrace(this.traces.lower(36));
+    await this.transport.playTrace(this.traces.shake(700));
     this.requireCalibrationExample("protego", 2);
-    await this.transport.playTrace(this.traces.guard(39));
-    await this.transport.playTrace(this.traces.lower(39));
+    await this.transport.playTrace(this.traces.shake(750));
     const motion = this.motion.getState();
     if (motion.phase !== "ready")
       throw new Error(
@@ -224,7 +221,7 @@ class QaPlayer {
     this.latestGesture = undefined;
     this.latestAttempt = undefined;
     await this.transport.playTrace(
-      spell === "stupefy" ? this.traces.jab(780) : this.traces.guard(32),
+      spell === "stupefy" ? this.traces.jab(780) : this.traces.shake(680),
     );
     const gesture = this.requireGesture(spell);
 
@@ -250,8 +247,6 @@ class QaPlayer {
       () => this.castAcks.has(attempt.id),
       2_000,
     );
-    // A raised guard is lowered again before the next scripted movement, as a player would.
-    if (spell === "protego") await this.transport.playTrace(this.traces.lower(32));
     return this.castAcks.get(attempt.id)!;
   }
 

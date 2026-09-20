@@ -114,13 +114,16 @@ it("keeps recognition paused through motion calibration and enables it for pract
   controller.startCalibration();
   fixtures.stillness.forEach(sample);
   controller.calibrate("stupefy");
-  fixtures.calibration.stupefy.forEach((trace) => trace.forEach(sample));
-  controller.calibrate("protego");
-  // Two guards, each followed by lowering the wand again.
-  fixtures.calibration.protego.slice(0, 4).forEach((trace) => trace.forEach(sample));
   expect(recognition.mock.calls.every(([enabled]) => !enabled)).toBe(true);
+  fixtures.calibration.stupefy.forEach((trace) => trace.forEach(sample));
+  // Stupefy alone is the mandatory set: practice may start now.
+  expect(recognition).toHaveBeenLastCalledWith(true);
+  controller.calibrate("protego");
+  // Two of the three shakes: paused again while an optional spell is learned.
+  fixtures.calibration.protego.slice(0, 2).forEach((trace) => trace.forEach(sample));
+  expect(recognition).toHaveBeenLastCalledWith(false);
 
-  fixtures.calibration.protego.slice(4).forEach((trace) => trace.forEach(sample));
+  fixtures.calibration.protego.slice(2).forEach((trace) => trace.forEach(sample));
   expect(controller.motion.getState().phase).toBe("ready");
   expect(recognition).toHaveBeenLastCalledWith(true);
   controller.calibrate("stupefy");

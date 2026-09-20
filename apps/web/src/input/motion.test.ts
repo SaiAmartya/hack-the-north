@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CapturedMotion } from "../wand/client";
 import { MotionFlag } from "../wand/protocol";
 import { MotionRecognizer, type GestureEvidence, type SpellName } from "./motion";
-import { RawMotionTraceBuilder, STROKE_DIRECTIONS, createCoreMotionFixtures, createSevenSpellFixtures, type CoreMotionFixtures } from "./traceFixtures";
+import { RawMotionTraceBuilder, SHAKE_AXIS, STROKE_DIRECTIONS, createCoreMotionFixtures, createSevenSpellFixtures, type CoreMotionFixtures } from "./traceFixtures";
 import { SPELL_NAMES } from "../game/spells";
 import phoneJabs from "./fixtures/phone-jabs-2026-09-19.json";
 
@@ -28,10 +28,9 @@ class MotionHarness {
   calibrate(spell: SpellName): void {
     this.recognizer.beginGestureCalibration(spell);
     if (spell === "protego") {
-      for (const degrees of [33, 36, 39]) {
-        this.feed(this.builder.guard(degrees));
-        this.feed(this.builder.lower(degrees));
-      }
+      for (const amplitude of [650, 700, 750]) this.feed(this.builder.shake(amplitude));
+    } else if (spell === "petrificus-totalus") {
+      for (const degrees of [80, 85, 75]) this.feed(this.builder.twist(degrees));
     } else if (spell === "expecto-patronum") {
       this.feed(this.builder.circle(600, 900));
       this.feed(this.builder.circle(700, 800));
@@ -159,7 +158,7 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     expect(h.builder.currentPose()).not.toEqual([0, 0, 1000]);
   });
 
-  it("recognizes held-out jabs and guards without any return to the calibrated pose", () => {
+  it("recognizes held-out jabs and shakes without any return to the calibrated pose", () => {
     const h = new MotionHarness();
     h.ready();
     h.feed(h.builder.jab(760));
@@ -168,7 +167,7 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     h.feed(h.builder.stillness(400));
     h.feed(h.builder.jab(850));
     expect(h.spells()).toEqual(["stupefy", "stupefy"]);
-    h.feed(h.builder.guard(31));
+    h.feed(h.builder.shake(680));
     expect(h.spells()).toEqual(["stupefy", "stupefy", "protego"]);
     expect(h.evidence.every((item) => item.quality > 0 && item.quality <= 1)).toBe(true);
   });
@@ -192,21 +191,6 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     h.feed(h.builder.stillness(300));
     h.feed(h.builder.rapidJabs(900, 2));
     expect(h.spells()).toEqual(["stupefy", "stupefy"]);
-  });
-
-  it("does not cast from slow drift, tremor, holding a guard, or lowering it", () => {
-    const h = new MotionHarness();
-    h.ready();
-    h.feed(h.builder.drift([0, 500, 866], 1_600));
-    h.feed(h.builder.drift([0, -300, 950], 2_000));
-    h.feed(h.builder.stillness(600));
-    expect(h.evidence).toHaveLength(0);
-    h.feed(h.builder.guard(34, 1_200));
-    expect(h.spells()).toEqual(["protego"]);
-    h.feed(h.builder.stillness(1_500));
-    h.feed(h.builder.lower(34));
-    h.feed(h.builder.stillness(300));
-    expect(h.spells()).toEqual(["protego"]);
   });
 
   it("classifies by the strongest stroke and refuses wrong-axis impulses", () => {
@@ -255,26 +239,57 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     h.feed(h.builder.jab(900));
     expect(h.recognizer.getState().calibratedSpells).toEqual(["stupefy"]);
     h.recognizer.beginGestureCalibration("protego");
-    h.feed(h.builder.guard(19));
-    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { protego: 0 }, reason: "guard-tilt" });
-    h.feed(h.builder.lower(19));
-    h.feed(h.builder.jab(900));
+    h.feed(h.builder.shake(700, 1));  // one wiggle is a stroke and its brake, not a shake
     expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { protego: 0 }, reason: "unclear-direction" });
-    h.feed(h.builder.guard(35));
+    h.feed(h.builder.shake(700));
     expect(h.recognizer.getState().examplesBySpell.protego).toBe(1);
-    h.feed(h.builder.lower(35));
-    expect(h.recognizer.getState().examplesBySpell.protego).toBe(1);
+    h.feed(h.builder.shake(700, 3, [1, 0, 0]));
+    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { protego: 1 }, reason: "inconsistent-direction" });
   });
 
-  it("breaks a movement on gaps or saturation without losing calibration", () => {
+  it("does not cast from slow drift or tremor", () => {
+    const h = new MotionHarness();
+    h.ready();
+    h.feed(h.builder.drift([200, 100, 950], 1_200));
+    h.feed(h.builder.stillness(800));
+    expect(h.evidence).toHaveLength(0);
+    expect(h.recognizer.getState().phase).toBe("ready");
+  });
+
+  it("learns a shake as Protego and never confuses it with a stroke, nor a stroke with it", () => {
+    const h = new MotionHarness();
+    h.ready();
+    h.feed(h.builder.shake(680));
+    h.feed(h.builder.jab(900));
+    h.feed(h.builder.shake(700, 3, [1, 0, 0]));          // rapid strokes along the jab's line are the jab, as before
+    h.feed(h.builder.jab(900, 0, SHAKE_AXIS));          // one stroke along the shake's line: not learned, not a shake
+    expect(h.spells()).toEqual(["protego", "stupefy", "stupefy"]);
+    expect(h.recognizer.getState().reason).toBe("no-match");
+  });
+
+  it("learns a twist as Petrificus Totalus and tells it from strokes and raises", () => {
+    const h = new MotionHarness();
+    h.ready();
+    h.calibrate("petrificus-totalus");
+    h.feed(h.builder.twist(78));
+    h.feed(h.builder.jab(900));
+    h.feed(h.builder.twist(30));                          // a lazy quarter turn: nothing
+    h.feed(h.builder.guard(35));                          // a raise that stays up: nothing (no guard spell any more)
+    h.feed(h.builder.lower(35));
+    expect(h.spells()).toEqual(["petrificus-totalus", "stupefy"]);
+  });
+
+  it("breaks a movement on gaps but keeps clipped samples, without losing calibration", () => {
     const h = new MotionHarness();
     h.ready();
     h.feed(h.builder.brokenJab("gap"));
-    h.feed(h.builder.brokenJab("saturated"));
     expect(h.evidence).toHaveLength(0);
     expect(h.recognizer.getState().phase).toBe("ready");
-    h.feed(h.builder.jab(900));
+    // The badge clips at 8 g; a hard jab's brake reaches it and still points the right way.
+    h.feed(h.builder.brokenJab("saturated"));
     expect(h.spells()).toEqual(["stupefy"]);
+    h.feed(h.builder.jab(900));
+    expect(h.spells()).toEqual(["stupefy", "stupefy"]);
   });
 
   it("invalidates calibration when the input generation changes and resumes after one still second", () => {
@@ -305,97 +320,6 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     h.feed(trace.slice(20));
     expect(h.evidence).toHaveLength(0);
     expect(h.recognizer.getState()).toMatchObject({ phase: "ready", lastIssue: "round ended" });
-  });
-
-  it("never lets a lowering seed the guard template, even when the first raise was rejected", () => {
-    const h = new MotionHarness();
-    h.still();
-    h.calibrate("stupefy");
-    h.recognizer.beginGestureCalibration("protego");
-    // Raise too little: rejected with coaching. Lowering it must not become example 1.
-    h.feed(h.builder.guard(19));
-    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { protego: 0 }, reason: "guard-tilt" });
-    h.feed(h.builder.lower(19));
-    expect(h.recognizer.getState().examplesBySpell.protego).toBe(0);
-    for (const degrees of [34, 36, 38]) {
-      h.feed(h.builder.guard(degrees));
-      h.feed(h.builder.lower(degrees));
-    }
-    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { protego: 3 } });
-    h.feed(h.builder.guard(35));
-    expect(h.spells()).toEqual(["protego"]);
-  });
-
-  it("restarts guard examples when the wand was already raised at the start", () => {
-    const h = new MotionHarness();
-    h.still();
-    h.calibrate("stupefy");
-    // The player is already holding the wand up (and still) when protego calibration begins, so the
-    // first movements the recognizer sees are lowerings: they must not become the template.
-    h.builder.guard(35, 1_000);
-    h.recognizer.beginGestureCalibration("protego");
-    h.feed(h.builder.stillness(500));
-    for (let index = 0; index < 2; index++) {
-      h.feed(h.builder.lower(35));
-      h.feed(h.builder.guard(35));
-    }
-    expect(h.recognizer.getState().examplesBySpell.protego).toBe(2);
-    h.feed(h.builder.lower(35));
-    // Three "raises" that all ended nearer the resting grip were lowerings: start over with a hint.
-    expect(h.recognizer.getState()).toMatchObject({ phase: "gesture-calibration", reason: "return-neutral" });
-    expect(h.recognizer.getState().examplesBySpell.protego).toBe(0);
-    for (const degrees of [34, 36, 38]) {
-      h.feed(h.builder.guard(degrees));
-      h.feed(h.builder.lower(degrees));
-    }
-    expect(h.recognizer.getState().phase).toBe("ready");
-  });
-
-  it("recognizes a brisk guard raise whose arm push exceeds the fast jab threshold", () => {
-    const h = new MotionHarness();
-    h.ready();
-    for (const [degrees, push] of [[35, 500], [45, 400], [30, 700]] as const) {
-      h.feed(h.builder.guard(degrees, 320, 320, push));
-      h.feed(h.builder.lower(degrees));
-    }
-    expect(h.spells()).toEqual(["protego", "protego", "protego"]);
-  });
-
-  it("never casts a jab from lowering a guard, even when the tilt is anti-parallel to the jab", () => {
-    const h = new MotionHarness();
-    h.still();
-    h.recognizer.beginGestureCalibration("stupefy");
-    // A jab direction opposite to the guard's tilt delta (the natural geometry for a horizontal wand).
-    const antiParallel: Pose = [0, -0.82, 0.57];
-    for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, antiParallel));
-    expect(h.recognizer.getState().examplesBySpell.stupefy).toBe(3);
-    h.calibrate("protego");
-    expect(h.recognizer.getState().phase).toBe("ready");
-    // Lowering right after the third calibration guard, then normal play.
-    h.feed(h.builder.guard(39));
-    h.feed(h.builder.lower(39));
-    h.feed(h.builder.guard(33));
-    h.feed(h.builder.lower(33));
-    expect(h.spells()).toEqual(["protego", "protego"]);
-    h.feed(h.builder.jab(900, 0, antiParallel));
-    expect(h.spells()).toEqual(["protego", "protego", "stupefy"]);
-  });
-
-  it("prefers the guard when a raise's stroke lies near the jab direction", () => {
-    const h = new MotionHarness();
-    h.still();
-    h.recognizer.beginGestureCalibration("stupefy");
-    const nearGuard: Pose = [0, 0.94, 0.34];
-    for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, nearGuard));
-    expect(h.recognizer.getState().examplesBySpell.stupefy).toBe(3);
-    h.recognizer.beginGestureCalibration("protego");
-    for (const degrees of [33, 36, 39]) {
-      h.feed(h.builder.guard(degrees));
-      h.feed(h.builder.lower(degrees));
-    }
-    if (h.recognizer.getState().phase !== "ready") return;  // the raise itself read as a jab: coached, acceptable
-    h.feed(h.builder.guard(36));
-    expect(h.spells()).toEqual(["protego"]);
   });
 
   it("recognizes the core fixtures in any grip orientation", () => {
@@ -436,13 +360,10 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
       rotateTrace(trace, toGrip).map((sample, index) => ({ ...sample, captureMs: startMs + index * 20, browserMs: startMs + index * 20, seq: (firstSeq + index) & 0xffff, breaksGesture: index === 0 }));
     recognizer.beginGestureCalibration("protego");
     let cursor = 2_000_000;
-    for (const degrees of [33, 36, 39]) {
-      const raise = rebase(guardBuilder.guard(degrees), cursor, 2000);
-      feed(raise);
-      cursor = raise[raise.length - 1].browserMs + 20;
-      const lower = rebase(guardBuilder.lower(degrees), cursor, 3000);
-      feed(lower);
-      cursor = lower[lower.length - 1].browserMs + 20;
+    for (const amplitude of [650, 700, 750]) {
+      const shake = rebase(guardBuilder.shake(amplitude), cursor, 2000);
+      feed(shake);
+      cursor = shake[shake.length - 1].browserMs + 20;
     }
     expect(recognizer.getState().phase).toBe("ready");
     const heldOut = split(onsets[3] - 400, Infinity).map((sample, index) => ({ ...sample, breaksGesture: index === 0 }));
@@ -468,25 +389,6 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
 });
 
 describe("real wand physics", () => {
-  it("learns Protego from a raise that pitches the wand, without reading the gravity swing as a jab", () => {
-    // A real raise tips the wand about its y axis: gravity swings onto the x axis, which is the
-    // jab's axis. Only the arm's small upward push is a stroke; the swing is not.
-    const h = new MotionHarness();
-    h.still();
-    h.calibrate("stupefy");
-    h.recognizer.beginGestureCalibration("protego");
-    for (const degrees of [33, 36, 39]) {
-      h.feed(h.builder.guard(degrees, 320, 320, 220, "y"));
-      expect(h.recognizer.getState().reason, h.recognizer.getState().lastIssue).not.toBe("unclear-direction");
-      h.feed(h.builder.lower(degrees, 360, "y"));
-    }
-    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { protego: 3 } });
-    h.feed(h.builder.guard(31, 320, 320, 220, "y"));
-    h.feed(h.builder.lower(31, 360, "y"));
-    h.feed(h.builder.jab(900));
-    expect(h.spells()).toEqual(["protego", "stupefy"]);
-  });
-
   it("separates a wrist slash from the jab despite the centripetal pull toward the wrist", () => {
     // Swinging the wand from the wrist drags the sensor toward the wrist harder than the slash
     // itself accelerates it sideways; that pull is along the jab axis and must not count.
@@ -509,14 +411,7 @@ describe("real wand physics", () => {
     // swings forward too: the old strongest-lobe rule read that as a jab. The hold at the end
     // looks like a guard, but the stroke is far too strong to be a raise.
     const h = new MotionHarness();
-    h.still();
-    h.calibrate("stupefy");
-    h.recognizer.beginGestureCalibration("protego");
-    for (const degrees of [33, 36, 39]) {
-      h.feed(h.builder.guard(degrees, 320, 320, 220, "y"));
-      h.feed(h.builder.lower(degrees, 360, "y"));
-    }
-    expect(h.recognizer.getState().phase).toBe("ready");
+    h.ready();
     h.recognizer.beginGestureCalibration("expelliarmus");
     for (const amplitude of [820, 900, 980]) {
       h.feed(h.builder.pitchedStroke(amplitude, [-1, 0, 0], 30));
@@ -526,10 +421,8 @@ describe("real wand physics", () => {
     expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { expelliarmus: 3 } });
     h.feed(h.builder.pitchedStroke(850, [-1, 0, 0], 30));
     h.feed(h.builder.lower(30, 360, "y"));
-    h.feed(h.builder.guard(35, 320, 320, 220, "y"));
-    h.feed(h.builder.lower(35, 360, "y"));
     h.feed(h.builder.jab(900));
-    expect(h.spells()).toEqual(["expelliarmus", "protego", "stupefy"]);
+    expect(h.spells()).toEqual(["expelliarmus", "stupefy"]);
   });
 
   it("keeps the launch as the sign of a stroke even when the brake is the sharper part", () => {
@@ -573,7 +466,7 @@ describe("seven spells", () => {
     const h = new MotionHarness();
     h.learnAll();
     const results: Record<string, SpellName[]> = {};
-    const strokes: Record<string, Pose> = { ...STROKE_DIRECTIONS, "+y (unlearned)": [0, 1, 0] };
+    const strokes: Record<string, Pose> = { ...STROKE_DIRECTIONS, "-z (unlearned)": [0, 0, -1] };
     for (const [label, direction] of Object.entries(strokes)) {
       const before = h.evidence.length;
       h.feed(h.builder.jab(900, 0, direction));
@@ -584,13 +477,12 @@ describe("seven spells", () => {
       expelliarmus: ["expelliarmus"],
       sectumsempra: ["sectumsempra"],
       incendio: ["incendio"],
-      "petrificus-totalus": ["petrificus-totalus"],
-      "+y (unlearned)": [],
+      "-z (unlearned)": [],
     });
     // Learned directions are at right angles, so a stroke halfway between two of them is inside
     // neither 40-degree cone: nothing fires and nothing is guessed.
     h.feed(h.builder.jab(900, 0, [0.7071, 0, 0.7071]));
-    expect(h.spells().slice(-1)).toEqual(["petrificus-totalus"]);  // the last accepted spell is unchanged
+    expect(h.spells().slice(-1)).toEqual(["incendio"]);  // the last accepted spell is unchanged
     expect(h.recognizer.getState().reason).toBe("no-match");
   });
 
@@ -609,10 +501,10 @@ describe("seven spells", () => {
     // A rapid succession of strokes turns nowhere.
     h.feed(h.builder.rapidJabs(900, 3));
     expect(h.spells().slice(-1)).toEqual(["stupefy"]);
-    h.feed(h.builder.guard(35));
+    h.feed(h.builder.shake(700));
     expect(h.spells().slice(-1)).toEqual(["protego"]);
-    h.feed(h.builder.lower(35));
-    expect(h.spells().slice(-1)).toEqual(["protego"]);
+    h.feed(h.builder.twist(80));
+    expect(h.spells().slice(-1)).toEqual(["petrificus-totalus"]);
   });
 
   it("coaches an incomplete or wobbly circle instead of learning it", () => {
@@ -632,34 +524,6 @@ describe("seven spells", () => {
     expect(h.recognizer.getState()).toMatchObject({ phase: "ready", calibratedSpells: ["stupefy", "protego", "expecto-patronum"] });
   });
 
-  it("treats a chop from the grip as a stroke, and a lowered guard as nothing", () => {
-    const h = new MotionHarness();
-    h.learnAll();
-    // Chop down and end 30 degrees lower: still the chop (resolved on the fast path); the slow
-    // drop that follows is not a "lowering" of any guard and casts nothing.
-    const before = h.evidence.length;
-    h.feed(h.builder.jab(950, 0, STROKE_DIRECTIONS["petrificus-totalus"], 1, -30));
-    expect(h.evidence.slice(before).map((item) => item.spell)).toEqual(["petrificus-totalus"]);
-    h.feed(h.builder.stillness(400));
-    // Lowering a raised guard is still silent.
-    h.feed(h.builder.guard(36));
-    expect(h.spells().slice(-1)).toEqual(["protego"]);
-    h.feed(h.builder.lower(36));
-    expect(h.spells().slice(-1)).toEqual(["protego"]);
-    expect(h.recognizer.getState().reason).toBeUndefined();
-  });
-
-  it("reads an upward flick that stays up as the guard, not Incendio", () => {
-    const h = new MotionHarness();
-    h.learnAll();
-    const before = h.evidence.length;
-    h.feed(h.builder.guard(35, 320, 320, 700));
-    expect(h.evidence.slice(before).map((item) => item.spell)).toEqual(["protego"]);
-    h.feed(h.builder.lower(35));
-    h.feed(h.builder.jab(840, 0, STROKE_DIRECTIONS.incendio));
-    expect(h.spells().slice(-1)).toEqual(["incendio"]);
-  });
-
   it("only offers learned spells and drops an optional spell when its grip is reset", () => {
     const h = new MotionHarness();
     h.ready();
@@ -668,7 +532,7 @@ describe("seven spells", () => {
     expect(h.recognizer.getState().enabledSpells).toEqual(["stupefy", "protego", "incendio"]);
     expect(h.recognizer.resumeCalibration(11)).toBe(true);
     h.recognizer.reset();
-    expect(h.recognizer.getState().enabledSpells).toEqual(["stupefy", "protego"]);
+    expect(h.recognizer.getState().enabledSpells).toEqual(["stupefy"]);  // Protego is optional too
   });
 });
 

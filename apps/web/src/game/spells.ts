@@ -14,8 +14,12 @@ export const SPELL_NAMES = [
 ] as const;
 export type SpellName = (typeof SPELL_NAMES)[number];
 
-/** Every player must calibrate these two; the rest are optional extras. */
-export const CORE_SPELL_NAMES: readonly SpellName[] = ["stupefy", "protego"];
+/**
+ * Every player must calibrate Stupefy; everything else, Protego included, is optional. The shield
+ * was dropped from the mandatory set on the night of 2026-09-19: its shake proved too hard for
+ * some players, and Expecto Patronum covers defence for anyone who skips it.
+ */
+export const CORE_SPELL_NAMES: readonly SpellName[] = ["stupefy"];
 export const OPTIONAL_SPELL_NAMES: readonly SpellName[] = SPELL_NAMES.filter(
   (spell) => !CORE_SPELL_NAMES.includes(spell),
 );
@@ -28,10 +32,12 @@ export const OFFENSIVE_SPELL_NAMES: readonly SpellName[] = [
 ];
 
 /**
- * How the recognizer models the movement: a single sharp stroke in a learned direction, a raise
- * into a held pose, or one full circle.
+ * How the recognizer models the movement: a single sharp stroke in a learned direction, a shake
+ * (several quick reversals along one line), a twist (the wand rolled like a key and back), or one
+ * full circle. "guard" (raise into a held pose) is still understood but no spell uses it: real
+ * players lift instead of tilting and never hold.
  */
-export type GestureKind = "impulse" | "guard" | "arc";
+export type GestureKind = "impulse" | "guard" | "arc" | "shake" | "twist";
 
 export type SpellInfo = {
   name: SpellName;
@@ -73,13 +79,13 @@ export const SPELLS: Readonly<Record<SpellName, SpellInfo>> = {
     name: "protego",
     title: "Protego",
     incantation: "protego",
-    gesture: "guard",
-    move: "Raise and hold",
-    hint: "Raise + speak",
-    calibration: "Raise, hold, lower. Three times.",
-    again: "Lower, then raise again.",
-    harder: "Raise a little quicker, then hold it still.",
-    sameWay: "Raise the same way each time.",
+    gesture: "shake",
+    move: "Shake side to side",
+    hint: "Shake + speak",
+    calibration: "Shake the wand side to side: three quick wiggles. Three times.",
+    again: "Again.",
+    harder: "Shake harder: three quick wiggles, then stop.",
+    sameWay: "Shake along the same line each time.",
     effect: "Shield. Catches one spell, then breaks.",
   },
   expelliarmus: {
@@ -125,13 +131,13 @@ export const SPELLS: Readonly<Record<SpellName, SpellInfo>> = {
     name: "petrificus-totalus",
     title: "Petrificus Totalus",
     incantation: "petrificus totalus",
-    gesture: "impulse",
-    move: "Chop down and return",
-    hint: "Chop down + speak",
-    calibration: "Chop straight down and back up, three times.",
+    gesture: "twist",
+    move: "Turn the key",
+    hint: "Twist + speak",
+    calibration: "Turn the wand a quarter turn like a key, then back. Three times.",
     again: "Again.",
-    harder: "Chop a little harder.",
-    sameWay: "Chop the same way each time.",
+    harder: "Turn it further, like a key in a lock, then back.",
+    sameWay: "Turn it the same way each time.",
     effect: "Body-bind. The target cannot cast for 1.5 seconds.",
   },
   "expecto-patronum": {

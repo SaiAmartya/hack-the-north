@@ -97,7 +97,7 @@ def test_ruleset_publishes_seven_spells_with_starting_values_and_an_allowlist():
     assert (by_spell["expecto-patronum"]["barrier_ms"], by_spell["expecto-patronum"]["cooldown_ms"]) == (3_000, 15_000)
 
     core = ruleset(enabled_spells=CORE_SPELLS).model_dump(mode="json")
-    assert [spell["spell"] for spell in core["spells"] if spell["enabled"]] == ["stupefy", "protego"]
+    assert [spell["spell"] for spell in core["spells"] if spell["enabled"]] == ["stupefy"]
     assert ALL_SPELLS == frozenset(Spell)
 
 
@@ -277,7 +277,7 @@ def test_abort_or_deadline_rejects_queued_ready_until_a_later_advance():
 
 
 def test_cooldown_recovery_evidence_and_disabled_spell_are_authoritative():
-    engine = _ready_engine(enabled=CORE_SPELLS)
+    engine = _ready_engine(enabled=CORE_SPELLS | {Spell.PROTEGO})
     first = engine.advance(
         now_ms=4_000,
         commands=[_cast(3, Slot.P1, 4_000, Spell.STUPEFY)],

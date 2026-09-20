@@ -79,7 +79,7 @@ def _environment_spells(name: str) -> frozenset[Spell]:
         except ValueError:
             raise ValueError(f"{name} names an unknown spell: {value!r}") from None
     if not CORE_SPELLS <= chosen:
-        raise ValueError(f"{name} must include stupefy and protego")
+        raise ValueError(f"{name} must include stupefy")
     return frozenset(chosen)
 
 

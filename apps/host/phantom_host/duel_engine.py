@@ -81,7 +81,7 @@ SPELL_RULES: dict[Spell, SpellRule] = {
     Spell.EXPECTO_PATRONUM: SpellRule(damage=0, cooldown_ms=15_000, barrier_ms=3_000),
 }
 ALL_SPELLS: frozenset[Spell] = frozenset(SPELL_RULES)
-CORE_SPELLS: frozenset[Spell] = frozenset({Spell.STUPEFY, Spell.PROTEGO})
+CORE_SPELLS: frozenset[Spell] = frozenset({Spell.STUPEFY})  # Protego is optional since 2026-09-19
 
 
 def ruleset(*, enabled_spells: frozenset[Spell] = ALL_SPELLS) -> RulesetWire:

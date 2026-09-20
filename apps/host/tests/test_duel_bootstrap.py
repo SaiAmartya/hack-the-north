@@ -57,7 +57,7 @@ def test_spell_allowlist_comes_from_the_environment(monkeypatch):
     try:
         DuelSettings.from_environment()
     except ValueError as error:
-        assert "stupefy and protego" in str(error)
+        assert "must include stupefy" in str(error)
     else:
         raise AssertionError("core spells must be required")
     monkeypatch.setenv("WAND_SPELLS", "stupefy,protego,avada-kedavra")

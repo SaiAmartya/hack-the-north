@@ -91,11 +91,19 @@ type Features = {
   coherence: number;       // 1 when all of that turning shares one plane and one sense
   normal: Vector;          // signed normal of that plane (encodes the way round)
   meanMg: number;          // mean linear acceleration over the whole movement
+  axis: Vector;            // unsigned line of the stroke (shakes are judged along it)
+  lobeCount: number;       // launches and brakes along that line carrying a real share of the impulse
+  excursionDeg: number;    // furthest the raw acceleration vector swung from the starting pose (twists)
+  excursionDirection: Vector;
+  peakJerk: number;        // sharpest sample-to-sample change; a twist rolls smoothly, a stroke snaps
+  magnitudeDeviation: number; // furthest |a| strayed from |rest|: a roll only turns gravity, a stroke adds to it
 };
 type ImpulseTemplate = { kind: "impulse"; direction: Vector; peak: number; strokeMg: number };
 type GuardTemplate = { kind: "guard"; direction: Vector; tiltDeg: number; peak: number };
 type ArcTemplate = { kind: "arc"; normal: Vector; sweptDeg: number; meanMg: number };
-type GestureTemplate = ImpulseTemplate | GuardTemplate | ArcTemplate;
+type ShakeTemplate = { kind: "shake"; axis: Vector; peak: number; lobes: number };
+type TwistTemplate = { kind: "twist"; direction: Vector; excursionDeg: number };
+type GestureTemplate = ImpulseTemplate | GuardTemplate | ArcTemplate | ShakeTemplate | TwistTemplate;
 
 const EXAMPLES_PER_SPELL = 3;
 const kindOf = (spell: SpellName | undefined): GestureKind | undefined => (spell ? SPELLS[spell].gesture : undefined);
@@ -107,8 +115,9 @@ const STILLNESS_MS = 1_500;
 const RESUME_MS = 1_000;
 const ARM_MS = 250;                 // quiet before a new movement may start
 const QUIET_WINDOW_MS = 200;        // trailing still window that ends a movement
-const QUIET_JERK_MG = 140;          // per 20 ms; resting hands measure well under 100
-const QUIET_SPREAD_MG = 150;
+const QUIET_JERK_MG = 200;          // per 20 ms; resting hands measure well under 100, a hand still ringing after a 6 g slash ~150
+const QUIET_SPREAD_MG = 200;        // badge recordings wobble ~300 mg between strokes and the old 150 never re-armed; a
+                                    // gentle 500 mg circle moves 270 mg in 200 ms and a slow raise must not count as still
 const ONSET_JERK_MG = 180;          // two consecutive samples, or one sample above the single threshold
 const ONSET_JERK_SINGLE_MG = 450;
 const ONSET_LINEAR_MG = 450;        // weak movements still start a candidate so coaching can say "harder"
@@ -120,14 +129,14 @@ const IMPULSE_SETTLE_MS = 120;
 const IMPULSE_SETTLE_JERK_MG = 250; // the stroke is over once the wand stops accelerating sharply
 const IMPULSE_EARLY_DECAY = 0.8;    // ...and once its acceleration has died away; a circle keeps pulling
 const IMPULSE_MIN_PEAK_MG = 600;    // calibration floor for a single stroke
-const IMPULSE_MIN_LOBE_MS = 60;     // a stroke has to last three samples; a twitch does not
+const IMPULSE_MIN_LOBE_MS = 40;     // a stroke has to last two samples at 50 Hz; recorded 5 g flicks peak in one or two
 const IMPULSE_MAX_LOBE_MS = 500;    // a stroke longer than this is a push or a circle, not a jab
 const IMPULSE_MAX_SWEPT_DEG = 200;  // a stroke whose direction turns this far is a circle, not a jab; a wrist
                                     // slash swings through the centripetal pull and reads as ~180
 const PLAY_MIN_PEAK_MG = 400;
 const CANDIDATE_MIN_PEAK_MG = 150;  // below this a "movement" is just the hand drifting
-const COACH_MIN_MS = 150;           // shorter, weaker movements get no coaching at all
-const GUARD_MIN_TILT_DEG = 22;
+const COACH_MIN_MS = 100;           // shorter, weaker movements get no coaching at all (a gentle jab's launch is ~120 ms)
+const GUARD_MIN_TILT_DEG = 10;      // recorded raises tilt 10-24 degrees; the hold, not the angle, makes the guard
 const GUARD_MIN_PEAK_MG = 200;
 const DIRECTION_TOLERANCE_DEG = 40;
 const GUARD_TOLERANCE_DEG = 45;
@@ -145,11 +154,25 @@ const ARC_MIN_MS = 350;
 const ARC_TOLERANCE_DEG = 50;       // plane normal (and therefore sense) tolerance in play
 const ARC_CONSISTENCY_DEG = 60;
 const REST_TAU_MS = 500;
+const SHAKE_LOBE_SHARE = 0.25;      // a lobe counts toward a shake with this share of the strongest lobe's impulse
+const SHAKE_MIN_LOBES = 5;          // three wiggles give six; a stroke with its brake and rebound gives three
+const SHAKE_MIN_PEAK_MG = 400;
+const SHAKE_MAX_MS = 1_500;
+const SHAKE_TOLERANCE_DEG = 50;     // line tolerance (unsigned)
+const TWIST_MIN_EXCURSION_DEG = 35; // a quarter turn swings gravity 90 degrees; 35 is a lazy one
+const TWIST_MAX_JERK_MG = 400;      // rolled, not snapped (an 80-degree roll in half a second peaks near 180)
+const TWIST_MAX_MAGNITUDE_MG = 200; // |a| stays near 1 g through a roll; even a gentle 760 mg jab adds 250
+const TWIST_MIN_MS = 200;
+const TWIST_TOLERANCE_DEG = 50;
 const LOBE_FRACTION = 0.5;
-const STROKE_LOBE_FLOOR = 0.3;      // a launch or brake lobe is the run above this share of the line's peak
+const STROKE_LOBE_FLOOR = 0.2;      // a launch or brake lobe is the run above this share of the line's peak; a recorded
+                                    // flick launches at 2 g and brakes at 5 g, so the floor has to sit low
 const STROKE_AXIS_SHARE = 0.25;     // a line must carry this share of the strongest line's energy to be the stroke
 const STROKE_BRAKE_SHARE = 0.15;    // a following lobe with at least this share of the launch's impulse is its brake
-const STROKE_PREFER_SHARE = 0.5;    // a stroke at least this strong (vs its template) beats a matching guard
+const STROKE_LAUNCH_SHARE = 0.3;    // the first lobe with this share of the strongest lobe's impulse is the launch
+const ECHO_SHARE = 0.35;            // a calibration stroke weaker than this share of the player's own is a return, not an example
+const STROKE_PREFER_SHARE = 0.8;    // a stroke at least this strong (vs its template) beats a matching guard; a recorded
+                                    // raise reaches ~0.7 of the flick it would otherwise be mistaken for
 const STROKE_MIN_DOMINANT = 0.2;    // wrist strokes carry a centripetal pull off the line; the line still has to matter
 
 function vector(sample: CapturedMotion): Vector {
@@ -175,6 +198,11 @@ function angleDegrees(l: Vector, r: Vector): number {
   if (divisor === 0) return 180;
   return (Math.acos(Math.max(-1, Math.min(1, dot(l, r) / divisor))) * 180) / Math.PI;
 }
+/** Angle between two lines (sign ignored). */
+function lineAngleDegrees(l: Vector, r: Vector): number {
+  const angle = angleDegrees(l, r);
+  return Math.min(angle, 180 - angle);
+}
 function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
@@ -194,12 +222,12 @@ function spellCounts(): Record<SpellName, number> {
  * it, and the line of the stroke is the axis carrying the most two-signed energy, not the most
  * energy. A movement with one lobe only (a push, the lift of a raise) keeps that lobe's sign.
  */
-function strokeDirection(linear: readonly Vector[], times: readonly number[]): { direction: Vector; peak: number; lobeMs: number; dominantRatio: number } {
+function strokeDirection(linear: readonly Vector[], times: readonly number[]): { direction: Vector; peak: number; lobeMs: number; dominantRatio: number; axis: Vector; lobeCount: number } {
   const sizes = linear.map(magnitude);
   let peakIndex = 0;
   for (let index = 1; index < sizes.length; index++) if (sizes[index] > sizes[peakIndex]) peakIndex = index;
   const peak = sizes[peakIndex] ?? 0;
-  if (peak === 0) return { direction: [0, 0, 0], peak: 0, lobeMs: 20, dominantRatio: 0 };
+  if (peak === 0) return { direction: [0, 0, 0], peak: 0, lobeMs: 20, dominantRatio: 0, axis: [0, 0, 0], lobeCount: 0 };
   const floor = peak * LOBE_FRACTION;
   let from = peakIndex, to = peakIndex;
   while (from > 0 && sizes[from - 1] >= floor) from--;
@@ -263,24 +291,15 @@ function strokeDirection(linear: readonly Vector[], times: readonly number[]): {
     }
   });
   if (current) lobes.push(current);
-  // Which way the wand went: integrate along the line. Velocity peaks at the end of the launch,
-  // whatever the wind-up before it or the brake after it happen to measure, so its sign is the
-  // launch's. (The centripetal pull of a wrist stroke would integrate too, but it lies off this
-  // line.) The launch is the strongest lobe of that sign; the brake, if one cleared the floor, is
-  // the strongest opposite lobe after it. Recorded jabs have a wind-up at 5-30 % of the launch
-  // and a brake too soft to clear the floor; their sign comes out the same every time.
-  const lastLobeEnd = lobes.reduce((last, lobe) => Math.max(last, lobe.to), -1);
-  let velocity = 0, peakVelocity = 0;
-  for (let index = 0; index <= lastLobeEnd; index++) {
-    velocity += projections[index];
-    if (Math.abs(velocity) > Math.abs(peakVelocity)) peakVelocity = velocity;
-  }
-  const launchSign = Math.sign(peakVelocity) || lobes[0]?.sign || 0;
-  const strongest = (candidates: readonly Lobe[]): Lobe | undefined =>
-    candidates.reduce<Lobe | undefined>((best, lobe) => (!best || lobe.impulse > best.impulse ? lobe : best), undefined);
-  const launch = strongest(lobes.filter((lobe) => lobe.sign === launchSign));
+  // The launch is the first lobe that carries a real share of the movement's impulse. Recorded
+  // flicks, chops and slashes come straight back (launch, brake, return, brake again) with the
+  // return as strong as the launch, so neither peak velocity nor the strongest lobe says which way
+  // the player meant; the first substantial stroke does. Wind-ups measure well under that share
+  // (5-30 % in recorded jabs). The brake is the first opposite lobe after the launch.
+  const maxImpulse = lobes.reduce((max, lobe) => Math.max(max, lobe.impulse), 0);
+  const launch = lobes.find((lobe) => lobe.impulse >= maxImpulse * STROKE_LAUNCH_SHARE);
   const brake = launch
-    ? strongest(lobes.filter((lobe) => lobe.sign === -launchSign && lobe.from > launch.to && lobe.impulse >= launch.impulse * STROKE_BRAKE_SHARE))
+    ? lobes.find((lobe) => lobe.from > launch.to && lobe.sign === -launch.sign && lobe.impulse >= launch.impulse * STROKE_BRAKE_SHARE)
     : undefined;
   const weightedMean = (lobe: Lobe): Vector => {
     let sum: Vector = [0, 0, 0], weight = 0;
@@ -300,7 +319,8 @@ function strokeDirection(linear: readonly Vector[], times: readonly number[]): {
   let along = 0, energy = 0;
   for (const lobe of used)
     for (let index = lobe.from; index <= lobe.to; index++) { along += projections[index] ** 2; energy += sizes[index] ** 2; }
-  return { direction, peak, lobeMs, dominantRatio: energy > 0 ? along / energy : 0 };
+  const lobeCount = lobes.filter((lobe) => lobe.impulse >= maxImpulse * SHAKE_LOBE_SHARE).length;
+  return { direction, peak, lobeMs, dominantRatio: energy > 0 ? along / energy : 0, axis, lobeCount };
 }
 
 /**
@@ -360,6 +380,7 @@ export class MotionRecognizer {
   private progressMs = 0;
   private progressTargetMs = STILLNESS_MS;
   private lastCandidate?: MotionDiagnostics["candidate"];
+  private strongestCandidateMg = 0;  // strongest stroke seen while calibrating the current spell (echoes are judged against it)
 
   constructor(private readonly onGesture: (evidence: GestureEvidence) => void) {}
 
@@ -383,6 +404,7 @@ export class MotionRecognizer {
   }
 
   beginGestureCalibration(spell: SpellName): void {
+    this.strongestCandidateMg = 0;
     if (!this.neutral || this.phase === "stillness" || this.phase === "resuming" || this.phase === "fault")
       throw new Error("Complete stillness calibration first");
     this.calibratingSpell = spell;
@@ -419,8 +441,10 @@ export class MotionRecognizer {
       this.breakContinuity("Non-finite motion sample", "invalid-sample");
       return;
     }
-    if (!(sample.flags & MotionFlag.Valid) || sample.flags & (MotionFlag.Saturated | MotionFlag.Discontinuity)) {
-      this.breakContinuity("Invalid, saturated or discontinuous motion", "invalid-sample");
+    // A clipped sample (the badge saturates at 8 g; a hard jab's brake reaches it) still points the
+    // right way; only an invalid or discontinuous one breaks the movement.
+    if (!(sample.flags & MotionFlag.Valid) || sample.flags & MotionFlag.Discontinuity) {
+      this.breakContinuity("Invalid or discontinuous motion", "invalid-sample");
       return;
     }
     const gap = this.previous ? sample.browserMs - this.previous.browserMs : undefined;
@@ -644,7 +668,7 @@ export class MotionRecognizer {
     else this.setProgress("moving", elapsed, MOVEMENT_MAX_MS);
 
     const calibratingKind = kindOf(this.calibratingSpell);
-    if (!burst.earlyEvaluated && calibratingKind !== "guard" && calibratingKind !== "arc" && this.impulseComplete(burst, current)) {
+    if (!burst.earlyEvaluated && calibratingKind !== "guard" && calibratingKind !== "arc" && calibratingKind !== "twist" && this.impulseComplete(burst, current)) {
       // Fast path for strong single strokes. Anything that is not one yet (a brisk raise, a circle
       // still turning) is left for the still end, where tilt, hold and rotation can be judged.
       burst.earlyEvaluated = true;
@@ -704,7 +728,9 @@ export class MotionRecognizer {
 
   private features(burst: Burst, endMs: number, endQuiet: boolean): Features {
     const movement = burst.samples.filter((sample) => sample.t <= endMs);
-    const tailStart = endMs - 100;
+    // The held pose is the still window itself; the 100 ms before it still carries the stroke's decay
+    // and would inflate a small raise's tilt. A movement judged early has only its tail to go on.
+    const tailStart = endQuiet ? endMs : endMs - 100;
     const tail = burst.samples.filter((sample) => sample.t >= tailStart && sample.t <= endMs + QUIET_WINDOW_MS);
     const endPose = tail.length ? mean(tail.map((sample) => sample.a)) : movement[movement.length - 1].a;
     // Gravity does not stay put while the wand moves: raising a guard or pulling back to the
@@ -719,6 +745,14 @@ export class MotionRecognizer {
     const linear = movement.map((sample) => subtract(sample.a, add(burst.rest, scale(swing, clamp01((sample.t - burst.startMs) / span)))));
     const stroke = strokeDirection(linear, movement.map((sample) => sample.t));
     const rotation = rotationStats(linear);
+    let excursionDeg = 0, excursionDirection: Vector = [0, 0, 0], peakJerk = 0, magnitudeDeviation = 0;
+    const restMagnitude = magnitude(burst.rest);
+    for (const sample of movement) {
+      magnitudeDeviation = Math.max(magnitudeDeviation, Math.abs(magnitude(sample.a) - restMagnitude));
+      const swingDeg = angleDegrees(burst.rest, sample.a);
+      if (swingDeg > excursionDeg) { excursionDeg = swingDeg; excursionDirection = normalized(subtract(sample.a, burst.rest)); }
+      peakJerk = Math.max(peakJerk, sample.jerk);
+    }
     return {
       startMs: burst.startMs,
       endMs,
@@ -737,6 +771,12 @@ export class MotionRecognizer {
       coherence: rotation.coherence,
       normal: rotation.normal,
       meanMg: rotation.meanMg,
+      axis: stroke.axis,
+      lobeCount: stroke.lobeCount,
+      excursionDeg,
+      excursionDirection,
+      peakJerk,
+      magnitudeDeviation,
     };
   }
 
@@ -835,6 +875,20 @@ export class MotionRecognizer {
         sweptDeg: median(examples.map((example) => example.sweptDeg)),
         meanMg: median(examples.map((example) => example.meanMg)),
       });
+    } else if (info.gesture === "shake") {
+      const reference = examples[0].axis;
+      this.templates.set(spell, {
+        kind: "shake",
+        axis: normalized(mean(examples.map((example) => (dot(example.axis, reference) < 0 ? scale(example.axis, -1) : example.axis)))),
+        peak: median(examples.map((example) => example.peak)),
+        lobes: median(examples.map((example) => example.lobeCount)),
+      });
+    } else if (info.gesture === "twist") {
+      this.templates.set(spell, {
+        kind: "twist",
+        direction: normalized(mean(examples.map((example) => example.excursionDirection))),
+        excursionDeg: median(examples.map((example) => example.excursionDeg)),
+      });
     } else {
       this.templates.set(spell, {
         kind: "impulse",
@@ -872,6 +926,9 @@ export class MotionRecognizer {
       }
       if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > LOWERING_DEG)
         return "ignore";
+      // A lift that barely tilts the wand still launches one way going up and the other coming down.
+      if (prior.length && angleDegrees(features.direction, mean(prior.map((example) => example.direction))) > 90)
+        return "ignore";
       for (const other of this.calibratedImpulses())
         if (angleDegrees(features.direction, other.template.direction) <= DIRECTION_TOLERANCE_DEG && features.strokeMg >= other.template.strokeMg * STROKE_PREFER_SHARE)
           return { message: `That looked like ${SPELLS[other.spell].title}. Raise your wand into a guard and hold it.`, reason: "unclear-direction" };
@@ -900,8 +957,42 @@ export class MotionRecognizer {
         return { message: info.sameWay, reason: "inconsistent-direction" };
       return undefined;
     }
+    if (info.gesture === "shake") {
+      if (how === "early" && features.lobeCount < SHAKE_MIN_LOBES) return "ignore";  // still shaking; judge it when it stops
+      if (features.durationMs > SHAKE_MAX_MS) return { message: "Three quick wiggles, then stop.", reason: "too-long" };
+      if (features.peak < SHAKE_MIN_PEAK_MG) {
+        if (features.durationMs < COACH_MIN_MS) return "ignore";
+        return { message: info.harder, reason: "too-small" };
+      }
+      if (features.lobeCount < SHAKE_MIN_LOBES) return { message: info.harder, reason: "unclear-direction" };
+      if (prior.length && lineAngleDegrees(features.axis, prior[0].axis) > SHAKE_TOLERANCE_DEG)
+        return { message: info.sameWay, reason: "inconsistent-direction" };
+      return undefined;
+    }
+    if (info.gesture === "twist") {
+      if (how === "early" || !features.endQuiet) return "ignore";
+      if (features.durationMs > MOVEMENT_MAX_MS) return { message: "One turn and back, then pause.", reason: "too-long" };
+      if (features.excursionDeg < TWIST_MIN_EXCURSION_DEG) {
+        if (features.durationMs < COACH_MIN_MS && features.peak < IMPULSE_MIN_PEAK_MG) return "ignore";
+        return { message: info.harder, reason: "too-small" };
+      }
+      if (features.peakJerk > TWIST_MAX_JERK_MG || features.magnitudeDeviation > TWIST_MAX_MAGNITUDE_MG)
+        return { message: "Turn it smoothly, like a key; no push, no snap.", reason: "unclear-direction" };
+      // Whether the key comes back inside the same movement or after a pause does not matter: the
+      // turn is the spell, and the return rolls the other way, so it never matches the template.
+      if (prior.length && angleDegrees(features.excursionDirection, mean(prior.map((example) => example.excursionDirection))) > TWIST_TOLERANCE_DEG)
+        return { message: info.sameWay, reason: "inconsistent-direction" };
+      return undefined;
+    }
     if (features.durationMs > MOVEMENT_MAX_MS) return { message: "One movement, then pause.", reason: "too-long" };
-    if (features.peak < IMPULSE_MIN_PEAK_MG || features.lobeMs < IMPULSE_MIN_LOBE_MS) {
+    // Turning the wand into a new held pose is a re-grip, not a stroke, however far it tilted.
+    const gravityChange = 2_000 * Math.sin((features.tiltDeg * Math.PI) / 360);
+    if (features.endQuiet && features.tiltDeg >= GUARD_MIN_TILT_DEG && features.strokeMg <= gravityChange * REORIENTATION_SLACK + 100) return "ignore";
+    // A weak stroke after a strong one is the return or the ringing, not another example; without
+    // this a 1 g echo can become the template and the player's real 7 g strokes get refused.
+    const strongest = Math.max(this.strongestCandidateMg, ...prior.map((example) => example.peak));
+    if (features.peak >= IMPULSE_MIN_PEAK_MG) this.strongestCandidateMg = Math.max(this.strongestCandidateMg, features.peak);
+    if (features.peak < IMPULSE_MIN_PEAK_MG || features.lobeMs < IMPULSE_MIN_LOBE_MS || features.peak < strongest * ECHO_SHARE) {
       if (features.durationMs < COACH_MIN_MS && features.peak < IMPULSE_MIN_PEAK_MG) return "ignore";  // a twitch before the real stroke
       return { message: info.harder, reason: "too-small" };
     }
@@ -921,6 +1012,8 @@ export class MotionRecognizer {
     const impulses: { spell: SpellName; angle: number; template: ImpulseTemplate }[] = [];
     let guard: { spell: SpellName; quality: number; template: GuardTemplate; angle: number } | undefined;
     let arc: { spell: SpellName; quality: number; angle: number } | undefined;
+    let shake: { spell: SpellName; quality: number; angle: number } | undefined;
+    let twist: { spell: SpellName; quality: number; angle: number } | undefined;
     // A held tilt whose stroke is no stronger than its own gravity change is the wand being
     // re-oriented (raised or lowered), never a jab or sweep, whatever direction it points.
     const gravityChange = 2_000 * Math.sin((features.tiltDeg * Math.PI) / 360);
@@ -929,24 +1022,41 @@ export class MotionRecognizer {
     const stroke = features.sweptDeg < IMPULSE_MAX_SWEPT_DEG && features.lobeMs <= IMPULSE_MAX_LOBE_MS;
     // A sharp chop from the grip resolves on the fast path before this; a gentle drop that ends
     // held low is indistinguishable from lowering a guard and stays silent.
-    let lowering = false;
+    let lowering = false, guardForming = false;
+    // A roll only turns gravity: |a| stays near 1 g and nothing snaps. While a twist is a learned
+    // spell, such a movement is never a stroke, whatever line its swing happens to lie on.
+    const twistEnabled = [...this.enabledSpells].some((spell) => this.templates.get(spell)?.kind === "twist");
+    const twistLike = twistEnabled && features.peakJerk <= TWIST_MAX_JERK_MG && features.magnitudeDeviation <= TWIST_MAX_MAGNITUDE_MG && features.excursionDeg >= TWIST_MIN_EXCURSION_DEG;
     for (const spell of this.enabledSpells) {
       const template = this.templates.get(spell);
       if (!template) continue;
       if (template.kind === "impulse") {
-        if (reorientation || !stroke) continue;
+        if (reorientation || !stroke || twistLike) continue;
         const angle = angleDegrees(features.direction, template.direction);
         if (angle <= DIRECTION_TOLERANCE_DEG && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
           features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35))
           impulses.push({ spell, angle, template });
       } else if (template.kind === "guard") {
-        if (!features.endQuiet) continue;
+        if (!features.endQuiet) {
+          if (features.tiltDeg >= Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) && angleDegrees(features.tiltDirection, template.direction) <= GUARD_TOLERANCE_DEG) guardForming = true;
+          continue;
+        }
         const angle = angleDegrees(features.tiltDirection, template.direction);
         if (features.tiltDeg >= GUARD_MIN_TILT_DEG && angle >= LOWERING_DEG) lowering = true;
         if (features.tiltDeg >= Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) && angle <= GUARD_TOLERANCE_DEG &&
           features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) && features.peak <= Math.max(template.peak * 4, 2_000) &&
           (!guard || angle < guard.angle))
           guard = { spell, template, angle, quality: clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
+      } else if (template.kind === "shake") {
+        if (features.lobeCount < SHAKE_MIN_LOBES || features.durationMs > SHAKE_MAX_MS) continue;
+        const angle = lineAngleDegrees(features.axis, template.axis);
+        if (features.peak >= Math.max(SHAKE_MIN_PEAK_MG, template.peak * 0.35) && angle <= SHAKE_TOLERANCE_DEG && (!shake || angle < shake.angle))
+          shake = { spell, angle, quality: clamp01(0.5 + ((SHAKE_TOLERANCE_DEG - angle) / SHAKE_TOLERANCE_DEG) * 0.3 + Math.min(0.2, (features.lobeCount - SHAKE_MIN_LOBES) * 0.05)) };
+      } else if (template.kind === "twist") {
+        if (!features.endQuiet || features.durationMs < TWIST_MIN_MS || features.peakJerk > TWIST_MAX_JERK_MG || features.magnitudeDeviation > TWIST_MAX_MAGNITUDE_MG) continue;
+        const angle = angleDegrees(features.excursionDirection, template.direction);
+        if (features.excursionDeg >= Math.max(TWIST_MIN_EXCURSION_DEG, template.excursionDeg * 0.6) && angle <= TWIST_TOLERANCE_DEG && (!twist || angle < twist.angle))
+          twist = { spell, angle, quality: clamp01(0.5 + ((TWIST_TOLERANCE_DEG - angle) / TWIST_TOLERANCE_DEG) * 0.3 + Math.min(0.2, (features.excursionDeg - TWIST_MIN_EXCURSION_DEG) / 200)) };
       } else {
         if (!features.endQuiet || features.durationMs < ARC_MIN_MS) continue;
         const angle = angleDegrees(features.normal, template.normal);
@@ -957,6 +1067,14 @@ export class MotionRecognizer {
     }
     // Nothing but a circle turns all the way round: it cannot be confused with a stroke or a raise.
     if (arc) return { spell: arc.spell, quality: arc.quality, message: "" };
+    // A roll with no snap is nothing a stroke can produce; five reversals along one line are
+    // nothing a single stroke can produce. Both outrank the stroke templates.
+    if (twist) return { spell: twist.spell, quality: twist.quality, message: "" };
+    if (twistLike && !features.endQuiet) return { quality: 0, message: "" };  // judge the roll when it settles
+    if (shake) return { spell: shake.spell, quality: shake.quality, message: "" };
+    // A hard raise resolves as a stroke on the fast path before its hold is ever seen. When the wand
+    // is already tilted the way a learned guard tilts, wait for the still end and judge both there.
+    if (!features.endQuiet && guardForming) return { quality: 0, message: "" };
     if (lowering && !guard) return { quality: 0, message: "" };  // lowering the guard is never a cast
     impulses.sort((a, b) => a.angle - b.angle);
     const best = impulses[0];

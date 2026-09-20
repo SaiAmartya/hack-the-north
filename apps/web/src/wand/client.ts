@@ -547,11 +547,12 @@ export class WandClient {
       this.rejectSample("Stale or future motion sample");
       return;
     }
+    // Clipped samples (8 g) are kept: a hard stroke's brake saturates and still points the right way.
     if (
       !(record.flags & MotionFlag.Valid) ||
-      record.flags & (MotionFlag.Saturated | MotionFlag.Discontinuity)
+      record.flags & MotionFlag.Discontinuity
     ) {
-      this.rejectSample("Invalid, clipped or discontinuous sample");
+      this.rejectSample("Invalid or discontinuous sample");
       return;
     }
     const sample: CapturedMotion = {
