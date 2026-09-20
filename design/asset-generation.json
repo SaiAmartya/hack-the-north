@@ -1,0 +1,42 @@
+{
+  "generatedOn": "2026-09-20",
+  "provider": "Higgsfield MCP",
+  "requestedModel": "nano_banana_2",
+  "reportedModel": "nano_banana_flash",
+  "assets": [
+    {
+      "id": "duel-courtyard",
+      "file": "apps/web/public/art/duel-courtyard.png",
+      "jobId": "590d8af9-fda8-4705-8d2b-b0d1c1b904e6",
+      "width": 1376,
+      "height": 768,
+      "prompt": "game background of moonlit academy dueling courtyard, wide establishing view, an original magical boarding-school castle's open-air stone training terrace, layered gothic arches and small warm lit windows, crescent moon, distant silhouette of towers at the upper edge; gameplay view from a low three-quarter angle, wide empty cobblestone field occupying bottom two thirds, symmetrical architecture but asymmetric playable depth, no focal object or obstruction in the arena center. Continuous rectangular stone paving with no circles, no ovals, no duel platforms, no ground markings or emblems. The game adds its own dueling platforms. Original 16-bit handheld RPG pixel art, deliberately chunky square pixels and carefully placed clusters, crisp dark outlines with stepped silhouettes. Environment uses midnight indigo, muted slate and dusty lavender; friendly student wizards contrast in warm burgundy or sea teal with ivory faces and brass trim. Moonlight and small amber lamps create a welcoming magical academy after dusk. Preserve strong subject separation, readable wand silhouettes and restrained detail, with a consistent three-quarter battle perspective., no characters, no UI elements, slightly muted detail so foreground game elements stay readable, soft depth layering. Literal pixel art built on a visible low resolution pixel grid, not a smooth illustration, no text, no logos.",
+      "processing": "ImageMagick: 64-color palette without dithering; strip metadata"
+    },
+    {
+      "id": "wizard-player-back",
+      "file": "apps/web/public/art/wizard-player-back.png",
+      "jobId": "600aef19-c4ea-467d-b833-9490d31a07dc",
+      "width": 256,
+      "height": 256,
+      "prompt": "game sprite of burgundy back-facing student wizard, single character/object, full body visible, centered, an original young academy wizard in a wide pointed burgundy hat, short flowing burgundy robe, ochre-gold scarf and brass trim, charcoal boots, three-quarter BACK view with face hidden facing upper RIGHT, right arm extended and holding a narrow wooden wand diagonally toward the upper right, confident dueling pose, readable compact RPG proportions with oversized hat, enough empty margin around wand and feet, warm ivory hands. Original 16-bit handheld RPG pixel art, deliberately chunky square pixels and carefully placed clusters, crisp dark outlines with stepped silhouettes. Environment uses midnight indigo, muted slate and dusty lavender; friendly student wizards contrast in warm burgundy or sea teal with ivory faces and brass trim. Moonlight and small amber lamps create a welcoming magical academy after dusk. Preserve strong subject separation, readable wand silhouettes and restrained detail, with a consistent three-quarter battle perspective., on a solid uniform bright green #00FF00 background, no shadows cast on the background, no ground plane, nothing cropped at the edges. Literal crisp 64x80-pixel sprite feel enlarged with nearest-neighbor scaling, no smooth edges, no lettering, no logo, only one character.",
+      "processing": "ImageMagick: remove green-dominant pixels to alpha including enclosed regions; nearest-neighbor downsample to 256x256; strip metadata"
+    },
+    {
+      "id": "wizard-rival-front",
+      "file": "apps/web/public/art/wizard-rival-front.png",
+      "jobId": "9c30389e-0f2b-4b78-8067-0aa39aa56a53",
+      "width": 256,
+      "height": 256,
+      "prompt": "game sprite of teal front-facing student wizard, single character/object, full body visible, centered, an original young academy wizard in a wide pointed sea teal hat, short teal robe with brass trim and ochre scarf, charcoal boots, friendly determined ivory face beneath the hat, three-quarter FRONT view facing down LEFT toward the viewer, right arm extended left holding a narrow wooden wand diagonally toward the lower left, confident dueling pose, compact RPG proportions with oversized hat, enough empty margin around wand and feet. Original 16-bit handheld RPG pixel art, deliberately chunky square pixels and carefully placed clusters, crisp dark outlines with stepped silhouettes. Environment uses midnight indigo, muted slate and dusty lavender; friendly student wizards contrast in warm burgundy or sea teal with ivory faces and brass trim. Moonlight and small amber lamps create a welcoming magical academy after dusk. Preserve strong subject separation, readable wand silhouettes and restrained detail, with a consistent three-quarter battle perspective., on a solid uniform bright green #00FF00 background, no shadows cast on the background, no ground plane, nothing cropped at the edges. Literal crisp 64x80-pixel sprite feel enlarged with nearest-neighbor scaling, no smooth edges, no lettering, no logo, only one character.",
+      "processing": "ImageMagick: remove green-dominant pixels to alpha including enclosed regions; nearest-neighbor downsample to 256x256; strip metadata"
+    }
+  ],
+  "discarded": [
+    {
+      "jobId": "dda18b10-09ba-461a-a3d2-f3f838467022",
+      "reason": "Pale baked-in arena circles were cropped at the corners and conflicted with diagonal near/far platforms. Second and final background attempt removed those circles.",
+      "prompt": "game background of moonlit academy dueling courtyard, wide establishing view, an original magical boarding-school castle's open-air stone training terrace, layered gothic arches and small warm lit windows, crescent moon, distant silhouette of towers at the upper edge; gameplay view from a low three-quarter angle, wide empty cobblestone field occupying bottom two thirds, gentle oval pale stone platforms implied at lower left and far upper right, symmetrical architecture but asymmetric playable depth, no focal object or obstruction in the arena center. Original 16-bit handheld RPG pixel art, deliberately chunky square pixels and carefully placed clusters, crisp dark outlines with stepped silhouettes. Environment uses midnight indigo, muted slate and dusty lavender; friendly student wizards contrast in warm burgundy or sea teal with ivory faces and brass trim. Moonlight and small amber lamps create a welcoming magical academy after dusk. Preserve strong subject separation, readable wand silhouettes and restrained detail, with a consistent three-quarter battle perspective., no characters, no UI elements, slightly muted detail so foreground game elements stay readable, soft depth layering. Literal pixel art built on a visible low resolution pixel grid, not a smooth illustration, no text, no logos."
+    }
+  ]
+}

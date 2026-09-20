@@ -1,0 +1,4 @@
+id,role,type,description,size/ratio,style line ref,source
+duel-courtyard,battle environment and homepage backdrop,png,moonlit academy dueling courtyard,1376x768; near 16:9,art-direction.md#style-formula,Higgsfield Nano Banana 2; original prompt; asset-generation.json
+wizard-player-back,local wizard facing opponent,png,burgundy back-facing student wizard,256x256 RGBA; 1.25 hero-units,art-direction.md#style-formula,Higgsfield Nano Banana 2; original prompt; asset-generation.json
+wizard-rival-front,remote wizard facing player,png,teal front-facing student wizard,256x256 RGBA; 1.0 hero-units,art-direction.md#style-formula,Higgsfield Nano Banana 2; original prompt; asset-generation.json
