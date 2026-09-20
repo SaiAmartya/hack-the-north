@@ -40,3 +40,16 @@ No model replacement or looser confidence thresholds are justified by the clean 
 The solo practice bot waits 12 seconds after play starts and at least 12 seconds between attempts, casts only ordinary Stupefy, and no longer heals, shields, disarms or uses fire. It retains normal damage, flight, cooldown and disarm rules. A skipped turn is not followed by a catch-up burst. Rematches restore the opening grace. Scripted tutorial lessons are unchanged; their final free duel uses the gentle pacing.
 
 An idle player survives the full 60-second round with 20 HP. This intentionally makes practice survivable; normal timeout scoring still decides the winner. Verification passed: 111 host tests, web typecheck and both affected browser scenarios (solo five-spell battle/rematch/reconnection, and tutorial/telemetry). The solo browser result was inspected visually: the player won the timeout with 58 HP versus the bot's 40 HP. Independent review found no defects. No input algorithm or firmware change is included in this bot update.
+
+## Proposal 1 implemented — September 20, 2026 (`feat/battle-overhaul`)
+
+Dhairya's badge registered no attacks at all while Sai's, on the same code and firmware, worked.
+That is the motion failure above: his jabs end with a wrist tilt, so after his first accepted raise
+every jab was judged at its still end and vetoed as "the guard being lowered" for the rest of the
+round. `apps/web/src/input/motion.ts` now applies the angle-based lowering veto only within
+`GUARD_RETURN_MS` (2 s) of the sample that confirmed the last accepted raise. The remembered raise
+direction is kept for guard judgement and the explicit downward-launch rejection is untouched. A
+new `tiltedJab` fixture reproduces the recorded stroke shape (tilt during the stroke, judged at the
+still end): within 2 s of a raise it is ignored; 3.2 s after a raise it is Stupefy. Proposals 2 and
+3 landed separately in a5c575d (`completedInference` suppression and fusion dispositions). The
+physical retest on Dhairya's badge and the forceful-return-after-a-long-hold negative remain open.

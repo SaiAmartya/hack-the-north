@@ -484,6 +484,32 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     expect(() => harness.recognizer.useDefaultProfile(-1)).toThrow();
   });
 
+  it("lets a tilted jab through once a raise is more than two seconds old, but not its lowering", () => {
+    // Recorded badge jabs end with a wrist tilt about 25 degrees "opposite" the raise made a few
+    // seconds earlier. That tilt is not the raise being lowered; the lowering follows within 2 s.
+    const veto = new MotionHarness();
+    veto.recognizer.useDefaultProfile(veto.generation);
+    veto.feed(veto.builder.stillness(600));
+    veto.feed(veto.builder.guard(35));
+    expect(veto.spells()).toEqual(["protego"]);
+    veto.feed(veto.builder.stillness(400));
+    veto.feed(veto.builder.tiltedJab(1_300, -25));
+    expect(veto.spells(), "a return within two seconds is still the guard coming down").toEqual(["protego"]);
+
+    const jab = new MotionHarness();
+    jab.recognizer.useDefaultProfile(jab.generation);
+    jab.feed(jab.builder.stillness(600));
+    jab.feed(jab.builder.guard(35));
+    expect(jab.spells()).toEqual(["protego"]);
+    jab.feed(jab.builder.stillness(3_200));
+    jab.feed(jab.builder.tiltedJab(1_300, -25));
+    expect(jab.spells(), "three seconds after the raise, a tilted firm stroke is a jab").toEqual(["protego", "stupefy"]);
+    // The remembered raise still keeps a later lowering from counting as a second guard.
+    jab.feed(jab.builder.stillness(600));
+    jab.feed(jab.builder.lower(35));
+    expect(jab.spells()).toEqual(["protego", "stupefy"]);
+  });
+
   it("stays silent on the recorded resting hold", () => {
     const h = new MotionHarness();
     h.ready();

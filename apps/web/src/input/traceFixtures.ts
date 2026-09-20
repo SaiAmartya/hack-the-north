@@ -67,6 +67,29 @@ export class RawMotionTraceBuilder {
     });
   }
 
+  /**
+   * A firm jab whose wrist tilts by `tiltDeg` while the stroke happens and stays tilted, like the
+   * recorded badge jabs that ended about 25 degrees away from the grip they started in. The tilt is
+   * already visible when the fast path looks, so the movement is judged at its still end.
+   */
+  tiltedJab(amplitude = 1_300, tiltDeg = -25, axis: 0 | 1 = 0): readonly CapturedMotion[] {
+    return this.capture(() => {
+      this.rest(300);
+      const unit: Pose = axis === 0 ? [1, 0, 0] : [0, 1, 0];
+      const shape = [-0.08, -0.15, -0.12, 0.25, 0.7, 1, 0.85, 0.5, 0.15, -0.35, -0.5, -0.4, -0.2, -0.05, 0.05, 0.08, 0.06, 0.03, 0];
+      const start = this.pose;
+      const end = this.rotated(start, tiltDeg);
+      shape.forEach((amount, index) => {
+        const k = (index + 1) / shape.length;
+        const pose: Pose = [start[0] + (end[0] - start[0]) * k, start[1] + (end[1] - start[1]) * k, start[2] + (end[2] - start[2]) * k];
+        const value = amount * amplitude;
+        this.point([pose[0] + unit[0] * value, pose[1] + unit[1] * value, pose[2] + unit[2] * value]);
+      });
+      this.pose = end;
+      this.rest(320, end);
+    });
+  }
+
   /** Three quick jabs without a pause between them: one movement, one spell. */
   rapidJabs(amplitude = 900, count = 3): readonly CapturedMotion[] {
     return this.capture(() => {
