@@ -23,6 +23,8 @@ change certificate trust, open firewall rules or flash a badge automatically.
 - The existing public phone service is already deployed. Teammates do **not** need Wrangler,
   a Cloudflare login, a new deployment, API keys for speech, or a phone certificate installation.
   They do need the existing phone enrollment credential supplied privately by Sai/the service owner.
+- The game referee is already deployed too (Section 5); a plain launcher run uses it, so two
+  laptops anywhere with internet can duel with nothing else to set up.
 
 Clone, or update an existing checkout without discarding local work:
 
@@ -66,8 +68,9 @@ Set-Location ../..
 ```
 
 No virtual-environment activation or PowerShell execution-policy change is required.
-The launcher starts only the referee, the local speech helper and the frontend; there are no
-other workers.
+The launcher starts the local speech helper and the frontend and connects them to the team's
+deployed referee (Section 5); `--local-referee` runs a referee on this laptop instead. There
+are no other workers.
 
 The first launch downloads the pinned `faster-whisper base.en` weights once, outside the repo
 (`.cache/wand-speech/faster-whisper-base.en` under your home directory), by running
@@ -99,7 +102,7 @@ failure.
 | Service | Default address | Responsibility |
 | --- | --- | --- |
 | Player frontend | `127.0.0.1:5173` | UI; tightly scoped game, speech and phone proxies |
-| Referee | `127.0.0.1:8000` | One authoritative two-player room |
+| Referee | `wandduel-referee.onrender.com`, or `127.0.0.1:8000` with `--local-referee` | Authoritative two-player rooms, one per join code |
 | Speech helper | `127.0.0.1:8001` | Only this laptop's audio; per-launch authentication |
 
 ## 3. Connect an iPhone
@@ -161,9 +164,11 @@ It requires separate certificate/trust and LAN-exposure approval; see the
 [workflow](../.agents/skills/wand-dev-workflow/references/workflow.md#3-optional-private-lan-phone-session).
 Do not tunnel the game, referee or speech helper publicly.
 
-## 4. Two laptops, one referee
+## 4. Two laptops on one LAN without internet
 
-Finish installation on **both** laptops. Use the same approved private network and get approval
+The default is the deployed referee in Section 5. Use this section only when internet is
+unavailable or blocked: laptop A runs the referee and laptop B points at it. Finish
+installation on **both** laptops. Use the same approved private network and get approval
 before exposing laptop A's referee or adjusting a narrowly scoped firewall rule. Do not disable
 the firewall, bind a wildcard/public interface or add router forwarding. Replace the example
 `192.168.1.20` below with laptop A's actual selected private IPv4 address.
@@ -200,53 +205,74 @@ with `--no-phone` (saved phone defaults would otherwise still apply) and select 
 Badge-only qualification can use `--badge-only` instead, which also skips them.
 A badge on a 0.1.x diagnostic image cannot pass Ready; flash the current 0.2.x image (0.2.1) rather than changing browser gates.
 
-## 5. Play over the internet (hosted referee)
+## 5. Multiplayer over the internet (the default)
 
-Two laptops on different networks share one hosted referee instead of laptop A's private IP.
-Each laptop still runs its own frontend and speech helper; only game traffic (`/api/game`,
-`/ws/game`) leaves the laptop, over HTTPS/WSS through the local proxy. Phones keep using the
-public phone service, and opponent video stays a direct WebRTC connection that now receives a
-STUN server, or short-lived TURN credentials, from the referee.
+The team referee is deployed at **https://wandduel-referee.onrender.com** from
+[`render.yaml`](../render.yaml). A plain `tools/run_game.py` uses it: each laptop runs only its
+own frontend and speech helper, and only game traffic (`/api/game`, `/ws/game`) leaves the
+laptop, over HTTPS/WSS through the local proxy. Phones keep using the public phone service.
+Opponent video stays a direct WebRTC connection that receives a STUN server (or TURN
+credentials, once configured) from the referee. Two laptops anywhere with internet can duel:
+one starts a duel, the other joins with the code.
 
-### Deploy the referee once (Render, free)
+Nothing to install or sign up for. `--local-referee` opts out for one run (offline, the LAN
+setup in Section 4, scripted QA). `--referee https://<other> --save-defaults` points at
+another deployment from then on; `--local-referee` still overrides it.
 
-[`render.yaml`](../render.yaml) at the repository root describes the service: a free Python
-web service (no card needed on the Hobby workspace), region Ohio, `rootDir apps/host`, health
-check `/api/game/health`, one instance. The service owner does this once:
+### What Render's free tier means for demos and QA
 
-1. Sign in at render.com, connect the GitHub repository, choose **New → Blueprint** and pick
-   this repository and branch. Wait for the first deploy to report healthy and note the URL,
-   `https://<name>.onrender.com`.
-2. Optional, for video across strict NATs: in the Cloudflare dashboard open **Realtime →
-   TURN**, create a TURN key, and enter its key id and API token as the service's
-   `WAND_TURN_KEY_ID` and `WAND_TURN_API_TOKEN` environment variables in Render. Never commit
-   or paste them anywhere else. Without them the referee hands out STUN only, which is enough
-   for most home networks and always for a shared hotspot.
-3. A deploy replaces the instance and drops every live game socket. `autoDeploy` is off in
-   the blueprint, so deploy manually between matches.
+The referee is a Render **free web service**: 0.1 shared CPU, 512 MB, one instance, no card,
+no uptime guarantee. Checked against Render's documentation on September 19, 2026:
 
-The free instance sleeps after 15 idle minutes and takes about a minute to wake. The launcher
-wakes it before printing `Game ready` and keeps it awake while your stack runs, so only the
-first player after a quiet period waits longer at startup.
+- **It sleeps after 15 minutes without inbound traffic and takes about a minute to wake.**
+  While waking, requests get Render's loading page and WebSocket upgrades fail. The launcher
+  wakes it before printing `Game ready` and pings it every four minutes while a stack runs;
+  player heartbeats keep it awake during play. **Start both laptops' stacks at least two
+  minutes before a demo and leave them running.** Do not add external uptime pingers.
+- **750 instance-hours per month, counted only while awake.** Stacks that run only during
+  play use a few hours; an always-awake service would use the whole month, after which Render
+  suspends every free service until the next month.
+- **5 GB outbound per month.** A match is roughly 40 KB/s of snapshots, about 150 MB per hour
+  of continuous play, so this covers tens of hours of matches. Nothing else is served from the
+  referee. Exceeding it without a card on file suspends the service until next month.
+- **Every deploy or restart drops every live socket and every room** (rooms live in memory).
+  `autoDeploy` is off in the blueprint, so Render deploys only when someone clicks Deploy: do
+  that between matches, never during a demo. If a match aborts with "Game disconnected",
+  both players start a new duel with a fresh code.
+- **No UDP and no video relay.** Render never carries video; NAT traversal is STUN now and
+  TURN once the key below is set. Venue Wi-Fi with client isolation can block STUN-only video;
+  a phone hotspot shared by both laptops always works.
+- **Latency:** region Ohio, measured 50–80 ms round trip from Waterloo, far inside the 1.5 s
+  heartbeat timeout. Several simultaneous duels are fine; a dozen could jitter the 50 ms tick
+  on the shared CPU.
+- **The join code is the access control.** The referee's origin check is only a browser
+  header; the code (about a billion possibilities, expiring rooms, a 32-room cap) is what keeps
+  strangers out of a duel.
 
-### Run each laptop against it
+### Demo checklist
 
-macOS:
+1. Freeze `main`; do not deploy the referee on demo day.
+2. Both laptops: `tools/run_game.py` two minutes early. Confirm `Game ready` and the
+   `Hosted referee:` line, then leave the terminals open.
+3. Player A **Start a duel**, player B **Join with code**; both connect wands, calibrate,
+   practice, enable cameras, Ready.
+4. If video never appears, share a hotspot or add the TURN key. If Render is unreachable,
+   fall back to Section 4 over a hotspot.
 
-```sh
-apps/host/.venv/bin/python tools/run_game.py --referee https://<name>.onrender.com --save-defaults
-```
+### Optional TURN key (video across strict NATs)
 
-Windows PowerShell:
+In the Cloudflare dashboard open **Realtime → TURN**, create a TURN key, and enter its key id
+and API token as the Render service's `WAND_TURN_KEY_ID` and `WAND_TURN_API_TOKEN`
+environment variables (the service → Environment), then restart the service between matches.
+Never commit or paste them anywhere else. The referee mints short-lived credentials from them
+and hands both players a TURN entry; 1,000 GB per month is free on the account.
 
-```powershell
-.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --referee https://<name>.onrender.com --save-defaults
-```
+### Redeploying or hosting another copy
 
-`--save-defaults` remembers the referee in `launcher.json` next to the phone defaults, so a
-plain `tools/run_game.py` uses it from then on; `--local-referee` ignores it for one run and
-starts the usual local referee. Saved phone defaults still apply. Each player opens their own
-`http://127.0.0.1:5173`; one starts a duel and reads the code to the other.
+`render.yaml` describes the service. In Render choose **New → Blueprint**, pick the
+repository and branch, leave the two TURN variables blank unless you have a key, and wait for
+the health check `/api/game/health`. Point laptops at that deployment with
+`tools/run_game.py --referee https://<name>.onrender.com --save-defaults`.
 
 ### No account at all: tunnel laptop A
 
@@ -298,7 +324,7 @@ in [the input rebuild report](qa/input-rebuild.md).
 | Laptop says Reconnecting your badge… | Normal bounded auto-reconnect after a dropped link (up to three per minute). If it ends in Reconnect badge, press it once; if that fails, power-cycle the badge and report `status`. |
 | Camera or multiplayer peers cannot connect | Confirm both clients selected the same referee, their own local origin, network approval and peer reachability. Video relays through TURN only when the hosted referee has a TURN key; otherwise it needs a direct or STUN-reachable path. |
 | `No duel with that code.` | The code was mistyped, the room sat empty for ten minutes, or the two laptops point at different referees. Compare the referee printed at `Game ready` on both laptops, then start a new duel and share the fresh code. |
-| `Waking the hosted referee…` then `readiness timed out` | The free instance takes about a minute to wake; rerun once. If it repeats, open `https://<name>.onrender.com/api/game/health` in a browser and check the Render dashboard for a failed deploy. |
+| `Waking the hosted referee…` then `readiness timed out` | The free instance takes about a minute to wake; rerun once. If it repeats, open `https://wandduel-referee.onrender.com/api/game/health` in a browser and check the Render dashboard for a failed deploy. Without internet, run `--local-referee` (single laptop) or Section 4 (LAN). |
 | Port occupied | A stack started by this launcher is stopped automatically on the next run; anything else holding `5173`, `8000` or `8001` must be stopped by whoever owns it. Do not kill every Node/Python process or print full process environments/arguments. |
 
 Keep the next physical card small: **Sensor active → Reaching laptop → visible stillness →

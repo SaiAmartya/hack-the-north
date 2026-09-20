@@ -30,7 +30,7 @@ The badge is the wand, not a controller. During combat there are no spell button
 | Speech | Each laptop captures its own microphone and runs its own local `faster-whisper` helper; no cloud or browser-vendor ASR |
 | Input contract | Exact canonical incantation plus compatible fresh motion; neither alone casts |
 | Game | Stupefy, Protego, then Expelliarmus only after the two-spell core passes |
-| Authority | One Python referee on laptop A owns health, cooldowns, projectile deadlines, impacts and results |
+| Authority | One Python referee (deployed on Render, or on laptop A for a LAN) owns health, cooldowns, projectile deadlines, impacts and results; rooms are addressed by join code |
 | Media | Browser-to-browser WebRTC video only; no peer audio. ICE servers come from the referee's welcome: STUN by default, Cloudflare TURN when the hosted referee has a TURN key |
 | Rendering | Opponent HTML video plus one transparent plain-Three.js fixed-anchor effects canvas and a DOM HUD |
 | State | In-memory room and browser-local calibration; no accounts, database or match recovery |
@@ -89,13 +89,13 @@ Laptop A runs the referee. Each laptop runs its own Vite frontend and local spee
 | Surface | Binding and route | Notes |
 | --- | --- | --- |
 | Frontend | `http://127.0.0.1:5173` normally | Each laptop has its own instance; preserve this exact default origin |
-| Game API | `/api/game/*` proxied to laptop A port `8000` | Setup/health only; mutations require authenticated player/session context |
-| Game socket | `/ws/game` proxied to laptop A port `8000` | Authenticated first message; game events and WebRTC signalling |
+| Game API | `/api/game/*` proxied to the selected referee (deployed by default; laptop A port `8000` on a LAN) | Setup/health only; mutations require authenticated player/session context |
+| Game socket | `/ws/game` proxied to the selected referee | Authenticated first message; game events and WebRTC signalling |
 | Phone wand relay | Internally named `/ws/dev-wand` on the game service | Explicit iPhone-input profile; never a badge transport or QA cast bypass |
 | Speech health | `/api/speech/health` proxied to that laptop's `127.0.0.1:8001` | Must report loaded model, settings, warm state, worker availability and generation |
 | Speech transcription | `/api/speech/transcribe` proxied to that laptop's `127.0.0.1:8001` | One bounded clip; no streaming microphone and no queue |
 
-For the two-laptop room, Vite on each machine points game routes to laptop A's selected private IPv4. Speech routes always point to the **same laptop's** loopback helper. The helper binds only `127.0.0.1:8001`; it is never exposed on the LAN.
+Vite on each machine points game routes at the deployed referee by default, or at laptop A's selected private IPv4 for a LAN room. Speech routes always point to the **same laptop's** loopback helper. The helper binds only `127.0.0.1:8001`; it is never exposed on the LAN.
 
 The Vite speech proxy enforces the raw TCP peer as loopback or that laptop's own selected interface, validates the exact expected Origin and never trusts a forwarded-address header. It rejects the phone/LAN peer before proxying, accepts only bounded 16-bit mono 16 kHz PCM/WAV, caps a 3-second request at 128 KiB, and adds a per-run helper secret server-side. The secret is not bundled into browser JavaScript, logged or committed. Raw audio never goes to the referee, opponent or internet.
 

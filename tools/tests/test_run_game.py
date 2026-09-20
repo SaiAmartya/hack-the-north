@@ -293,6 +293,18 @@ def test_referee_origin_accepts_private_http_and_public_https_only() -> None:
             run_game._referee_origin(rejected)
 
 
+def test_referee_resolution_prefers_explicit_then_local_then_saved_then_deployed() -> None:
+    resolve = run_game._resolve_referee
+    assert resolve(explicit="https://other.example/", local=False, saved=None) == "https://other.example"
+    assert resolve(explicit="https://other.example", local=True, saved="https://saved.example") == "https://other.example"
+    assert resolve(explicit=None, local=True, saved="https://saved.example") is None
+    assert resolve(explicit=None, local=False, saved="https://saved.example") == "https://saved.example"
+    assert resolve(explicit=None, local=False, saved=None) == run_game.DEFAULT_REFEREE
+    assert run_game.DEFAULT_REFEREE == run_game._referee_origin(run_game.DEFAULT_REFEREE)
+    with pytest.raises(ValueError):
+        resolve(explicit="ftp://nope", local=False, saved=None)
+
+
 def test_saved_defaults_merge_the_hosted_referee_with_phone_fields(tmp_path: Path) -> None:
     path = tmp_path / "launcher.json"
     run_game._save_defaults(None, None, path, referee="https://referee.example")

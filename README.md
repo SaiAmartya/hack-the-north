@@ -18,7 +18,7 @@ short page stall. An intermittent Internet-relay freshness failure remains open.
 See [current implementation and measured evidence](docs/qa/input-rebuild.md).
 
 - **[Start here: teammate setup](docs/TEAM-SETUP.md)** — fresh-clone macOS/Windows install,
-  local speech, iPhone connection, two laptops, checks and troubleshooting.
+  local speech, iPhone connection, multiplayer over the internet, checks and troubleshooting.
 - **[Badge build, backup and flash instructions](firmware/README.md)** — 0.2.1 gameplay image (current source), flashed on WAND-B602, physical QA pending.
 - [MVP](MVP-OUTLINE.md) · [Implementation plan](IMPLEMENTATION-PLAN.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
 - [Design system](DESIGN_SYSTEMS.md) · [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
@@ -26,7 +26,7 @@ See [current implementation and measured evidence](docs/qa/input-rebuild.md).
 ## Run an already installed checkout
 
 From the repository root, with Node **26.5.0** on PATH and the Python **3.11** environment
-installed:
+installed, one command starts everything you need to play, including multiplayer:
 
 ```sh
 apps/host/.venv/bin/python tools/run_game.py
@@ -38,25 +38,24 @@ Windows PowerShell:
 .\apps\host\.venv\Scripts\python.exe .\tools\run_game.py
 ```
 
-That one command starts everything: the referee, the local speech helper (the pinned
-transcription model is downloaded on first use if it is missing) and the game frontend, plus
-iPhone pairing once the phone defaults have been saved with
+That starts the game frontend and the local speech helper on this laptop (the pinned
+transcription model is downloaded on first use if it is missing) and connects them to the
+team's deployed referee, `https://wandduel-referee.onrender.com`, so any two laptops with
+internet can duel. iPhone pairing is included once the phone defaults have been saved with
 `tools/run_game.py --save-defaults --phone-service <origin> --phone-secret-file <file>`
-(`--no-phone` or `--badge-only` skips them for a run). A previous stack started by the launcher is stopped
-automatically before the new one comes up; a port held by anything else still blocks startup.
+(`--no-phone` or `--badge-only` skips them for a run). A previous stack started by the
+launcher is stopped automatically before the new one comes up.
 
-Open **http://127.0.0.1:5173** in desktop Chrome; a tab typed as `localhost:5173` is redirected
-there automatically, because the hosted phone service accepts only that exact origin. Wait for
-**Game ready** in the terminal; this verifies the frontend, referee and warmed local speech
-helper, not physical gameplay. The default stable build does not hot-reload; restart after
-changing source. **Ctrl+C** stops this stack. First-time phone setup is in
-[the setup guide](docs/TEAM-SETUP.md#3-connect-an-iphone).
+Wait for **Game ready: http://127.0.0.1:5173** (the deployed referee sleeps when idle and
+the first launch after a quiet spell waits about a minute for it), then open that exact URL in
+desktop Chrome; a tab typed as `localhost:5173` is redirected there. One player clicks
+**Start a duel** and reads the six-character code to the other, who clicks **Join with code**;
+each then connects a badge or iPhone. One referee serves several duels at once, one per code.
 
-On the page, one player chooses **Start a duel** and reads the six-character code to the
-other, who chooses **Join with code**; each then connects a badge or iPhone. One referee
-serves several duels at once, one per code. To play from different networks, point both
-laptops at the hosted referee with `tools/run_game.py --referee https://<name>.onrender.com
---save-defaults`; see [play over the internet](docs/TEAM-SETUP.md#5-play-over-the-internet-hosted-referee).
+`--local-referee` runs the referee on this laptop instead: use it offline, for the LAN setup
+in the guide, or for scripted QA. The stable build does not hot-reload; restart after changing
+source. **Ctrl+C** stops the stack. Phone setup, the LAN alternative, Render's limits and the
+demo checklist are in [the setup guide](docs/TEAM-SETUP.md).
 
 Badge firmware 0.2.1 is flashed on WAND-B602 and awaiting its physical QA card; the iPhone
 path is the parallel physical option. Neither physical path is qualified for a demo yet.

@@ -1,16 +1,18 @@
 """Start the isolated game stack. No installs, trust changes or flashing; the pinned speech model
 is downloaded on first use if it is missing.
 
-    python3 tools/run_game.py                      # full stack with the saved phone defaults
+    python3 tools/run_game.py                      # frontend + speech here, the deployed referee for multiplayer
+    python3 tools/run_game.py --local-referee      # everything on this laptop (offline, LAN or scripted QA)
     python3 tools/run_game.py --save-defaults --phone-service https://... --phone-secret-file <file>
     python3 tools/run_game.py --no-phone           # badge/replay only, ignore saved phone defaults (--badge-only also skips them)
-    python3 tools/run_game.py --referee https://<hosted-referee> [--save-defaults]   # play over the internet
-    python3 tools/run_game.py --local-referee      # ignore a saved hosted referee for this run
+    python3 tools/run_game.py --referee https://<other-referee> [--save-defaults]   # a different deployment
 
-A previous stack started by this launcher is stopped automatically before the new one starts;
-ports held by anything else still block startup. With a hosted https referee only the frontend
-and the speech helper run here; the launcher wakes the referee before printing Game ready and
-keeps it awake while the stack runs.
+The referee is the deployed one (DEFAULT_REFEREE) unless --local-referee, --referee-bind,
+--serve-referee or --qa asks for a local one, or --referee names another. A previous stack
+started by this launcher is stopped automatically before the new one starts; ports held by
+anything else still block startup. With a hosted https referee only the frontend and the speech
+helper run here; the launcher wakes the referee before printing Game ready and keeps it awake
+while the stack runs.
 """
 from __future__ import annotations
 
@@ -44,6 +46,8 @@ PID_FILE = STATE_DIR / "launcher.pid"
 FRONTEND_PORT = 5173
 REFEREE_PORT = 8000
 SPEECH_PORT = 8001
+# The team's deployed referee (render.yaml). Plain runs use it so any two laptops can duel.
+DEFAULT_REFEREE = "https://wandduel-referee.onrender.com"
 STARTUP_TIMEOUT_SECONDS = 60.0
 HEALTH_REQUEST_TIMEOUT_SECONDS = 1.0
 # A hosted free-tier referee sleeps when idle and takes about a minute to wake.
@@ -109,6 +113,20 @@ def _referee_origin(value: str) -> str:
             raise ValueError("A plain-http referee must be a private IPv4 address on port 8000")
         return f"http://{parts.hostname}:{REFEREE_PORT}"
     raise ValueError("Referee must be http://PRIVATE_IP:8000 or an https:// origin")
+
+
+def _resolve_referee(
+    *,
+    explicit: str | None,
+    local: bool,
+    saved: str | None,
+) -> str | None:
+    """Which referee this run talks to: an explicit one, none (run it here), a saved one, or the deployed default."""
+    if explicit:
+        return _referee_origin(explicit)
+    if local:
+        return None
+    return saved or DEFAULT_REFEREE
 
 
 SPEECH_MODEL_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt", ".wand-speech-model.json")
@@ -359,8 +377,8 @@ def main() -> int:
     parser.add_argument("--phone-host", help="Approved private laptop IP; requires trusted TLS cert/key")
     parser.add_argument("--cert", type=Path)
     parser.add_argument("--key", type=Path)
-    parser.add_argument("--referee", help="Use a referee elsewhere: laptop A's http://PRIVATE_IP:8000 or the hosted https:// origin")
-    parser.add_argument("--local-referee", action="store_true", help="Ignore a saved hosted referee for this run")
+    parser.add_argument("--referee", help=f"Use another referee instead of {DEFAULT_REFEREE}: laptop A's http://PRIVATE_IP:8000 or an https:// origin")
+    parser.add_argument("--local-referee", action="store_true", help="Run the referee on this laptop instead of the deployed one (offline, LAN, scripted QA)")
     parser.add_argument("--referee-bind", help="Explicitly expose only the referee on this private IP; frontend stays localhost")
     parser.add_argument("--serve-referee", action="store_true", help="Explicitly expose referee on --phone-host for a second laptop")
     parser.add_argument("--allow-origin", action="append", default=[], help="Exact second laptop HTTPS origin; no wildcard")
@@ -376,22 +394,28 @@ def main() -> int:
     phone_flags = bool(args.phone_service or args.phone_secret_file)
     if args.save_defaults and not (args.phone_service and args.phone_secret_file) and not args.referee:
         parser.error("--save-defaults needs --phone-service and --phone-secret-file, --referee, or both")
+    if args.referee and (args.local_referee or args.referee_bind or args.serve_referee):
+        parser.error("Choose exactly one referee mode")
     if not args.no_phone and not phone_flags and not args.badge_only:
         saved = _load_defaults()
         if saved.get("phone_service") and saved.get("phone_secret_file"):
             args.phone_service = saved["phone_service"]
             args.phone_secret_file = Path(saved["phone_secret_file"])
             print(f"Using saved phone defaults from {DEFAULTS_FILE}", flush=True)
-    if args.referee:
-        try:
-            args.referee = _referee_origin(args.referee)
-        except ValueError as error:
-            parser.error(str(error))
-    elif not (args.referee_bind or args.serve_referee or args.local_referee):
-        saved_referee = _load_defaults().get("referee")
-        if saved_referee:
-            args.referee = saved_referee
-            print(f"Using saved referee {args.referee} from {DEFAULTS_FILE} (--local-referee ignores it)", flush=True)
+    explicit_referee = args.referee
+    saved_referee = _load_defaults().get("referee")
+    try:
+        # Scripted QA replays only through a local referee; LAN modes host one here too.
+        args.referee = _resolve_referee(
+            explicit=explicit_referee,
+            local=bool(args.local_referee or args.referee_bind or args.serve_referee or args.qa),
+            saved=saved_referee,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    if args.referee and not explicit_referee:
+        source = f"saved in {DEFAULTS_FILE}" if args.referee == saved_referee else "the deployed default"
+        print(f"Referee: {args.referee} ({source}; --local-referee runs one on this laptop instead)", flush=True)
     phone_secret = None
     if bool(args.phone_service) != bool(args.phone_secret_file):
         parser.error("Hosted phone needs --phone-service and --phone-secret-file")
@@ -425,7 +449,7 @@ def main() -> int:
     for origin in args.allow_origin:
         if not origin.startswith("https://") or "*" in origin or not origin.endswith(":5173"): parser.error("Use exact HTTPS origins on port 5173")
     hosted_referee = bool(args.referee and args.referee.startswith("https://"))
-    if args.save_defaults and args.referee:
+    if args.save_defaults and explicit_referee:
         _save_defaults(None, None, referee=args.referee)
         print(f"Saved referee default {args.referee} to {DEFAULTS_FILE}; `--local-referee` ignores it for one run.", flush=True)
     python = ROOT / "apps/host/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
