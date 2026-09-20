@@ -20,6 +20,10 @@ const char *spell_name(uint8_t s) {
     case proto::SP_STUPEFY: return "STUPEFY";
     case proto::SP_PROTEGO: return "PROTEGO";
     case proto::SP_EXPELLIARMUS: return "EXPELLIARMUS";
+    case proto::SP_INCENDIO: return "INCENDIO";
+    case proto::SP_SECTUMSEMPRA: return "SECTUMSEMPRA";
+    case proto::SP_PETRIFICUS_TOTALUS: return "PETRIFICUS";
+    case proto::SP_EXPECTO_PATRONUM: return "PATRONUM";
     default: return "";
   }
 }
@@ -50,7 +54,13 @@ void play_cue(const proto::Cue &c, uint8_t phase) {
   switch (c.effect) {
     case proto::FX_ACCEPTED_CAST:
       snprintf(g_cue_text, sizeof(g_cue_text), "%s!", spell_name(c.spell));
-      g_cue_color = c.spell == proto::SP_PROTEGO ? 0x07FF : c.spell == proto::SP_EXPELLIARMUS ? 0xFD20 : 0xF80A;
+      g_cue_color = c.spell == proto::SP_PROTEGO ? 0x07FF                 // cyan shield
+                    : c.spell == proto::SP_EXPELLIARMUS ? 0xFD20          // red-gold ribbon
+                    : c.spell == proto::SP_INCENDIO ? 0xFBC3              // fire orange
+                    : c.spell == proto::SP_SECTUMSEMPRA ? 0xE73F          // steel white
+                    : c.spell == proto::SP_PETRIFICUS_TOTALUS ? 0x9DBF    // pale binding blue
+                    : c.spell == proto::SP_EXPECTO_PATRONUM ? 0xDFBF      // silver-blue patronus
+                    : 0xF80A;                                              // crimson bolt
       break;
     case proto::FX_BLOCKED:
       snprintf(g_cue_text, sizeof(g_cue_text), "BLOCKED");

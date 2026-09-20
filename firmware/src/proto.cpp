@@ -205,7 +205,7 @@ uint32_t Session::apply(const Control &c, uint32_t now_ms) {
     case OP_CUE: {
       const uint8_t effect = (uint8_t)c.arg0, spell = (uint8_t)(c.arg0 >> 8);
       const uint16_t duration = (uint16_t)(c.arg0 >> 16);
-      if (effect < FX_ACCEPTED_CAST || effect > FX_RESULT || spell > SP_EXPELLIARMUS || duration < 1 || duration > 1000) return RC_INVALID_ARG;
+      if (effect < FX_ACCEPTED_CAST || effect > FX_RESULT || spell > SP_LAST || duration < 1 || duration > 1000) return RC_INVALID_ARG;
       if (effect == FX_ACCEPTED_CAST && spell == SP_NONE) return RC_INVALID_ARG;
       if (!state_.valid || diff32(now_ms, state_.valid_until_ms) >= 0 || c.arg1 != state_.epoch) return RC_INVALID_ARG;
       if (effect == FX_RESULT && (spell != SP_NONE || (state_.phase != PH_WON && state_.phase != PH_LOST && state_.phase != PH_DRAW))) return RC_INVALID_ARG;
@@ -362,6 +362,15 @@ int selftest(void (*log)(const char *line)) {
   Cue cue;
   t.expect(s.take_cue(1200, cue) && cue.effect == FX_ACCEPTED_CAST && cue.spell == SP_STUPEFY && cue.duration_ms == 300, "cue dequeues once");
   t.expect(!s.take_cue(1200, cue), "queue empty afterwards");
+  // contract v1.1: spell codes 4-7 are valid cue spells; 8 is not
+  Control c7{VERSION, OP_CUE, 3, 0xAABBCCDD, (uint32_t)FX_ACCEPTED_CAST | ((uint32_t)SP_EXPECTO_PATRONUM << 8) | (300u << 16), 0x01020304, 1500};
+  encode_control(c7, raw);
+  t.expect(s.handle_control(raw, REC, 1200, r) && r.detail1 == RC_OK && s.take_cue(1250, cue) && cue.spell == SP_EXPECTO_PATRONUM, "CUE spell 7 (Expecto Patronum) accepted");
+  Control c8 = c7;
+  c8.seq = 4;
+  c8.arg0 = (uint32_t)FX_ACCEPTED_CAST | (8u << 8) | (300u << 16);
+  encode_control(c8, raw);
+  t.expect(s.handle_control(raw, REC, 1200, r) && r.detail1 == RC_INVALID_ARG, "CUE spell 8 is invalid");
 
   // independent fixture: same CUE first arriving at 1400 is expired
   Session s2;

@@ -169,6 +169,16 @@ async def main() -> int:
         check(st is not None and st.detail1 == wp.R_OK, "SET_STATE playing accepted", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 700), epoch, link.device_now() + 300)
         check(st is not None and st.detail1 == wp.R_OK, "CUE cast Stupefy accepted", f"{st}")
+        # contract v1.1: spell codes 4-7 exist from firmware 0.2.2; code 8 is never valid
+        fw = info.fw if isinstance(info.fw, tuple) else tuple(int(part) for part in str(info.fw).split("."))
+        seven_spells = tuple(fw) >= (0, 2, 2)
+        st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_EXPECTO_PATRONUM, 700), epoch, link.device_now() + 300)
+        if seven_spells:
+            check(st is not None and st.detail1 == wp.R_OK, "CUE cast Expecto Patronum (spell 7) accepted", f"{st}")
+        else:
+            check(st is not None and st.detail1 == wp.R_INVALID_ARG, "CUE spell 7 rejected by pre-0.2.2 firmware (browser folds it to Protego)", f"{st}")
+        st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, 8, 700), epoch, link.device_now() + 300)
+        check(st is not None and st.detail1 == wp.R_INVALID_ARG, "CUE spell 8 rejected (3)", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 700), epoch + 1, link.device_now() + 300)
         check(st is not None and st.detail1 == wp.R_INVALID_ARG, "CUE with wrong epoch rejected (3)", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_DAMAGE, wp.SP_NONE, 500), epoch, link.device_now() - 50)

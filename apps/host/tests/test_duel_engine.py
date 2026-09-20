@@ -1,4 +1,6 @@
 from phantom_host.duel_engine import (
+    ALL_SPELLS,
+    CORE_SPELLS,
     AbortCommand,
     CastCommand,
     DuelEngine,
@@ -8,8 +10,10 @@ from phantom_host.duel_engine import (
 from phantom_host.duel_models import Outcome, Phase, Slot, Spell
 
 
-def _ready_engine(*, expelliarmus: bool = False, at_ms: int = 1_000) -> DuelEngine:
-    engine = DuelEngine(expelliarmus_enabled=expelliarmus)
+def _ready_engine(
+    *, enabled: frozenset[Spell] | None = None, at_ms: int = 1_000
+) -> DuelEngine:
+    engine = DuelEngine(enabled_spells=enabled)
     engine.reset_lobby(
         now_ms=0,
         room_generation=2,
@@ -53,14 +57,24 @@ def _cast(
     )
 
 
-def test_ruleset_publishes_exact_mvp_values_and_third_spell_gate():
-    disabled = ruleset(expelliarmus_enabled=False).model_dump(mode="json")
-    enabled = ruleset(expelliarmus_enabled=True).model_dump(mode="json")
-    assert disabled["tick_ms"] == 50
-    assert disabled["round_ms"] == 60_000
-    assert disabled["max_hp"] == 100
-    assert disabled["offensive_recovery_ms"] == 600
-    by_spell = {spell["spell"]: spell for spell in disabled["spells"]}
+def test_ruleset_publishes_seven_spells_with_starting_values_and_an_allowlist():
+    full = ruleset().model_dump(mode="json")
+    assert full["version"] == 2
+    assert full["tick_ms"] == 50
+    assert full["round_ms"] == 60_000
+    assert full["max_hp"] == 100
+    assert full["cast_recovery_ms"] == 500
+    by_spell = {spell["spell"]: spell for spell in full["spells"]}
+    assert list(by_spell) == [
+        "stupefy",
+        "protego",
+        "expelliarmus",
+        "incendio",
+        "sectumsempra",
+        "petrificus-totalus",
+        "expecto-patronum",
+    ]
+    assert all(spell["enabled"] for spell in full["spells"])
     assert by_spell["stupefy"] == {
         "spell": "stupefy",
         "enabled": True,
@@ -69,11 +83,22 @@ def test_ruleset_publishes_exact_mvp_values_and_third_spell_gate():
         "flight_ms": 2_000,
         "shield_ms": 0,
         "offense_lock_ms": 0,
+        "bind_ms": 0,
+        "burn_damage": 0,
+        "burn_ticks": 0,
+        "burn_interval_ms": 0,
+        "barrier_ms": 0,
     }
-    assert by_spell["protego"]["shield_ms"] == 1_200
-    assert by_spell["protego"]["cooldown_ms"] == 3_000
-    assert by_spell["expelliarmus"]["enabled"] is False
-    assert enabled["spells"][2]["enabled"] is True
+    assert (by_spell["protego"]["shield_ms"], by_spell["protego"]["cooldown_ms"]) == (1_200, 3_000)
+    assert (by_spell["expelliarmus"]["offense_lock_ms"], by_spell["expelliarmus"]["cooldown_ms"]) == (1_000, 6_000)
+    assert (by_spell["incendio"]["damage"], by_spell["incendio"]["burn_damage"], by_spell["incendio"]["burn_ticks"], by_spell["incendio"]["burn_interval_ms"], by_spell["incendio"]["cooldown_ms"]) == (8, 4, 3, 1_000, 6_000)
+    assert (by_spell["sectumsempra"]["damage"], by_spell["sectumsempra"]["flight_ms"], by_spell["sectumsempra"]["cooldown_ms"]) == (35, 2_800, 9_000)
+    assert (by_spell["petrificus-totalus"]["damage"], by_spell["petrificus-totalus"]["bind_ms"], by_spell["petrificus-totalus"]["cooldown_ms"]) == (0, 1_500, 10_000)
+    assert (by_spell["expecto-patronum"]["barrier_ms"], by_spell["expecto-patronum"]["cooldown_ms"]) == (3_000, 15_000)
+
+    core = ruleset(enabled_spells=CORE_SPELLS).model_dump(mode="json")
+    assert [spell["spell"] for spell in core["spells"] if spell["enabled"]] == ["stupefy", "protego"]
+    assert ALL_SPELLS == frozenset(Spell)
 
 
 def test_guard_received_before_due_impact_blocks_even_on_late_tick():
@@ -252,41 +277,52 @@ def test_abort_or_deadline_rejects_queued_ready_until_a_later_advance():
 
 
 def test_cooldown_recovery_evidence_and_disabled_spell_are_authoritative():
-    engine = _ready_engine()
+    engine = _ready_engine(enabled=CORE_SPELLS)
     first = engine.advance(
         now_ms=4_000,
         commands=[_cast(3, Slot.P1, 4_000, Spell.STUPEFY)],
     )[0]
     assert first.accepted
 
-    recovery = engine.advance(
-        now_ms=4_599,
-        commands=[_cast(4, Slot.P1, 4_599, Spell.EXPELLIARMUS)],
+    disabled = engine.advance(
+        now_ms=4_499,
+        commands=[_cast(4, Slot.P1, 4_499, Spell.EXPELLIARMUS)],
     )[0]
-    # Disabled is checked after evidence and before offensive recovery.
-    assert not recovery.accepted and recovery.reason == "spell_disabled"
+    # Disabled is checked after evidence and before cast recovery.
+    assert not disabled.accepted and disabled.reason == "spell_disabled"
+    # The short recovery between moves applies to Protego as well.
+    recovery = engine.advance(
+        now_ms=4_499,
+        commands=[_cast(5, Slot.P1, 4_499, Spell.PROTEGO)],
+    )[0]
+    assert not recovery.accepted and recovery.reason == "cast_recovery"
+    guard = engine.advance(
+        now_ms=4_500,
+        commands=[_cast(6, Slot.P1, 4_500, Spell.PROTEGO)],
+    )[0]
+    assert guard.accepted
     cooldown = engine.advance(
         now_ms=5_999,
-        commands=[_cast(5, Slot.P1, 5_999, Spell.STUPEFY)],
+        commands=[_cast(7, Slot.P1, 5_999, Spell.STUPEFY)],
     )[0]
     assert not cooldown.accepted and cooldown.reason == "cooldown"
     boundary = engine.advance(
         now_ms=6_000,
-        commands=[_cast(6, Slot.P1, 6_000, Spell.STUPEFY)],
+        commands=[_cast(8, Slot.P1, 6_000, Spell.STUPEFY)],
     )[0]
     assert boundary.accepted
     duplicate = engine.advance(
-        now_ms=6_100,
+        now_ms=7_000,
         commands=[
             CastCommand(
-                command_id=7,
+                command_id=9,
                 slot=Slot.P1,
-                at_ms=6_100,
-                order=7,
+                at_ms=7_000,
+                order=9,
                 round_id=1,
                 attempt_id="new-attempt",
                 spell=Spell.PROTEGO,
-                gesture_id="g-6",
+                gesture_id="g-8",
                 speech_id="fresh-speech",
             )
         ],
@@ -304,8 +340,8 @@ def test_future_command_is_not_processed_before_the_clock_reaches_it():
     assert engine.projectiles == []
 
 
-def test_expelliarmus_enabled_applies_damage_and_offense_lock_on_impact():
-    engine = _ready_engine(expelliarmus=True)
+def test_expelliarmus_applies_damage_and_a_disarm_that_spares_defences():
+    engine = _ready_engine()
     accepted = engine.advance(
         now_ms=4_000,
         commands=[_cast(3, Slot.P1, 4_000, Spell.EXPELLIARMUS)],
@@ -316,7 +352,7 @@ def test_expelliarmus_enabled_applies_damage_and_offense_lock_on_impact():
     assert engine.players[Slot.P2].offense_locked_until_ms == 7_200
     blocked_offense = engine.advance(
         now_ms=6_300,
-        commands=[_cast(4, Slot.P2, 6_300, Spell.STUPEFY)],
+        commands=[_cast(4, Slot.P2, 6_300, Spell.SECTUMSEMPRA)],
     )[0]
     assert blocked_offense.reason == "offense_locked"
     guard = engine.advance(
@@ -324,6 +360,189 @@ def test_expelliarmus_enabled_applies_damage_and_offense_lock_on_impact():
         commands=[_cast(5, Slot.P2, 6_300, Spell.PROTEGO)],
     )[0]
     assert guard.accepted
+    patronus = engine.advance(
+        now_ms=6_900,
+        commands=[_cast(6, Slot.P2, 6_900, Spell.EXPECTO_PATRONUM)],
+    )[0]
+    assert patronus.accepted
+    freed = engine.advance(
+        now_ms=7_400,
+        commands=[_cast(7, Slot.P2, 7_400, Spell.STUPEFY)],
+    )[0]
+    assert freed.accepted
+
+
+def test_petrificus_binds_every_cast_including_protego_until_it_expires():
+    engine = _ready_engine()
+    engine.advance(
+        now_ms=4_000,
+        commands=[_cast(3, Slot.P1, 4_000, Spell.PETRIFICUS_TOTALUS)],
+    )
+    engine.advance(now_ms=6_400, commands=[])
+    target = engine.players[Slot.P2]
+    assert target.hp == 100
+    assert target.bound_until_ms == 7_900
+    assert [event.type for event in engine.recent_events][-1] == "bodyBound"
+    assert "damage" not in [event.type for event in engine.recent_events]
+    bound = engine.advance(
+        now_ms=6_500,
+        commands=[_cast(4, Slot.P2, 6_500, Spell.PROTEGO)],
+    )[0]
+    assert not bound.accepted and bound.reason == "bound"
+    freed = engine.advance(
+        now_ms=7_900,
+        commands=[_cast(5, Slot.P2, 7_900, Spell.PROTEGO)],
+    )[0]
+    assert freed.accepted
+
+
+def test_incendio_burns_through_a_later_shield_and_a_burn_can_knock_out():
+    engine = _ready_engine()
+    engine.advance(
+        now_ms=4_000,
+        commands=[_cast(3, Slot.P1, 4_000, Spell.INCENDIO)],
+    )
+    engine.advance(now_ms=6_000, commands=[])
+    target = engine.players[Slot.P2]
+    assert target.hp == 92
+    assert target.burning_until_ms == 9_000
+    assert [event.type for event in engine.recent_events][-2:] == ["damage", "burning"]
+    guard = engine.advance(
+        now_ms=6_100,
+        commands=[_cast(4, Slot.P2, 6_100, Spell.PROTEGO)],
+    )[0]
+    assert guard.accepted
+    engine.advance(now_ms=7_040, commands=[])
+    assert target.hp == 88
+    assert engine.recent_events[-1].type == "burnDamage"
+    assert engine.recent_events[-1].amount == 4
+    assert engine.recent_events[-1].actor is Slot.P1
+    engine.advance(now_ms=9_000, commands=[])
+    assert target.hp == 80
+    assert target.burns == []
+    engine.advance(now_ms=12_000, commands=[])
+    assert target.hp == 80
+
+    lethal = _ready_engine()
+    lethal.players[Slot.P2].hp = 10
+    lethal.advance(
+        now_ms=4_000,
+        commands=[_cast(3, Slot.P1, 4_000, Spell.INCENDIO)],
+    )
+    lethal.advance(now_ms=6_000, commands=[])
+    assert lethal.players[Slot.P2].hp == 2
+    lethal.advance(now_ms=7_000, commands=[])
+    assert lethal.players[Slot.P2].hp == 0
+    assert lethal.phase is Phase.RESULT
+    assert lethal.result is not None
+    assert lethal.result.winner is Slot.P1
+    assert lethal.result.reason == "knockout"
+    assert lethal.players[Slot.P2].burns == []
+
+
+def test_a_fresh_fire_replaces_an_older_burn_instead_of_stacking():
+    engine = _ready_engine()
+    engine.advance(
+        now_ms=4_000,
+        commands=[_cast(3, Slot.P1, 4_000, Spell.INCENDIO)],
+    )
+    engine.players[Slot.P1].cooldown_until_ms.clear()
+    engine.advance(
+        now_ms=5_000,
+        commands=[_cast(4, Slot.P1, 5_000, Spell.INCENDIO)],
+    )
+    engine.advance(now_ms=7_000, commands=[])
+    target = engine.players[Slot.P2]
+    # 8 (first impact) + 8 (second impact); the older tick due at 7_000 was replaced.
+    assert target.hp == 84
+    assert [tick.at_ms for tick in target.burns] == [8_000, 9_000, 10_000]
+    engine.advance(now_ms=10_000, commands=[])
+    assert target.hp == 72
+
+
+def test_patronus_repels_every_projectile_while_protego_breaks_after_one():
+    engine = _ready_engine()
+    patronus = engine.advance(
+        now_ms=4_000,
+        commands=[_cast(3, Slot.P2, 4_000, Spell.EXPECTO_PATRONUM)],
+    )[0]
+    assert patronus.accepted
+    assert engine.players[Slot.P2].barrier_until_ms == 7_000
+    assert engine.recent_events[-1].type == "barrierRaised"
+    engine.advance(
+        now_ms=4_700,
+        commands=[
+            _cast(4, Slot.P1, 4_100, Spell.STUPEFY),
+            _cast(5, Slot.P1, 4_700, Spell.EXPELLIARMUS),
+        ],
+    )
+    engine.advance(now_ms=6_900, commands=[])
+    blocked = [event for event in engine.recent_events if event.type == "impactBlocked"]
+    assert [event.reason for event in blocked] == ["barrier", "barrier"]
+    assert engine.players[Slot.P2].hp == 100
+    assert engine.players[Slot.P2].offense_locked_until_ms == 0
+    assert engine.players[Slot.P2].barrier_until_ms == 7_000
+
+    engine.advance(
+        now_ms=8_000,
+        commands=[_cast(6, Slot.P1, 8_000, Spell.STUPEFY)],
+    )
+    engine.advance(
+        now_ms=9_500,
+        commands=[_cast(7, Slot.P2, 9_500, Spell.PROTEGO)],
+    )
+    engine.advance(now_ms=10_000, commands=[])
+    assert engine.recent_events[-1].type == "impactBlocked"
+    assert engine.recent_events[-1].reason == "shield"
+    assert engine.players[Slot.P2].shield_until_ms == 0
+    engine.advance(
+        now_ms=10_100,
+        commands=[_cast(8, Slot.P1, 10_100, Spell.STUPEFY)],
+    )
+    engine.advance(now_ms=12_100, commands=[])
+    assert engine.players[Slot.P2].hp == 80
+
+
+def test_sectumsempra_is_the_heavy_telegraphed_hit():
+    engine = _ready_engine()
+    decision = engine.advance(
+        now_ms=4_000,
+        commands=[_cast(3, Slot.P1, 4_000, Spell.SECTUMSEMPRA)],
+    )[0]
+    assert decision.accepted
+    assert engine.projectiles[0].impact_at_ms == 6_800
+    engine.advance(now_ms=6_799, commands=[])
+    assert engine.players[Slot.P2].hp == 100
+    engine.advance(now_ms=6_800, commands=[])
+    assert engine.players[Slot.P2].hp == 65
+    again = engine.advance(
+        now_ms=12_999,
+        commands=[_cast(4, Slot.P1, 12_999, Spell.SECTUMSEMPRA)],
+    )[0]
+    assert again.reason == "cooldown"
+
+
+def test_round_end_clears_binds_burns_and_barriers():
+    engine = _ready_engine()
+    engine.advance(
+        now_ms=4_000,
+        commands=[
+            _cast(3, Slot.P1, 4_000, Spell.INCENDIO),
+            _cast(4, Slot.P2, 4_000, Spell.PETRIFICUS_TOTALUS),
+        ],
+    )
+    engine.advance(now_ms=6_400, commands=[])
+    assert engine.players[Slot.P2].burns
+    assert engine.players[Slot.P1].bound_until_ms == 7_900
+    engine.advance(
+        now_ms=6_500,
+        commands=[AbortCommand(at_ms=6_500, order=5, reason="input_unhealthy")],
+    )
+    for player in engine.players.values():
+        assert player.burns == []
+        assert player.bound_until_ms == 0
+        assert player.barrier_until_ms == 0
+        assert player.shield_until_ms == 0
 
 
 def test_events_carry_the_resulting_state_version_and_stable_ids():

@@ -15,7 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 
-from phantom_host.duel_engine import TICK_MS
+from phantom_host.duel_engine import ALL_SPELLS, CORE_SPELLS, TICK_MS
 from phantom_host.duel_models import (
     AuthMessage,
     CastMessage,
@@ -34,6 +34,7 @@ from phantom_host.duel_models import (
     SessionRequest,
     SessionResponse,
     SignalMessage,
+    Spell,
     wire_dict,
 )
 from phantom_host.duel_relay import DevWandRelay, RelayPeer
@@ -63,13 +64,32 @@ def _environment_flag(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be a boolean flag")
 
 
+def _environment_spells(name: str) -> frozenset[Spell]:
+    """Comma-separated spell allowlist; unset or empty means every spell."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return ALL_SPELLS
+    chosen: set[Spell] = set()
+    for item in raw.split(","):
+        value = item.strip().lower()
+        if not value:
+            continue
+        try:
+            chosen.add(Spell(value))
+        except ValueError:
+            raise ValueError(f"{name} names an unknown spell: {value!r}") from None
+    if not CORE_SPELLS <= chosen:
+        raise ValueError(f"{name} must include stupefy and protego")
+    return frozenset(chosen)
+
+
 @dataclass(frozen=True)
 class DuelSettings:
     host: str = "127.0.0.1"
     allowed_origins: frozenset[str] = DEFAULT_ALLOWED_ORIGINS
     dev_relay_enabled: bool = False
     allow_replay: bool = False
-    expelliarmus_enabled: bool = False
+    enabled_spells: frozenset[Spell] = ALL_SPELLS
     start_background_tick: bool = True
 
     @classmethod
@@ -91,9 +111,7 @@ class DuelSettings:
             allowed_origins=origins,
             dev_relay_enabled=_environment_flag("WAND_DEV_RELAY"),
             allow_replay=_environment_flag("WAND_ALLOW_REPLAY"),
-            expelliarmus_enabled=_environment_flag(
-                "WAND_ENABLE_EXPELLIARMUS"
-            ),
+            enabled_spells=_environment_spells("WAND_SPELLS"),
         )
 
 
@@ -108,7 +126,7 @@ def create_app(
         clock_ms=active_clock,
         allow_phone=active_settings.dev_relay_enabled,
         allow_replay=active_settings.allow_replay,
-        expelliarmus_enabled=active_settings.expelliarmus_enabled,
+        enabled_spells=active_settings.enabled_spells,
     )
     relay = DevWandRelay(
         clock_ms=active_clock,

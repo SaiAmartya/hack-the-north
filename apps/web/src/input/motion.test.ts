@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { CapturedMotion } from "../wand/client";
 import { MotionFlag } from "../wand/protocol";
 import { MotionRecognizer, type GestureEvidence, type SpellName } from "./motion";
-import { RawMotionTraceBuilder, createCoreMotionFixtures, type CoreMotionFixtures } from "./traceFixtures";
+import { RawMotionTraceBuilder, STROKE_DIRECTIONS, createCoreMotionFixtures, createSevenSpellFixtures, type CoreMotionFixtures } from "./traceFixtures";
+import { SPELL_NAMES } from "../game/spells";
 import phoneJabs from "./fixtures/phone-jabs-2026-09-19.json";
 
 type Pose = readonly [number, number, number];
@@ -31,13 +32,23 @@ class MotionHarness {
         this.feed(this.builder.guard(degrees));
         this.feed(this.builder.lower(degrees));
       }
+    } else if (spell === "expecto-patronum") {
+      this.feed(this.builder.circle(600, 900));
+      this.feed(this.builder.circle(700, 800));
+      this.feed(this.builder.circle(650, 1_000));
     } else {
-      const axis = spell === "stupefy" ? 0 : 1;
-      this.feed(this.builder.jab(820, axis));
-      this.feed(this.builder.jab(900, axis));
-      this.feed(this.builder.jab(980, axis));
+      const direction = STROKE_DIRECTIONS[spell];
+      this.feed(this.builder.jab(820, 0, direction, 1, 6));
+      this.feed(this.builder.jab(900, 0, direction, 1, -12));
+      this.feed(this.builder.jab(980, 0, direction, 1, 6));
     }
     expect(this.recognizer.getState().examplesBySpell[spell]).toBe(3);
+  }
+
+  learnAll(): void {
+    this.ready();
+    for (const spell of SPELL_NAMES) if (!["stupefy", "protego"].includes(spell)) this.calibrate(spell);
+    expect(this.recognizer.getState()).toMatchObject({ phase: "ready", enabledSpells: [...SPELL_NAMES], calibratedSpells: [...SPELL_NAMES] });
   }
 
   ready(): void {
@@ -210,15 +221,18 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     expect(h.spells()).toEqual(["stupefy"]);
   });
 
-  it("needs a distinct sweep direction for Expelliarmus and reports ambiguity", () => {
+  it("needs a distinct direction for a second stroke spell and reports ambiguity", () => {
     const h = new MotionHarness();
     h.ready();
     h.recognizer.beginGestureCalibration("expelliarmus");
     h.feed(h.builder.jab(900, 0, [0.95, 0.3, 0]));
-    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { expelliarmus: 0 }, reason: "inconsistent-direction" });
-    // A sweep only 60 degrees from the jab is accepted, but leaves room for ambiguous strokes.
+    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { expelliarmus: 0 }, reason: "too-similar" });
+    expect(h.recognizer.getState().lastIssue).toContain("Stupefy");
+    // A stroke only 60 degrees from the jab is accepted, but leaves room for ambiguous strokes.
     const sweep: Pose = [0.5, 0.866, 0];
     for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, sweep));
+    // A learned spell is enabled on its own; the explicit call stays harmless.
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", enabledSpells: ["stupefy", "protego", "expelliarmus"] });
     h.recognizer.setEnabledSpells(["stupefy", "protego", "expelliarmus"]);
     expect(h.recognizer.getState().phase).toBe("ready");
     h.feed(h.builder.jab(850, 1));
@@ -453,13 +467,223 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
   });
 });
 
+describe("real wand physics", () => {
+  it("learns Protego from a raise that pitches the wand, without reading the gravity swing as a jab", () => {
+    // A real raise tips the wand about its y axis: gravity swings onto the x axis, which is the
+    // jab's axis. Only the arm's small upward push is a stroke; the swing is not.
+    const h = new MotionHarness();
+    h.still();
+    h.calibrate("stupefy");
+    h.recognizer.beginGestureCalibration("protego");
+    for (const degrees of [33, 36, 39]) {
+      h.feed(h.builder.guard(degrees, 320, 320, 220, "y"));
+      expect(h.recognizer.getState().reason, h.recognizer.getState().lastIssue).not.toBe("unclear-direction");
+      h.feed(h.builder.lower(degrees, 360, "y"));
+    }
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { protego: 3 } });
+    h.feed(h.builder.guard(31, 320, 320, 220, "y"));
+    h.feed(h.builder.lower(31, 360, "y"));
+    h.feed(h.builder.jab(900));
+    expect(h.spells()).toEqual(["protego", "stupefy"]);
+  });
+
+  it("separates a wrist slash from the jab despite the centripetal pull toward the wrist", () => {
+    // Swinging the wand from the wrist drags the sensor toward the wrist harder than the slash
+    // itself accelerates it sideways; that pull is along the jab axis and must not count.
+    const h = new MotionHarness();
+    h.ready();
+    h.recognizer.beginGestureCalibration("sectumsempra");
+    for (const [amplitude, drift] of [[820, 6], [900, -12], [980, 6]] as const) {
+      h.feed(h.builder.wristStroke(amplitude, [0, -1, 0], [-1, 0, 0], 1.5, drift));
+      expect(h.recognizer.getState().reason, h.recognizer.getState().lastIssue).toBeUndefined();
+    }
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { sectumsempra: 3 } });
+    h.feed(h.builder.wristStroke(880, [0, -1, 0]));
+    h.feed(h.builder.jab(900));
+    h.feed(h.builder.wristStroke(900, [0, 1, 0]));  // the unlearned way round: nothing
+    expect(h.spells()).toEqual(["sectumsempra", "stupefy"]);
+  });
+
+  it("reads a pull back that tips the wand up as Expelliarmus, not as the jab's brake nor as Protego", () => {
+    // Pulling toward the shoulder launches backward, brakes forward, and tips the wand so gravity
+    // swings forward too: the old strongest-lobe rule read that as a jab. The hold at the end
+    // looks like a guard, but the stroke is far too strong to be a raise.
+    const h = new MotionHarness();
+    h.still();
+    h.calibrate("stupefy");
+    h.recognizer.beginGestureCalibration("protego");
+    for (const degrees of [33, 36, 39]) {
+      h.feed(h.builder.guard(degrees, 320, 320, 220, "y"));
+      h.feed(h.builder.lower(degrees, 360, "y"));
+    }
+    expect(h.recognizer.getState().phase).toBe("ready");
+    h.recognizer.beginGestureCalibration("expelliarmus");
+    for (const amplitude of [820, 900, 980]) {
+      h.feed(h.builder.pitchedStroke(amplitude, [-1, 0, 0], 30));
+      expect(h.recognizer.getState().reason, h.recognizer.getState().lastIssue).toBeUndefined();
+      h.feed(h.builder.lower(30, 360, "y"));
+    }
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { expelliarmus: 3 } });
+    h.feed(h.builder.pitchedStroke(850, [-1, 0, 0], 30));
+    h.feed(h.builder.lower(30, 360, "y"));
+    h.feed(h.builder.guard(35, 320, 320, 220, "y"));
+    h.feed(h.builder.lower(35, 360, "y"));
+    h.feed(h.builder.jab(900));
+    expect(h.spells()).toEqual(["expelliarmus", "protego", "stupefy"]);
+  });
+
+  it("keeps the launch as the sign of a stroke even when the brake is the sharper part", () => {
+    const h = new MotionHarness();
+    h.still();
+    h.recognizer.beginGestureCalibration("stupefy");
+    for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, [1, 0, 0], 2.2));  // brake 2.2x harder
+    h.calibrate("protego");
+    h.recognizer.beginGestureCalibration("expelliarmus");
+    for (const amplitude of [820, 900, 980]) h.feed(h.builder.jab(amplitude, 0, [-1, 0, 0], 2.2));
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", examplesBySpell: { expelliarmus: 3 } });
+    h.feed(h.builder.jab(900, 0, [1, 0, 0], 1));    // a gentle-brake jab is still a jab
+    h.feed(h.builder.jab(900, 0, [-1, 0, 0], 1));
+    expect(h.spells()).toEqual(["stupefy", "expelliarmus"]);
+  });
+});
+
+describe("seven spells", () => {
+  it("learns all seven and recognizes each held-out movement exactly once", () => {
+    const fixtures = createSevenSpellFixtures();
+    const evidence: GestureEvidence[] = [];
+    const recognizer = new MotionRecognizer((item) => evidence.push(item));
+    const feed = (samples: readonly CapturedMotion[]) => samples.forEach((sample) => recognizer.push(sample, 3));
+    recognizer.beginCalibration();
+    feed(fixtures.stillness);
+    for (const spell of SPELL_NAMES) {
+      recognizer.beginGestureCalibration(spell);
+      fixtures.calibration[spell].forEach(feed);
+      expect(recognizer.getState().examplesBySpell[spell], `${spell}: ${recognizer.getState().lastIssue}`).toBe(3);
+    }
+    expect(recognizer.getState()).toMatchObject({ phase: "ready", enabledSpells: [...SPELL_NAMES] });
+    for (const spell of SPELL_NAMES) {
+      const before = evidence.length;
+      feed(fixtures.heldOut[spell]);
+      expect(evidence.slice(before).map((item) => item.spell), `${spell}: ${recognizer.getState().lastIssue} ${recognizer.getState().reason ?? ""}`).toEqual([spell]);
+    }
+    expect(evidence.every((item) => item.quality > 0 && item.quality <= 1)).toBe(true);
+  });
+
+  it("keeps every pair of stroke spells apart: the six signed directions never cross-fire", () => {
+    const h = new MotionHarness();
+    h.learnAll();
+    const results: Record<string, SpellName[]> = {};
+    const strokes: Record<string, Pose> = { ...STROKE_DIRECTIONS, "+y (unlearned)": [0, 1, 0] };
+    for (const [label, direction] of Object.entries(strokes)) {
+      const before = h.evidence.length;
+      h.feed(h.builder.jab(900, 0, direction));
+      results[label] = h.evidence.slice(before).map((item) => item.spell);
+    }
+    expect(results).toEqual({
+      stupefy: ["stupefy"],
+      expelliarmus: ["expelliarmus"],
+      sectumsempra: ["sectumsempra"],
+      incendio: ["incendio"],
+      "petrificus-totalus": ["petrificus-totalus"],
+      "+y (unlearned)": [],
+    });
+    // Learned directions are at right angles, so a stroke halfway between two of them is inside
+    // neither 40-degree cone: nothing fires and nothing is guessed.
+    h.feed(h.builder.jab(900, 0, [0.7071, 0, 0.7071]));
+    expect(h.spells().slice(-1)).toEqual(["petrificus-totalus"]);  // the last accepted spell is unchanged
+    expect(h.recognizer.getState().reason).toBe("no-match");
+  });
+
+  it("never reads a circle as a stroke, and never reads strokes or raises as a circle", () => {
+    const h = new MotionHarness();
+    h.learnAll();
+    for (const [magnitude, period] of [[500, 1_100], [900, 700], [1_200, 600]] as const) {
+      const before = h.evidence.length;
+      h.feed(h.builder.circle(magnitude, period));
+      expect(h.evidence.slice(before).map((item) => item.spell), `${magnitude} mg / ${period} ms: ${h.recognizer.getState().lastIssue}`).toEqual(["expecto-patronum"]);
+    }
+    // The other way round is a different plane sense: not the learned Patronus.
+    const before = h.evidence.length;
+    h.feed(h.builder.circle(650, 900, -1));
+    expect(h.evidence.slice(before)).toEqual([]);
+    // A rapid succession of strokes turns nowhere.
+    h.feed(h.builder.rapidJabs(900, 3));
+    expect(h.spells().slice(-1)).toEqual(["stupefy"]);
+    h.feed(h.builder.guard(35));
+    expect(h.spells().slice(-1)).toEqual(["protego"]);
+    h.feed(h.builder.lower(35));
+    expect(h.spells().slice(-1)).toEqual(["protego"]);
+  });
+
+  it("coaches an incomplete or wobbly circle instead of learning it", () => {
+    const h = new MotionHarness();
+    h.ready();
+    h.recognizer.beginGestureCalibration("expecto-patronum");
+    h.feed(h.builder.circle(650, 900, 1, "xz", 0.5));
+    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { "expecto-patronum": 0 }, reason: "incomplete-circle" });
+    h.feed(h.builder.jab(900));
+    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { "expecto-patronum": 0 }, reason: "incomplete-circle" });
+    h.feed(h.builder.circle(650, 900));
+    expect(h.recognizer.getState().examplesBySpell["expecto-patronum"]).toBe(1);
+    h.feed(h.builder.circle(650, 900, -1));
+    expect(h.recognizer.getState()).toMatchObject({ examplesBySpell: { "expecto-patronum": 1 }, reason: "inconsistent-direction" });
+    h.feed(h.builder.circle(650, 900));
+    h.feed(h.builder.circle(650, 900));
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", calibratedSpells: ["stupefy", "protego", "expecto-patronum"] });
+  });
+
+  it("treats a chop from the grip as a stroke, and a lowered guard as nothing", () => {
+    const h = new MotionHarness();
+    h.learnAll();
+    // Chop down and end 30 degrees lower: still the chop (resolved on the fast path); the slow
+    // drop that follows is not a "lowering" of any guard and casts nothing.
+    const before = h.evidence.length;
+    h.feed(h.builder.jab(950, 0, STROKE_DIRECTIONS["petrificus-totalus"], 1, -30));
+    expect(h.evidence.slice(before).map((item) => item.spell)).toEqual(["petrificus-totalus"]);
+    h.feed(h.builder.stillness(400));
+    // Lowering a raised guard is still silent.
+    h.feed(h.builder.guard(36));
+    expect(h.spells().slice(-1)).toEqual(["protego"]);
+    h.feed(h.builder.lower(36));
+    expect(h.spells().slice(-1)).toEqual(["protego"]);
+    expect(h.recognizer.getState().reason).toBeUndefined();
+  });
+
+  it("reads an upward flick that stays up as the guard, not Incendio", () => {
+    const h = new MotionHarness();
+    h.learnAll();
+    const before = h.evidence.length;
+    h.feed(h.builder.guard(35, 320, 320, 700));
+    expect(h.evidence.slice(before).map((item) => item.spell)).toEqual(["protego"]);
+    h.feed(h.builder.lower(35));
+    h.feed(h.builder.jab(840, 0, STROKE_DIRECTIONS.incendio));
+    expect(h.spells().slice(-1)).toEqual(["incendio"]);
+  });
+
+  it("only offers learned spells and drops an optional spell when its grip is reset", () => {
+    const h = new MotionHarness();
+    h.ready();
+    expect(() => h.recognizer.setEnabledSpells(["stupefy", "protego", "incendio"])).toThrow(/Calibrate Incendio/);
+    h.calibrate("incendio");
+    expect(h.recognizer.getState().enabledSpells).toEqual(["stupefy", "protego", "incendio"]);
+    expect(h.recognizer.resumeCalibration(11)).toBe(true);
+    h.recognizer.reset();
+    expect(h.recognizer.getState().enabledSpells).toEqual(["stupefy", "protego"]);
+  });
+});
+
 describe("fixture builder", () => {
   it("produces valid, contiguous 50 Hz records", () => {
     const fixtures = createCoreMotionFixtures();
-    const all = [fixtures.stillness, ...fixtures.calibration.stupefy, ...fixtures.calibration.protego, ...fixtures.calibration.expelliarmus, fixtures.heldOut.stupefy, fixtures.heldOut.protego, fixtures.heldOut.expelliarmus].flat();
-    for (let index = 1; index < all.length; index++) {
-      expect(all[index].browserMs - all[index - 1].browserMs).toBe(20);
-      expect(all[index].flags & MotionFlag.Valid).toBe(MotionFlag.Valid);
-    }
+    const seven = createSevenSpellFixtures();
+    const sets = [
+      [fixtures.stillness, ...fixtures.calibration.stupefy, ...fixtures.calibration.protego, ...fixtures.calibration.expelliarmus, fixtures.heldOut.stupefy, fixtures.heldOut.protego, fixtures.heldOut.expelliarmus].flat(),
+      [seven.stillness, ...Object.values(seven.calibration).flat(), ...Object.values(seven.heldOut)].flat(),
+    ];
+    for (const all of sets)
+      for (let index = 1; index < all.length; index++) {
+        expect(all[index].browserMs - all[index - 1].browserMs).toBe(20);
+        expect(all[index].flags & MotionFlag.Valid).toBe(MotionFlag.Valid);
+      }
   });
 });

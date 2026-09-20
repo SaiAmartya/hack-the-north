@@ -80,16 +80,16 @@ describe("speech endpoint", () => {
     expect(events.some((event) => event.type === "clip")).toBe(false);
   });
 
-  it("caps the unpadded active voice interval at 1.8 seconds", () => {
+  it("caps the unpadded active voice interval at 2.2 seconds", () => {
     const test = harness();
     test.many(0.002, 250);
-    const events = test.many(0.08, 240);
+    const events = test.many(0.08, 300);
     const clip = events.find(
       (event): event is Extract<SpeechEndpointEvent, { type: "clip" }> =>
         event.type === "clip",
     );
     expect(clip).toBeDefined();
-    expect(clip!.endMs - clip!.startMs).toBe(1800);
+    expect(clip!.endMs - clip!.startMs).toBe(2200);
     expect(clip!.samples.byteLength).toBeLessThanOrEqual(3 * 16_000 * 4);
   });
 

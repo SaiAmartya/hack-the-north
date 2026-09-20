@@ -3,6 +3,7 @@ import qrcode from "qrcode-generator";
 import { DuelController, nameOf } from "./controller";
 import { DuelEffects } from "./effects";
 import type { Spell } from "./contracts";
+import { CORE_SPELL_NAMES, OPTIONAL_SPELL_NAMES, SPELLS } from "./spells";
 import "./game.css";
 
 function Video({
@@ -61,6 +62,16 @@ function PhoneQr({ value }: { value: string }) {
   );
 }
 
+const GLYPHS: Record<Spell, string> = {
+  stupefy: "m29 8-16 19h11l-5 13 16-20H24l5-12Z",
+  protego: "M24 9 37 15v10c0 8-13 15-13 15S11 33 11 25V15l13-6Zm0 7v16m-7-8h14",
+  expelliarmus: "M10 31c8-26 20 15 28-13M10 19c8 26 20-15 28 13M24 8v5m0 22v5",
+  incendio: "M24 8c-2 7-9 10-9 17a9 9 0 0 0 18 0c0-4-2-6-4-9-1 4-2 5-4 6 1-4 1-9-1-14Zm0 20c-2 2-2 5 0 7 2-2 2-5 0-7Z",
+  sectumsempra: "M10 36 38 12M13 15l5 5M30 28l5 5M20 10l4 4",
+  "petrificus-totalus": "M24 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 6v24m-9-18h18m-14 20h10M17 33h14",
+  "expecto-patronum": "M24 12a12 12 0 1 1-9 4M24 6v3m13 4-2 2M8 24h3m26 0h3M24 36v6m-13-6-2 2m26-2 2 2",
+};
+
 export function SpellGlyph({ spell }: { spell: Spell }) {
   return (
     <svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
@@ -72,13 +83,7 @@ export function SpellGlyph({ spell }: { spell: Spell }) {
         strokeWidth="1.5"
         opacity=".3"
       />
-      {spell === "protego" ? (
-        <path d="M24 9 37 15v10c0 8-13 15-13 15S11 33 11 25V15l13-6Zm0 7v16m-7-8h14" />
-      ) : spell === "stupefy" ? (
-        <path d="m29 8-16 19h11l-5 13 16-20H24l5-12Z" />
-      ) : (
-        <path d="M10 31c8-26 20 15 28-13M10 19c8 26 20-15 28 13M24 8v5m0 22v5" />
-      )}
+      <path d={GLYPHS[spell]} />
     </svg>
   );
 }
@@ -231,7 +236,7 @@ export function GameApp() {
             </div>
             <div className="spell-dock">
               {c?.game.rules?.spells
-                .filter((r) => r.enabled)
+                .filter((r) => r.enabled && motion?.enabledSpells.includes(r.spell))
                 .map((rule) => {
                   const remaining = Math.max(
                     0,
@@ -247,9 +252,7 @@ export function GameApp() {
                       <small>
                         {remaining
                           ? `${(remaining / 1000).toFixed(1)}s`
-                          : rule.spell === "protego"
-                            ? "Raise + speak"
-                            : "Jab + speak"}
+                          : SPELLS[rule.spell].hint}
                       </small>
                     </div>
                   );
@@ -262,8 +265,18 @@ export function GameApp() {
                 label="Your camera"
               />
             )}
-            {!!me && me.shieldUntilMs > now && (
-              <div className="guard-label">Protego</div>
+            {!!me && (me.barrierUntilMs > now || me.shieldUntilMs > now) && (
+              <div className="guard-label">{me.barrierUntilMs > now ? "Patronus" : "Protego"}</div>
+            )}
+            {!!me && (me.boundUntilMs > now || me.burningUntilMs > now || me.offenseLockedUntilMs > now) && (
+              <div className="status-label" role="status">
+                {me.boundUntilMs > now ? "Bound" : me.offenseLockedUntilMs > now ? "Disarmed" : "Burning"}
+              </div>
+            )}
+            {!!opponent && (opponent.barrierUntilMs > now || opponent.shieldUntilMs > now || opponent.boundUntilMs > now || opponent.burningUntilMs > now || opponent.offenseLockedUntilMs > now) && (
+              <div className="opponent-status" role="status">
+                {opponent.barrierUntilMs > now ? "Patronus" : opponent.shieldUntilMs > now ? "Shielded" : opponent.boundUntilMs > now ? "Bound" : opponent.offenseLockedUntilMs > now ? "Disarmed" : "Burning"}
+              </div>
             )}
             {game?.projectiles.some((p) => p.target === slot) && (
               <div className="incoming-label" role="status">
@@ -454,16 +467,12 @@ export function GameApp() {
                 <SpellGlyph
                   spell={
                     motion?.calibratingSpell ??
-                    (!motion?.calibratedSpells.includes("stupefy")
-                      ? "stupefy"
-                      : "protego")
+                    (CORE_SPELL_NAMES.find((spell) => !motion?.calibratedSpells.includes(spell)) ?? "stupefy")
                   }
                 />
                 <h1>
                   {motion?.calibratingSpell
-                    ? motion.calibratingSpell === "stupefy"
-                      ? "Jab forward, three times."
-                      : "Raise, hold, lower. Three times."
+                    ? SPELLS[motion.calibratingSpell].calibration
                     : "Learn your wand."}
                 </h1>
                 {motion?.calibratingSpell ? (
@@ -475,16 +484,12 @@ export function GameApp() {
                   <button
                     onClick={() =>
                       c.calibrate(
-                        !motion?.calibratedSpells.includes("stupefy")
-                          ? "stupefy"
-                          : "protego",
+                        CORE_SPELL_NAMES.find((spell) => !motion?.calibratedSpells.includes(spell)) ?? "stupefy",
                       )
                     }
                   >
                     Practice{" "}
-                    {!motion?.calibratedSpells.includes("stupefy")
-                      ? "Stupefy"
-                      : "Protego"}
+                    {nameOf(CORE_SPELL_NAMES.find((spell) => !motion?.calibratedSpells.includes(spell)) ?? "stupefy")}
                   </button>
                 )}
                 <button className="quiet" onClick={() => c.startCalibration()}>Reset grip</button>
@@ -492,7 +497,7 @@ export function GameApp() {
             ) : (
               <>
                 <div className="practice-spells">
-                  {(["stupefy", "protego"] as Spell[]).map((spell) => (
+                  {CORE_SPELL_NAMES.map((spell) => (
                     <div
                       key={spell}
                       className={c.practiced.has(spell) ? "learned" : ""}
@@ -501,19 +506,40 @@ export function GameApp() {
                       <span>
                         {nameOf(spell)} {c.practiced.has(spell) ? "✓" : ""}
                       </span>
-                      <small>
-                        {spell === "stupefy" ? "Jab + speak" : "Raise + speak"}
-                      </small>
+                      <small>{SPELLS[spell].hint}</small>
                     </div>
                   ))}
                 </div>
                 <h1>
                   {me?.ready
                     ? "Waiting for your rival…"
-                    : c.practiced.size < 2
+                    : !c.corePracticed()
                       ? "Cast each spell once."
                       : "Ready to duel?"}
                 </h1>
+                <details className="more-spells" open={!me?.ready && c.corePracticed()}>
+                  <summary>
+                    More spells · {OPTIONAL_SPELL_NAMES.filter((spell) => motion?.calibratedSpells.includes(spell)).length} of {OPTIONAL_SPELL_NAMES.length} learned
+                  </summary>
+                  <ul>
+                    {OPTIONAL_SPELL_NAMES.map((spell) => {
+                      const learned = !!motion?.calibratedSpells.includes(spell);
+                      return (
+                        <li key={spell} className={learned ? "learned" : ""}>
+                          <SpellGlyph spell={spell} />
+                          <div>
+                            <b>{nameOf(spell)}</b> {learned && "✓"}
+                            <small>{SPELLS[spell].move}. {SPELLS[spell].effect}</small>
+                          </div>
+                          <button className="secondary" disabled={!!me?.ready} onClick={() => c.calibrate(spell)}>
+                            {learned ? "Relearn" : "Learn"}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="more-spells-note">Optional. Skip any of them; you duel with the spells you learned.</p>
+                </details>
                 <div className="ready-actions">
                   {!c.localVideo && (
                     <button
@@ -525,7 +551,7 @@ export function GameApp() {
                   )}
                   <button
                     disabled={
-                      c.practiced.size < 2 || !c.healthy() || !!me?.ready
+                      !c.corePracticed() || !c.healthy() || !!me?.ready
                     }
                     onClick={() => c.ready()}
                   >

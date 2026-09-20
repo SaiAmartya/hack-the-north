@@ -5,7 +5,9 @@ import {
   type SpeechEndpointEvent,
 } from "./endpoint";
 
-export type SpeechSpell = "stupefy" | "protego" | "expelliarmus";
+import { INCANTATIONS, type SpellName } from "../game/spells";
+
+export type SpeechSpell = SpellName;
 export type SpeechPhase =
   | "off"
   | "starting"
@@ -84,12 +86,10 @@ type HelperResult = {
   spell: SpeechSpell | null;
 };
 
-const SPELLS = new Set<SpeechSpell>([
-  "stupefy",
-  "protego",
-  "expelliarmus",
-]);
-const MAX_RESULT_DELAY_MS = 1000;
+// faster-whisper base.en int8 on a laptop CPU takes ~500-900 ms per clip regardless of
+// clip length; 1 s left no headroom. Mirrors MAX_DEADLINE_MS in speech_app.py.
+const MAX_RESULT_DELAY_MS = 1500;
+const LATE_RESULT_ISSUE = "Speech result arrived too late; say it again";
 const MAX_PCM_BYTES = SPEECH_SAMPLE_RATE * 3 * 2;
 const FIRST_AUDIO_FRAME_TIMEOUT_MS = 2000;
 
@@ -335,6 +335,10 @@ export class SpeechClient {
         body,
         signal: pending.abort.signal,
       });
+      if (response.status === 504) {
+        this.late(pending);
+        return;
+      }
       if (!response.ok) throw new Error("Local speech transcription failed");
       const result = (await response.json()) as HelperResult;
       this.result(pending, result);
@@ -356,7 +360,7 @@ export class SpeechClient {
     if (!this.isPending(pending)) return;
     const arrivedMs = this.platform.now();
     if (arrivedMs > pending.endMs + MAX_RESULT_DELAY_MS) {
-      this.fail("Speech result missed the voice-end plus one-second deadline");
+      this.late(pending);
       return;
     }
     clearTimeout(pending.deadlineTimer);
@@ -400,8 +404,17 @@ export class SpeechClient {
       this.pending.generation === generation &&
       generation === this.generation
     ) {
-      this.fail("Speech result missed the voice-end plus one-second deadline");
+      this.late(this.pending);
     }
+  }
+
+  /** A late or 504 result drops that one utterance; the microphone keeps listening. */
+  private late(pending: Pending): void {
+    if (!this.isPending(pending)) return;
+    pending.abort.abort();
+    pending.settled = true;
+    this.snapshot = { ...this.snapshot, issue: LATE_RESULT_ISSUE };
+    this.completePending(pending);
   }
 
   private finishInvalidatedWhenIdle(): void {
@@ -462,16 +475,16 @@ export class SpeechClient {
   }
 }
 
+/** Case, punctuation and whitespace normalization only: never an alias or fuzzy match. */
 function canonicalSpell(text: string): SpeechSpell | null {
   const normalized = text
     .normalize("NFKC")
-    .trim()
     .toLocaleLowerCase("en-US")
-    .replace(/^[\s.,!?;:'"“”‘’]+|[\s.,!?;:'"“”‘’]+$/g, "")
-    .trim();
-  return SPELLS.has(normalized as SpeechSpell)
-    ? (normalized as SpeechSpell)
-    : null;
+    .split(/\s+/)
+    .map((word) => word.replace(/^[.,!?;:'"“”‘’-]+|[.,!?;:'"“”‘’-]+$/g, ""))
+    .filter((word) => word.length > 0)
+    .join(" ");
+  return INCANTATIONS.get(normalized) ?? null;
 }
 
 function pcm16(samples: Float32Array): ArrayBuffer {

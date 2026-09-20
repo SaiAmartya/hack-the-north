@@ -15,7 +15,7 @@ firmware route, and the organizers now publish an official
 **Teammate starting point:** build/backup/install instructions are in [Safe teammate setup](#safe-teammate-setup).
 For the laptop game and iPhone setup, start at the [repository README](../README.md).
 
-## 0.2.x — gameplay image (current source: 0.2.1)
+## 0.2.x — gameplay image (current source: 0.2.2)
 
 **What changed from the 0.1.x diagnostic images.** The badge boots straight into the contract's
 gameplay profile and advertises after **every** kind of reset:
@@ -52,6 +52,20 @@ gameplay profile and advertises after **every** kind of reset:
   (`txpower` persists another), 40–80 ms advertising, and an RTC-retained brownout count that delays
   the radio and lowers power after each brownout reset (reason 9). See
   [the change record](../docs/qa/firmware-0.2.0.md#021--battery-brownout-fix-flashed).
+- **0.2.2 seven-spell cue codes:** CUE `spell` accepts codes 4–7 (Incendio, Sectumsempra, Petrificus
+  Totalus, Expecto Patronum) with their own display names, TFT colours and LED colours; the display
+  hint no longer lists three moves. Contract section 5 documents the codes; the browser folds them
+  onto 1/3/2 for older firmware. The portable self-test pins "spell 7 accepted, spell 8 invalid".
+  **Flashed to WAND-46BA on September 19 (late evening)** with `badge_flash.py restore-boot` (that badge
+  still carried the PlatformIO bootloader from its earlier full-image 0.1.8 flash; the partition table
+  was already byte-identical to stock) followed by `badge_flash.py flash`: app image 688,032 bytes at
+  `0x10000`, SHA-256 `59ca598da2f4a3d8143e6d8f08a0465ced3c9d235ef4f6659798aa208150d630`, readback
+  identical; 658,009 bytes flash / 26,384 bytes static RAM. On-device `selftest`: 0 failures including
+  the new cue-code checks. `tools/wand_ble_check.py --name WAND-46BA --seconds 5`: all pass (INFO
+  0.2.2/caps 0x0F/50 Hz/±8 g, spell 7 cue accepted, spell 8 rejected, 259 frames at 49.5 Hz with zero
+  gaps or discontinuities, command RTT median 47 ms under load, rest reading x=−31 y=155 z=1042 mg).
+  Note: a BLE client that dies without disconnecting leaves `connections=1` on the badge and it drops
+  out of scans until a console `reboot` (or a replug).
 
 **Evidence so far (source-level, this Mac):** portable protocol golden vectors, the new continuity-policy
 test, the boot-profile/RTC test, axis-mapping and console-default tests all pass; PlatformIO build

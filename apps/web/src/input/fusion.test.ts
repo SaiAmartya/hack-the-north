@@ -74,7 +74,9 @@ describe("speech and gesture fusion", () => {
     expect(fusion.getState().pendingUtterance?.id).toBe("voice");
     expect(fusion.getState().lastRejection).toBe("");
 
-    fusion.advance(4_001);
+    fusion.advance(5_000);
+    expect(fusion.getState().pendingUtterance?.id).toBe("voice");
+    fusion.advance(5_001);
     expect(fusion.getState()).toMatchObject({
       pendingUtterance: undefined,
       lastRejection: "pending-evidence-expired",
@@ -82,7 +84,7 @@ describe("speech and gesture fusion", () => {
 
     fusion.pushGesture(gesture("gesture", "protego", 5_000, 5_400));
     expect(fusion.getState().pendingGesture?.id).toBe("gesture");
-    fusion.advance(8_001);
+    fusion.advance(9_001);
     expect(fusion.getState().lastRejection).toBe("pending-evidence-expired");
   });
 
@@ -123,7 +125,7 @@ describe("speech and gesture fusion", () => {
   it("enforces final deadline while accepting exact timing boundaries", () => {
     const attempts: CastAttempt[] = [];
     const fusion = new CastFusion((attempt) => attempts.push(attempt));
-    const late = utterance("late", "stupefy", 1_000, 1_400, 2_401);
+    const late = utterance("late", "stupefy", 1_000, 1_400, 2_901);
     finish(fusion, late);
     expect(fusion.getState().lastRejection).toBe(
       "utterance-final-missed-deadline",
@@ -134,7 +136,7 @@ describe("speech and gesture fusion", () => {
       "stupefy",
       4_000,
       4_500,
-      5_500,
+      6_000,
     );
     finish(fusion, boundaryVoice);
     fusion.pushGesture(

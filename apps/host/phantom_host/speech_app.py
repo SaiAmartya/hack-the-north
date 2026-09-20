@@ -26,8 +26,9 @@ SAMPLE_RATE = 16_000
 CHANNELS = 1
 MAX_PCM_BYTES = SAMPLE_RATE * 3 * 2
 MAX_PROXY_BYTES = 128 * 1024
-MAX_VOICE_MS = 1_800
-MAX_DEADLINE_MS = 1_000
+MAX_VOICE_MS = 2_200  # two-word incantations; matches the browser endpointer cap
+MAX_DEADLINE_MS = 1_500
+DEADLINE_MISS_LIMIT = 3  # consecutive misses before the worker declares itself unhealthy
 SECRET_ENV = "WAND_SPEECH_SECRET"
 MODEL_DIR_ENV = "WAND_SPEECH_MODEL_DIR"
 SECRET_HEADER = "x-wand-speech-secret"
@@ -36,8 +37,21 @@ MODEL_REPOSITORY = "Systran/faster-whisper-base.en"
 MODEL_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c"
 FASTER_WHISPER_VERSION = "1.2.1"
 MODEL_METADATA = ".wand-speech-model.json"
-GLOSSARY = "Stupefy. Protego. Expelliarmus."
-SPELLS = frozenset({"stupefy", "protego", "expelliarmus"})
+GLOSSARY = (
+    "Stupefy. Protego. Expelliarmus. Incendio. Sectumsempra. "
+    "Petrificus Totalus. Expecto Patronum."
+)
+# Exact spoken incantation (after normalization) -> game spell identifier.
+INCANTATIONS: dict[str, str] = {
+    "stupefy": "stupefy",
+    "protego": "protego",
+    "expelliarmus": "expelliarmus",
+    "incendio": "incendio",
+    "sectumsempra": "sectumsempra",
+    "petrificus totalus": "petrificus-totalus",
+    "expecto patronum": "expecto-patronum",
+}
+SPELLS = frozenset(INCANTATIONS.values())
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -77,6 +91,7 @@ class FasterWhisperEngine:
             compute_type="int8",
             local_files_only=True,
             num_workers=1,
+            cpu_threads=inference_threads(),
         )
 
     def transcribe(self, pcm: np.ndarray) -> str:
@@ -96,6 +111,15 @@ class FasterWhisperEngine:
         return " ".join(
             str(getattr(segment, "text", "")).strip() for segment in list(segments)
         ).strip()
+
+
+def inference_threads() -> int:
+    """Encoder threads for one greedy base.en pass.
+
+    Measured on a 12-logical-core laptop: default 0 -> ~620 ms, 8 -> ~510 ms, 12 -> ~600 ms
+    (hyper-thread contention). Half the logical cores plus two, clamped to 2..8.
+    """
+    return max(2, min(8, (os.cpu_count() or 4) // 2 + 2))
 
 
 class SpeechRuntime:
@@ -120,6 +144,8 @@ class SpeechRuntime:
         self._issue = "Speech model has not been loaded"
         self._warmup_ms: int | None = None
         self._load_warm_ms: int | None = None
+        self._deadline_misses = 0
+        self._last_inference_ms: int | None = None
         self._started = False
 
     @classmethod
@@ -164,6 +190,8 @@ class SpeechRuntime:
             warm = self._warm
             busy = self._busy
             issue = self._issue
+            deadline_misses = self._deadline_misses
+            last_inference_ms = self._last_inference_ms
         return {
             "status": "ok" if ready and warm and not issue else "unhealthy",
             "ready": ready,
@@ -180,6 +208,9 @@ class SpeechRuntime:
             "issue": issue,
             "warmupMs": self._warmup_ms,
             "loadWarmMs": self._load_warm_ms,
+            "deadlineMisses": deadline_misses,
+            "deadlineMissLimit": DEADLINE_MISS_LIMIT,
+            "lastInferenceMs": last_inference_ms,
         }
 
     async def transcribe(
@@ -257,14 +288,25 @@ class SpeechRuntime:
         self, future: Future[InferenceResult], deadline_budget_ms: int
     ) -> None:
         issue = ""
+        missed = False
+        inference_ms: int | None = None
         try:
             result = future.result()
-            if result.inference_ms > deadline_budget_ms:
-                issue = "Speech inference missed its caller deadline"
+            inference_ms = result.inference_ms
+            missed = result.inference_ms > deadline_budget_ms
         except Exception:
             issue = "Speech inference worker failed"
         with self._state:
             self._busy = False
+            self._last_inference_ms = inference_ms
+            if missed:
+                # One slow pass is a 504 for that utterance only; a run of them
+                # means the machine cannot keep up and the player must be told.
+                self._deadline_misses += 1
+                if self._deadline_misses >= DEADLINE_MISS_LIMIT:
+                    issue = "Speech inference missed its caller deadline"
+            elif not issue:
+                self._deadline_misses = 0
             if issue:
                 self._ready = False
                 self._issue = issue
@@ -325,7 +367,7 @@ def create_app(
         if voice_start < 0 or voice_end < voice_start:
             raise HTTPException(status_code=400, detail="Invalid voice interval")
         if voice_end - voice_start > MAX_VOICE_MS + 10:
-            raise HTTPException(status_code=400, detail="Voice interval exceeds 1.8 s")
+            raise HTTPException(status_code=400, detail="Voice interval exceeds 2.2 s")
         deadline_budget = integer_header(
             request, "x-wand-deadline-budget-ms", 1, MAX_DEADLINE_MS
         )
@@ -428,13 +470,14 @@ async def bounded_body(request: Request) -> bytes:
 
 
 def normalize_text(text: str) -> str:
-    normalized = unicodedata.normalize("NFKC", text).strip().casefold()
-    return normalized.strip(" \t\r\n.,!?;:'\"“”‘’")
+    """Case, punctuation and whitespace normalization only: never an alias or fuzzy match."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    words = [word.strip(".,!?;:'\"“”‘’-") for word in normalized.split()]
+    return " ".join(word for word in words if word)
 
 
 def canonical_spell(text: str) -> str | None:
-    normalized = normalize_text(text)
-    return normalized if normalized in SPELLS else None
+    return INCANTATIONS.get(normalize_text(text))
 
 
 app = create_app()

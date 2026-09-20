@@ -370,7 +370,7 @@ def main() -> int:
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not python.exists() or not npm: parser.error("Install the documented Python 3.11 environment and web dependencies first")
     env = os.environ.copy()
-    for name in ("WAND_HOST", "WAND_FRONTEND_HOST", "WAND_REFEREE_URL", "WAND_TLS_CERT", "WAND_TLS_KEY", "WAND_ALLOWED_ORIGINS", "WAND_ALLOW_REPLAY", "WAND_DEV_RELAY", "WAND_ENABLE_EXPELLIARMUS", "WAND_SPEECH_SECRET", "WAND_SPEECH_MODEL_DIR", "VITE_WAND_QA", "WAND_PHONE_SERVICE", "WAND_PHONE_CREATE_SECRET", "WAND_QA_PORTS", "WAND_GAME_BUILD_DIR"):
+    for name in ("WAND_HOST", "WAND_FRONTEND_HOST", "WAND_REFEREE_URL", "WAND_TLS_CERT", "WAND_TLS_KEY", "WAND_ALLOWED_ORIGINS", "WAND_ALLOW_REPLAY", "WAND_DEV_RELAY", "WAND_SPELLS", "WAND_SPEECH_SECRET", "WAND_SPEECH_MODEL_DIR", "VITE_WAND_QA", "WAND_PHONE_SERVICE", "WAND_PHONE_CREATE_SECRET", "WAND_QA_PORTS", "WAND_GAME_BUILD_DIR"):
         env.pop(name, None)
     env["WAND_SPEECH_SECRET"] = secrets.token_urlsafe(32)
     env["WAND_FRONTEND_HOST"] = args.phone_host or "127.0.0.1"

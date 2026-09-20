@@ -34,7 +34,7 @@ Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synt
 
 Use local rounded/system fonts only. Headings 25–34 px; body/control text 14–18 px. Buttons have 17 px corners, a 2 px border, a 4 px pressed edge and at least 44 px targets. Use a visible 3 px focus outline. Inputs have persistent labels.
 
-Author artwork in local SVG/CSS/Three.js. The wand illustration, lightning glyph, shield glyph and brass corners are original, simple shapes. No external font/image requests, copied crests, movie typography, mascots or asset service dependencies.
+Author artwork in local SVG/CSS/Three.js. The wand illustration, the seven spell glyphs (lightning, shield, ribbon, flame, slash, bound figure, ring) and brass corners are original, simple shapes. No external font/image requests, copied crests, movie typography, mascots or asset service dependencies.
 
 ## Duel composition
 

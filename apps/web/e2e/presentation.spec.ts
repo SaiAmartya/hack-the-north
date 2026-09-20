@@ -95,7 +95,7 @@ test("pooled spell renderer keeps stable resources through 100 cast cycles",asyn
     const {DuelEffects}=await import(/* @vite-ignore */effectsPath);
     const canvas=document.createElement("canvas");canvas.style.cssText="width:800px;height:500px;position:fixed;inset:0";document.body.append(canvas);
     let now=1000;const effects=new DuelEffects(canvas,()=>now);
-    const player=(slot:string)=>({slot,name:slot,source:"ble",connected:true,ready:true,inputHealthy:true,inputGeneration:1,deviceId:"x",bootId:1,hp:100,maxHp:100,shieldUntilMs:0,offenseLockedUntilMs:0,offensiveRecoveryUntilMs:0,cooldownUntilMs:{stupefy:0,protego:0,expelliarmus:0}});
+    const player=(slot:string)=>({slot,name:slot,source:"ble",connected:true,ready:true,inputHealthy:true,inputGeneration:1,deviceId:"x",bootId:1,hp:100,maxHp:100,shieldUntilMs:0,barrierUntilMs:0,offenseLockedUntilMs:0,boundUntilMs:0,burningUntilMs:0,castRecoveryUntilMs:0,cooldownUntilMs:{stupefy:0,protego:0,expelliarmus:0,incendio:0,sectumsempra:0,"petrificus-totalus":0,"expecto-patronum":0}});
     const snapshot:any={roomId:"main",roomGeneration:1,roundId:1,stateVersion:1,serverNowMs:now,phase:"playing",countdownEndsAtMs:null,roundEndsAtMs:61000,result:null,players:{P1:player("P1"),P2:player("P2")},projectiles:[],recentEvents:[]};
     effects.update(snapshot,"P1");await new Promise(requestAnimationFrame);const before=effects.resourceCounts();
     for(let n=0;n<100;n++){

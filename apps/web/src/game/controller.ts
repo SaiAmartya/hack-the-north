@@ -15,6 +15,7 @@ import { GameClient } from "./client";
 import { VideoLink } from "./video";
 import { CueEffect, PresentationPhase, SpellCode, StateStatusFlag, formatDeviceId } from "../wand/protocol";
 import type { Source } from "./contracts";
+import { CORE_SPELL_NAMES, SPELLS, spellTitle } from "./spells";
 
 export class DuelController {
   readonly game = new GameClient();
@@ -83,7 +84,7 @@ export class DuelController {
         this.notice = `${nameOf(attempt.spell)}!`;
         this.wand?.cue({
           effect: CueEffect.AcceptedCast,
-          spell: codeOf(attempt.spell),
+          spell: cueSpellCode(attempt.spell, this.wand.getSnapshot().info?.firmware),
           durationMs: 180,
           presentationEpoch: this.presentationEpoch,
         });
@@ -122,7 +123,13 @@ export class DuelController {
         this.notice =
           message.reason === "cooldown"
             ? "Spell recharging"
-            : "Spell not ready";
+            : message.reason === "bound"
+              ? "You are bound!"
+              : message.reason === "offense_locked"
+                ? "Disarmed!"
+                : message.reason === "cast_recovery"
+                  ? "Too soon"
+                  : "Spell not ready";
         this.noticeAt = performance.now();
         this.lastSpell = undefined;
         this.onChange();
@@ -432,9 +439,7 @@ export class DuelController {
       : motion.phase === "uncalibrated" ? "Find a comfortable grip. Start on the laptop."
       : motion.phase === "stillness" ? "Hold still"
       : motion.phase === "resuming" ? "Hold still for a moment"
-      : motion.calibratingSpell === "stupefy" ? "Jab forward, three times"
-      : motion.calibratingSpell === "protego" ? "Raise into a guard, hold, lower. Three times"
-      : motion.calibratingSpell === "expelliarmus" ? "Sweep sideways, three times"
+      : motion.calibratingSpell ? SPELLS[motion.calibratingSpell].calibration
       : motion.phase === "ready" ? "Move and speak your spell" : "Continue on the laptop";
     this.phoneSession?.coach({ instruction, completed: motion.calibratingSpell ? motion.examplesBySpell[motion.calibratingSpell] : 0,
       total: motion.calibratingSpell ? 3 : 0, hint: motion.lastIssue, diagnostics: this.motion.getDiagnostics() });
@@ -483,15 +488,19 @@ export class DuelController {
     this.onChange();
   }
   calibrate(spell: SpellName) {
-    this.practiced.clear();
+    // Relearning a core spell invalidates practice; adding an optional spell keeps it.
+    if (CORE_SPELL_NAMES.includes(spell)) this.practiced.clear();
     this.fusion.reset(this.generation);
     this.motion.beginGestureCalibration(spell);
     this.speech.setRecognitionEnabled(false);
     this.onChange();
   }
+  corePracticed() {
+    return CORE_SPELL_NAMES.every((spell) => this.practiced.has(spell));
+  }
   ready() {
     const info = this.wand?.getSnapshot().info;
-    if (!info || !this.healthy() || this.practiced.size < 2) return;
+    if (!info || !this.healthy() || !this.corePracticed()) return;
     this.game.send({
       type: "ready",
       ready: true,
@@ -554,8 +563,8 @@ export class DuelController {
         hp: own.hp,
         maxHp: own.maxHp,
         statusFlags:
-          (own.shieldUntilMs > this.game.now() ? StateStatusFlag.ShieldActive : 0) |
-          (own.offenseLockedUntilMs > this.game.now() ? StateStatusFlag.OffenseLocked : 0),
+          ((own.shieldUntilMs > this.game.now() || own.barrierUntilMs > this.game.now()) ? StateStatusFlag.ShieldActive : 0) |
+          ((own.offenseLockedUntilMs > this.game.now() || own.boundUntilMs > this.game.now()) ? StateStatusFlag.OffenseLocked : 0),
         presentationEpoch: this.presentationEpoch,
       };
       const key = JSON.stringify(feedback);
@@ -583,7 +592,7 @@ export class DuelController {
           ? CueEffect.AcceptedCast
           : event.type === "impactBlocked" && event.target === slot
             ? CueEffect.BlockedIncomingHit
-            : event.type === "damage" && event.target === slot
+            : ["damage", "burnDamage", "bodyBound"].includes(event.type) && event.target === slot
               ? CueEffect.TookDamage
               : event.type === "roundEnded"
                 ? CueEffect.RoundResult
@@ -591,7 +600,7 @@ export class DuelController {
       if (effect !== undefined)
         this.wand?.cue({
           effect,
-          spell: event.spell ? codeOf(event.spell) : SpellCode.None,
+          spell: event.spell ? cueSpellCode(event.spell, this.wand?.getSnapshot().info?.firmware) : SpellCode.None,
           durationMs: 180,
           presentationEpoch: this.presentationEpoch,
         });
@@ -650,11 +659,25 @@ async function createHostedPair(signal: AbortSignal): Promise<HostedPair> {
   return parseHostedPair(await brokerPost("/api/phone/pair", signal));
 }
 const stopTracks = (stream?: MediaStream) => stream?.getTracks().forEach((track) => track.stop());
-export const nameOf = (spell: SpellName) =>
-  spell[0].toUpperCase() + spell.slice(1);
-const codeOf = (spell: SpellName) =>
-  spell === "stupefy"
-    ? SpellCode.Stupefy
-    : spell === "protego"
-      ? SpellCode.Protego
-      : SpellCode.Expelliarmus;
+export const nameOf = (spell: SpellName) => spellTitle(spell);
+const SPELL_CODES: Record<SpellName, SpellCode> = {
+  stupefy: SpellCode.Stupefy,
+  protego: SpellCode.Protego,
+  expelliarmus: SpellCode.Expelliarmus,
+  incendio: SpellCode.Incendio,
+  sectumsempra: SpellCode.Sectumsempra,
+  "petrificus-totalus": SpellCode.PetrificusTotalus,
+  "expecto-patronum": SpellCode.ExpectoPatronum,
+};
+/** Firmware before 0.2.2 rejects cue spell codes above 3: fold new spells onto their family cue. */
+const LEGACY_SPELL_CODES: Record<SpellName, SpellCode> = {
+  ...SPELL_CODES,
+  incendio: SpellCode.Stupefy,
+  sectumsempra: SpellCode.Stupefy,
+  "petrificus-totalus": SpellCode.Expelliarmus,
+  "expecto-patronum": SpellCode.Protego,
+};
+export function cueSpellCode(spell: SpellName, firmware?: { major: number; minor: number; patch: number }): SpellCode {
+  const modern = !!firmware && (firmware.major > 0 || firmware.minor > 2 || (firmware.minor === 2 && firmware.patch >= 2));
+  return (modern ? SPELL_CODES : LEGACY_SPELL_CODES)[spell];
+}

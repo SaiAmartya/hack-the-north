@@ -29,8 +29,8 @@ export type CastFusionState = {
 };
 
 const MAX_INTERVAL_GAP_MS = 350;
-const MAX_UNION_MS = 2_000;
-const FINAL_DEADLINE_MS = 1_000;
+const MAX_UNION_MS = 2_500;
+const FINAL_DEADLINE_MS = 1_500; // mirrors MAX_RESULT_DELAY_MS in speech/client.ts
 const PENDING_TTL_MS = MAX_UNION_MS + FINAL_DEADLINE_MS;
 
 class BoundedIds {
