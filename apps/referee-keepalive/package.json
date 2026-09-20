@@ -1,0 +1,16 @@
+{
+  "name": "wandduel-referee-keepalive",
+  "private": true,
+  "type": "module",
+  "description": "Cron-triggered Cloudflare Worker that keeps the free Render referee awake",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --test-scheduled"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260919.1",
+    "typescript": "5.7.2",
+    "wrangler": "4.135.0"
+  }
+}

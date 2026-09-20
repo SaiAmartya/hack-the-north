@@ -1,0 +1,24 @@
+{
+  // Keeps the free Render referee awake: Render sleeps a free web service after 15 minutes
+  // without an inbound request, so this Worker fetches its health route every 10 minutes.
+  // An always-awake free service uses about 720-744 of the workspace's 750 monthly
+  // instance-hours, so it must stay the only free web service in that Render workspace.
+  // Deploy with `npm run deploy` (requires `wrangler login` on the team Cloudflare account).
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wandduel-referee-keepalive",
+  "account_id": "a692c9c2b82d15e9fc3c7bba88240b8b",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-19",
+  // No public URL: the Worker only runs on its schedule.
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  },
+  "vars": {
+    "REFEREE_HEALTH_URL": "https://wandduel-referee.onrender.com/api/game/health"
+  }
+}

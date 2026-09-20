@@ -224,14 +224,19 @@ another deployment from then on; `--local-referee` still overrides it.
 The referee is a Render **free web service**: 0.1 shared CPU, 512 MB, one instance, no card,
 no uptime guarantee. Checked against Render's documentation on September 19, 2026:
 
-- **It sleeps after 15 minutes without inbound traffic and takes about a minute to wake.**
-  While waking, requests get Render's loading page and WebSocket upgrades fail. The launcher
-  wakes it before printing `Game ready` and pings it every four minutes while a stack runs;
-  player heartbeats keep it awake during play. **Start both laptops' stacks at least two
-  minutes before a demo and leave them running.** Do not add external uptime pingers.
-- **750 instance-hours per month, counted only while awake.** Stacks that run only during
-  play use a few hours; an always-awake service would use the whole month, after which Render
-  suspends every free service until the next month.
+- **It would sleep after 15 minutes without inbound traffic and take about a minute to wake**,
+  so a keep-alive Worker ([`apps/referee-keepalive`](../apps/referee-keepalive/wrangler.jsonc),
+  a Cloudflare cron trigger on the team account) fetches its health route every ten minutes
+  and it normally never sleeps. If that Worker is ever removed, the launcher still copes: it
+  wakes the referee before printing `Game ready`, pings it every four minutes while a stack
+  runs, and player heartbeats keep it awake during play. Either way, **start both laptops'
+  stacks a couple of minutes before a demo and leave them running.**
+- **750 instance-hours per month, counted only while awake.** Kept awake around the clock the
+  referee uses about 720–744 of them, which fits, but only if it stays the **only free web
+  service in the Render workspace**; a second one would exhaust the pool and Render then
+  suspends every free service until the next month. Redeploy the keep-alive Worker with
+  `npm run deploy` in its directory after `wrangler login`; delete it in the Cloudflare
+  dashboard (Workers → wandduel-referee-keepalive) to let the referee sleep again.
 - **5 GB outbound per month.** A match is roughly 40 KB/s of snapshots, about 150 MB per hour
   of continuous play, so this covers tens of hours of matches. Nothing else is served from the
   referee. Exceeding it without a card on file suspends the service until next month.

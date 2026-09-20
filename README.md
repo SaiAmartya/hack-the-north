@@ -46,9 +46,9 @@ internet can duel. iPhone pairing is included once the phone defaults have been 
 (`--no-phone` or `--badge-only` skips them for a run). A previous stack started by the
 launcher is stopped automatically before the new one comes up.
 
-Wait for **Game ready: http://127.0.0.1:5173** (the deployed referee sleeps when idle and
-the first launch after a quiet spell waits about a minute for it), then open that exact URL in
-desktop Chrome; a tab typed as `localhost:5173` is redirected there. One player clicks
+Wait for **Game ready: http://127.0.0.1:5173** (a keep-alive job normally keeps the deployed
+referee awake; if it was asleep the first launch waits about a minute for it), then open that
+exact URL in desktop Chrome; a tab typed as `localhost:5173` is redirected there. One player clicks
 **Start a duel** and reads the six-character code to the other, who clicks **Join with code**;
 each then connects a badge or iPhone. One referee serves several duels at once, one per code.
 
