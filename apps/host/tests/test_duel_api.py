@@ -113,7 +113,49 @@ def test_join_codes_address_independent_rooms():
             assert welcome["snapshot"]["players"]["P2"]["name"] == "Ron"
 
 
-def test_referee_brokers_hosted_phone_pairing_for_phone_sessions_only():
+def test_session_without_code_creates_and_reserves_a_room_in_one_request():
+    app = create_app(DuelSettings(start_background_tick=False))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/game/session", headers=ORIGIN_HEADERS,
+            json={"name": "Harry", "source": "ble"},
+        )
+        assert response.status_code == 200
+        first = response.json()
+        code = first["roomId"]
+        assert len(code) == 6 and code.isalnum() and code.isupper()
+        assert first["slot"] == "P1" and len(app.state.duel_rooms) == 1
+        assert app.state.duel_rooms.room_for_code(code).has_sessions()
+        second = _session(client, "Ron", code=code)
+        assert second["slot"] == "P2" and second["roomId"] == code
+        assert len(app.state.duel_rooms) == 1
+        with client.websocket_connect("/ws/game", headers=ORIGIN_HEADERS) as game:
+            game.send_json({"v": 1, "type": "auth", "token": first["token"]})
+            welcome = game.receive_json()
+            assert welcome["roomId"] == welcome["snapshot"]["roomId"] == code
+
+
+@pytest.mark.parametrize("source", ["phone", "replay"])
+def test_failed_first_reservation_does_not_leak_rooms_or_consume_room_capacity(source):
+    from phantom_host.duel_registry import MAX_ROOMS
+
+    app = create_app(DuelSettings(start_background_tick=False))
+    with TestClient(app) as client:
+        for _ in range(MAX_ROOMS + 1):
+            rejected = client.post(
+                "/api/game/session", headers=ORIGIN_HEADERS,
+                json={"name": "Unavailable", "source": source, "code": None},
+            )
+            assert rejected.status_code == 403
+            assert len(app.state.duel_rooms) == 0
+        accepted = client.post(
+            "/api/game/session", headers=ORIGIN_HEADERS,
+            json={"name": "Wizard", "source": "ble"},
+        )
+        assert accepted.status_code == 200 and len(app.state.duel_rooms) == 1
+
+
+def test_referee_brokers_wand_first_pairing_and_preserves_legacy_session_auth():
     from phantom_host.duel_phone import PhoneSettings
 
     room = "d" * 32
@@ -135,9 +177,26 @@ def test_referee_brokers_hosted_phone_pairing_for_phone_sessions_only():
         start_background_tick=False,
         phone=PhoneSettings(service="https://phone.example", create_secret="s3cret"),
     )
-    with TestClient(create_app(settings, phone_fetch=fetch)) as client:
+    app = create_app(settings, phone_fetch=fetch)
+    with TestClient(app) as client:
         assert client.get("/api/game/health").json()["phoneBroker"] is True
-        assert client.post("/api/game/phone/pair", headers=ORIGIN_HEADERS).status_code == 401
+        assert client.post("/api/game/phone/pair").status_code == 403
+        assert client.post(
+            "/api/game/phone/pair", headers={"origin": "https://attacker.invalid"}
+        ).status_code == 403
+        standalone = client.post("/api/game/phone/pair", headers=ORIGIN_HEADERS)
+        assert standalone.status_code == 200 and standalone.json() == pair
+        assert len(app.state.duel_rooms) == 0
+        assert client.post(
+            "/api/game/phone/pair",
+            headers={**ORIGIN_HEADERS, "x-forwarded-for": "192.0.2.123"},
+        ).status_code == 429
+        with client.websocket_connect("/ws/game", headers=ORIGIN_HEADERS) as game:
+            game.send_json({"v": 1, "type": "auth", "token": pair["ownerToken"]})
+            assert game.receive_json()["code"] == "auth_failed"
+            with pytest.raises(WebSocketDisconnect):
+                game.receive_json()
+        assert len(app.state.duel_rooms) == 0
         assert client.post(
             "/api/game/phone/pair",
             headers={**ORIGIN_HEADERS, "authorization": "Bearer nobody-knows-this-token"},
@@ -159,7 +218,7 @@ def test_referee_brokers_hosted_phone_pairing_for_phone_sessions_only():
         )
         assert minted.status_code == 200, minted.text
         assert minted.json() == pair
-        assert calls == ["https://phone.example/api/rooms"]
+        assert calls == ["https://phone.example/api/rooms"] * 2
 
     with TestClient(create_app(DuelSettings(dev_relay_enabled=True, start_background_tick=False))) as client:
         assert client.get("/api/game/health").json()["phoneBroker"] is False
@@ -384,30 +443,36 @@ def test_heartbeat_timeout_closes_real_socket_at_exact_deadline():
         assert stored.connected is False
 
 
-def test_dev_relay_is_single_use_opaque_and_disconnect_bound():
+@pytest.mark.parametrize("standalone", [False, True])
+def test_dev_relay_is_single_use_opaque_and_owner_disconnect_bound(standalone):
     settings = DuelSettings(
         dev_relay_enabled=True,
         allow_replay=False,
         start_background_tick=False,
     )
-    with TestClient(create_app(settings)) as client:
-        session = _session(client, "Phone wand", source="phone")
-        pair_response = client.post(
-            "/api/game/pair",
-            headers={
-                **ORIGIN_HEADERS,
-                "authorization": f"Bearer {session['token']}",
-            },
-        )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        request_headers = dict(ORIGIN_HEADERS)
+        if not standalone:
+            session = _session(client, "Phone wand", source="phone")
+            request_headers["authorization"] = f"Bearer {session['token']}"
+        pair_response = client.post("/api/game/pair", headers=request_headers)
         assert pair_response.status_code == 200
         pair = pair_response.json()
         assert len(pair["code"]) >= 8
+        if standalone:
+            assert len(app.state.duel_rooms) == 0
+            with client.websocket_connect("/ws/game", headers=ORIGIN_HEADERS) as game:
+                game.send_json({"v": 1, "type": "auth", "token": pair["ownerToken"]})
+                assert game.receive_json()["code"] == "auth_failed"
+                with pytest.raises(WebSocketDisconnect):
+                    game.receive_json()
 
         with client.websocket_connect(
             "/ws/dev-wand", headers=ORIGIN_HEADERS
         ) as owner:
             owner.send_json(
-                {"v": 1, "type": "owner", "token": session["token"]}
+                {"v": 1, "type": "owner", "token": pair["ownerToken"]}
             )
             assert owner.receive_json() == {"v": 1, "type": "waiting", "role": "owner"}
 
@@ -454,6 +519,11 @@ def test_dev_relay_is_single_use_opaque_and_disconnect_bound():
                     "data": payload,
                 }
 
+                owner.close()
+                assert phone.receive_json()["code"] == "pair_disconnected"
+                with pytest.raises(WebSocketDisconnect):
+                    phone.receive_json()
+
         # The consumed code and disconnected pair cannot be reused.
         with client.websocket_connect(
             "/ws/dev-wand", headers=ORIGIN_HEADERS
@@ -464,6 +534,39 @@ def test_dev_relay_is_single_use_opaque_and_disconnect_bound():
             assert phone.receive_json()["code"] == "auth_failed"
             with pytest.raises(WebSocketDisconnect):
                 phone.receive_json()
+        with client.websocket_connect("/ws/dev-wand", headers=ORIGIN_HEADERS) as owner:
+            owner.send_json({"v": 1, "type": "owner", "token": pair["ownerToken"]})
+            assert owner.receive_json()["code"] == "auth_failed"
+        assert len(app.state.duel_rooms) == (0 if standalone else 1)
+
+
+def test_unclaimed_lan_pairings_are_bounded_and_expire_without_reserving_duels():
+    from phantom_host.duel_relay import MAX_PAIR_GRANTS, PAIR_TTL_MS
+
+    clock = {"now": 100}
+    settings = DuelSettings(dev_relay_enabled=True, start_background_tick=False)
+    app = create_app(settings, clock_ms=lambda: clock["now"])
+    with TestClient(app) as client:
+        assert client.post("/api/game/pair").status_code == 403
+        grants = []
+        for _ in range(MAX_PAIR_GRANTS):
+            response = client.post("/api/game/pair", headers=ORIGIN_HEADERS)
+            assert response.status_code == 200
+            grants.append(response.json())
+        assert len({grant["ownerToken"] for grant in grants}) == MAX_PAIR_GRANTS
+        assert len(app.state.duel_rooms) == 0
+        capped = client.post("/api/game/pair", headers=ORIGIN_HEADERS)
+        assert capped.status_code == 429 and capped.json()["detail"] == "too_many_pairs"
+        clock["now"] += PAIR_TTL_MS
+        assert client.post("/api/game/pair", headers=ORIGIN_HEADERS).status_code == 200
+        for message in (
+            {"v": 1, "type": "owner", "token": grants[0]["ownerToken"]},
+            {"v": 1, "type": "phone", "code": grants[0]["code"]},
+        ):
+            with client.websocket_connect("/ws/dev-wand", headers=ORIGIN_HEADERS) as socket:
+                socket.send_json(message)
+                assert socket.receive_json()["code"] == "auth_failed"
+        assert len(app.state.duel_rooms) == 0
 
 
 def test_relay_rejects_wrong_origin_even_when_enabled():

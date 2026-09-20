@@ -22,6 +22,7 @@ export class GameClient {
   connectionGeneration = 0;
   issue = "";
   private socket?: WebSocket;
+  private roomId = "";
   private offset?: number;
   private bestRtt = Infinity;
   private heartbeat?: ReturnType<typeof setInterval>;
@@ -62,11 +63,11 @@ export class GameClient {
       this.requests.delete(abort);
     }
   }
-  async connect(source: Source, code: string) {
+  async connect(source: Source, code?: string): Promise<void> {
     this.disconnect();
     const lifecycle = this.lifecycle;
     this.issue = "";
-    if (!ROOM_CODE_PATTERN.test(code))
+    if (code !== undefined && !ROOM_CODE_PATTERN.test(code))
       throw new Error("Enter the six-character duel code.");
     const abort = new AbortController();
     this.requests.add(abort);
@@ -84,7 +85,9 @@ export class GameClient {
             ? "This duel is full."
             : response.status === 404
               ? "No duel with that code."
-              : "Start the game server to connect.",
+              : response.status === 429
+                ? "Too many duels right now. Try again soon."
+                : "Start the game server to connect.",
         );
       session = await response.json();
     } finally {
@@ -92,15 +95,21 @@ export class GameClient {
     }
     if (
       typeof session.token !== "string" ||
-      !["P1", "P2"].includes(session.slot)
-    )
+      !["P1", "P2"].includes(session.slot) ||
+      typeof session.roomId !== "string" ||
+      !ROOM_CODE_PATTERN.test(session.roomId) ||
+      (code !== undefined && session.roomId !== code)
+    ) {
+      if (typeof session.token === "string") this.release(session.token);
       throw new Error("Invalid game session");
+    }
     if (lifecycle !== this.lifecycle) {
       this.release(session.token);
       throw new Error("Connection cancelled");
     }
     this.token = session.token;
     this.slot = session.slot;
+    this.roomId = session.roomId;
     if (!(await this.openSocket()))
       throw new Error(this.issue);
   }
@@ -174,8 +183,11 @@ export class GameClient {
           if (message.v !== 1) throw new Error("Unsupported game version");
           this.lastMessage = performance.now();
           if (message.type === "welcome") {
+            const snapshot = parseSnapshot(message.snapshot);
+            if (message.roomId !== this.roomId || snapshot.roomId !== this.roomId)
+              throw new Error("Unexpected duel room");
             this.rules = parseRules(message.rules);
-            this.snapshot = parseSnapshot(message.snapshot);
+            this.snapshot = snapshot;
             this.iceServers = parseIceServers(message.iceServers);
             this.connectionGeneration = message.connectionGeneration;
             this.offset = this.snapshot.serverNowMs - performance.now();
@@ -188,6 +200,7 @@ export class GameClient {
             resolve(true);
           } else if (message.type === "snapshot") {
             const next = parseSnapshot(message.snapshot);
+            if (next.roomId !== this.roomId) throw new Error("Unexpected duel room");
             if (
               !this.snapshot ||
               next.stateVersion >= this.snapshot.stateVersion
@@ -274,14 +287,13 @@ export class GameClient {
     }
     ws.send(JSON.stringify({ v: 1, ...message }));
   }
-  async pair(): Promise<{ code: string; expiresAtMs: number }> {
+  async pair(): Promise<{ code: string; expiresAtMs: number; ownerToken: string }> {
     const lifecycle = this.lifecycle,
       abort = new AbortController();
     this.requests.add(abort);
     try {
       const response = await fetch("/api/game/pair", {
         method: "POST",
-        headers: { Authorization: `Bearer ${this.token}` },
         signal: abort.signal,
       });
       if (!response.ok)
@@ -292,6 +304,7 @@ export class GameClient {
       if (lifecycle !== this.lifecycle) throw new Error("Pairing cancelled");
       if (
         typeof pair.code !== "string" ||
+        typeof pair.ownerToken !== "string" || pair.ownerToken.length < 32 ||
         !/^[A-Z0-9]{10}$/.test(pair.code) ||
         !Number.isFinite(pair.expiresAtMs)
       )
@@ -326,6 +339,7 @@ export class GameClient {
       ws.close();
     }
     this.token = "";
+    this.roomId = "";
     this.slot = undefined;
     this.snapshot = undefined;
     this.iceServers = [];

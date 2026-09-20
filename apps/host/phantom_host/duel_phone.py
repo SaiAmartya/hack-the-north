@@ -3,9 +3,9 @@
 The hosted phone service only mints a pairing room for a caller that presents the enrollment
 secret. Keeping that secret on every laptop meant a teammate's machine without it fell back to
 the old private-LAN profile ("trusted HTTPS setup"). With the secret configured on the deployed
-referee instead, any laptop pairs any iPhone: the browser asks the referee (authenticated by its
-own game session) and the referee talks to the phone service. The secret never reaches a laptop
-or the browser. The laptop's own broker, when its launcher holds the secret, still takes
+referee instead, any laptop pairs any iPhone before joining a duel: the browser asks through an
+origin-checked, rate-limited endpoint and the referee talks to the phone service. The secret
+never reaches a laptop or the browser. The laptop's own broker, when its launcher holds the secret, still takes
 precedence, so offline and LAN play keep working.
 """
 
@@ -162,7 +162,7 @@ class PhoneBroker:
         return self._settings.enabled
 
     async def pair(self, token: str) -> dict[str, Any]:
-        """Mint one pairing room for the session identified by `token`."""
+        """Mint one pairing room, rate-limited by session or requesting peer."""
 
         service, secret = self._settings.service, self._settings.create_secret
         if not service or not secret:
@@ -193,9 +193,9 @@ class PhoneBroker:
             raise RoomError("pair_unavailable", status_code=503) from None
         finally:
             self._in_flight.discard(token)
-        finished = self._clock_ms()
-        self._next_pair_ms = {
-            key: until for key, until in self._next_pair_ms.items() if until > finished
-        }
-        self._next_pair_ms[token] = finished + PAIR_COOLDOWN_MS
+            finished = self._clock_ms()
+            self._next_pair_ms = {
+                key: until for key, until in self._next_pair_ms.items() if until > finished
+            }
+            self._next_pair_ms[token] = finished + PAIR_COOLDOWN_MS
         return pair

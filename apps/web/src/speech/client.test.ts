@@ -115,7 +115,8 @@ describe("speech client lifecycle", () => {
     vi.unstubAllGlobals();
   });
 
-  it("calibrates, sends bounded raw PCM headers, and emits exact evidence", async () => {
+  it.each(["stupefy", "protego", "expelliarmus", "incendio", "episkey"])(
+    "calibrates, sends bounded raw PCM, and emits exact %s evidence", async (spell) => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
     const evidence: SpeechEvidence[] = [];
@@ -146,8 +147,8 @@ describe("speech client lifecycle", () => {
       Response.json({
         utteranceId,
         generation,
-        text: "Stupefy!",
-        spell: "stupefy",
+        text: `${spell.toUpperCase()}!`,
+        spell,
       }),
     );
     await flush();
@@ -155,7 +156,7 @@ describe("speech client lifecycle", () => {
     expect(evidence[0]).toMatchObject({
       id: utteranceId,
       generation,
-      spell: "stupefy",
+      spell,
     });
     expect(evidence[0].endMs).toBeLessThan(evidence[0].arrivedMs);
     expect(client.getSnapshot().phase).toBe("listening");

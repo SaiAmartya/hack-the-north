@@ -1,60 +1,35 @@
 # Wandduel design system
 
-The product is a game, not a development dashboard. A friendly wizard-school setup leads into a cinematic, video-first duel. Keep the clarity and tactile warmth of a language-learning app, with original magical artwork—not another product's mascot or franchise assets.
+An original 16-bit wizard duel with the clear diagonal composition of a handheld creature-battle RPG. Pixel characters and a moonlit castle courtyard are the game; technical tools stay in scripts or gated QA routes.
 
-## Player experience
+## Player flow
 
-One task per screen: **Start or join a duel → Connect wand → battle lobby → Ready → duel → rematch.** The lobby opens the moment the wand streams; the microphone is started for the player and one shared gesture profile serves everyone, so there is no calibration or practice screen. Ready still requires fresh input and a healthy microphone.
+**Pair wand → Start a duel or join with code → Ready → Battle → Result → Rematch.**
 
-Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synthetic replay is never a third way to play.
+The homepage offers Connect badge and Connect iPhone before any duel is created or any join code is requested. Pairing persists through room selection and rematches. No calibration or practice gate. The microphone starts after pairing; Ready requires fresh wand input and a healthy local microphone. Both badge and iPhone remain supported. Synthetic input is QA only.
 
-- **Connect badge** opens Chrome's chooser directly from the click; **Connect iPhone** shows one QR code, followed by a matching-number confirmation. QR URLs contain only the public rendezvous ID, never bearer capabilities. The optional LAN setup uses a short pairing code. Keep the phone screen focused on motion permission, connection and feedback.
-- Short heading, one primary action, optional necessary secondary action. No promotional hero paragraphs, sidebar, feature inventory, implementation notice or explanatory footer.
-- No “virtual transport,” simulated wand, replay, packet, clock, stage or firmware-engineering terminology in the player UI.
-- Coaching is brief and physical: “Hold your wand still,” “Three gentle jabs,” “Raise. Tilt. Hold.” Success appears only after observed input.
-- Show one actionable fault at a time. Device/profile incompatibility is a setup failure, never a cosmetic warning permitting play.
-- The phone has two essential, expiring player indicators: **Sensor active** (fresh finite acceleration) and **Reaching laptop** (laptop-confirmed accepted input). A small acceleration-responsive orb and synchronized coaching/example dots make movement visible. Optional **Connection details** reveals observed/received rate, age and last issue, with an explicit sanitized trace download. These are necessary input feedback, not a general debugging dashboard; no gyro claim.
-- The lobby announces each heard spell and accepted movement so a missed cast is explained, never silent. A diagnostic badge offers **Use iPhone**, not a futile reconnect loop. Direct Wi-Fi failure offers **Use internet connection** explicitly; never switch routes during a round.
-- Recommend a comfortable sideways/slightly diagonal grip with an angled illustration. Other consistent grips are valid; never demand portrait, screen-facing or top-edge-up. Coach return to the learned starting grip, not an absolute device axis. Screen rotation must not interrupt play.
-- Keep test routes behind `VITE_WAND_QA=1`; they are never linked from the game and are excluded from the default production bundle. Automated replay remains a regression tool, not a player feature.
+Phone pairing uses a public QR and matching-number confirmation, or the optional trusted LAN code. Bearer capabilities never appear in URLs. The phone remains focused on permission, fresh movement, connection and expiring feedback. Failed direct connection offers an explicit internet fallback. No automatic route switch in a round.
 
-## Visual foundations
+## Visual direction
 
-| Element | Treatment |
-| --- | --- |
-| Setup canvas | Warm paper `#f8f6ee`, generous empty space |
-| Primary ink | Deep plum `#29243d` |
-| Primary action | Violet `#7655d3`, darker solid bottom edge `#533a9b` |
-| Secondary surface | Ivory `#fffefb`, pale violet border |
-| Accent | Warm brass `#bf8b32`, sparse original stars |
-| Success | Muted teal, accompanied by a check or text |
-| Fault | Coral on pale coral, plain recovery copy |
-| Duel | Near-black `#15121f`, ivory type, restrained brass frame |
-| Spells | Crimson/white Stupefy, cyan/violet Protego, conditional gold/scarlet Expelliarmus |
+Original crisp pixel art, warm parchment, deep ink, burgundy player robes, teal rival robes, brass accents and an indigo moonlit courtyard. Local assets and system fonts only. Never copy franchise characters, crests or screenshots into the product.
 
-Use local rounded/system fonts only. Headings 25–34 px; body/control text 14–18 px. Buttons have 17 px corners, a 2 px border, a 4 px pressed edge and at least 44 px targets. Use a visible 3 px focus outline. Inputs have persistent labels.
+The homepage is a quiet split composition: one title and two wand choices beside a pixel courtyard vignette. No tagline, numbered steps, progress strip or decorative captions. Setup surfaces are warm parchment with squared double borders and hard offset shadows. Typography combines a local serif display face with a readable system monospace for the battle HUD. Keep prose short and controls at least 44 px high with visible keyboard focus.
 
-Author artwork in local SVG/CSS/Three.js. The wand illustration, lightning glyph, shield glyph and brass corners are original, simple shapes. No external font/image requests, copied crests, movie typography, mascots or asset service dependencies.
+## Battle composition
 
-## Duel composition
+- Back-facing player wizard stands lower-left; front-facing rival stands upper-right.
+- Rival HP panel upper-left; own HP panel lower-right. Numeric health accompanies a bar.
+- The clock and round appear in a compact arena heading.
+- Five non-clickable spell cards show names, damage/healing/effect and each cooldown. Always show the gesture; voice selects the spell. No global cooldown.
+- A short battle message reflects authoritative casts, blocks, hits, healing and result. Both players see the same server outcome from their own perspective.
+- Shield, disarm, healing and impact feedback target the correct sprite. Optional camera portraits stay secondary.
+- At 0 HP, show clear Victory or Defeat, both final HP values, and Rematch. Aborts and timed draws have distinct wording. Retain pairing while recovering.
 
-The opponent video fills the arena. Overlay a transparent Three.js effects canvas and a readable DOM HUD:
+The authoritative referee owns all health, shields, projectiles, cooldowns and results. Never preview an unconfirmed hit. Late snapshots restore current state without replaying completed effects.
 
-- opponent health top-centre; round clock top-left;
-- own health bottom-left; spell cooldown glyphs bottom-centre;
-- small mirrored self-preview bottom-right;
-- brief confirmed shield/hit/result labels, no metrics wall.
+## Access and performance
 
-Spell glyphs are informational, **not clickable cast buttons**. Casting requires movement and spoken incantation. All health, launches, shielding and results follow the authoritative referee; local detection never pretends a hit occurred.
+Respect reduced motion; convey critical effects with text as well as color. No fast flashing. Layout must work at desktop, narrow viewports and 200% zoom without horizontal scrolling. Use local assets, bounded effects and pooled Three.js resources. Rendering caps at 1920×1080; the internal low-quality renderer used by QA caps at 1280×720. Camera is optional and never required for a pixel duel.
 
-Use hand-authored emissive cores, curved ribbon trails, a translucent shield rim and confirmed impact ripples. No scene lighting, shadow maps, physics, video textures, bloom or postprocessing. Pool resources. Seek late events to server time; do not restart duplicate effects or replay old explosions from snapshots. Expired shields must immediately stop appearing protective.
-
-## Motion, access and performance
-
-Transitions last roughly 120–220 ms; small tactile presses, no layout jumps. Respect reduced-motion preferences and provide visible labels for time-critical events. Sound is optional and starts muted; never put spoken incantations in effects.
-
-Normal rendering caps at 1920×1080, low at 1280×720. Select quality before play. Test desktop, narrow screens, keyboard focus, 200% zoom, readable health/cooldowns, and renderer resource stability. Preserve face/HUD readability over decoration.
-
-## Review rule
-
-Keep engineering detail in script-driven QA, except the optional bounded input details above. Never hide a real gameplay failure to make the screen cleaner. Switching laptop tabs pauses input and aborts an active round while retaining the selected wand connection where available; return validates fresh input and requires a fresh Ready. A paused phone still requires a foreground Resume tap. Recovery clears interrupted examples/casts. Show microphone, wand and battle recovery in the lobby/result screen without requiring the player to pair again. Hardware qualification, acoustic accuracy and measured performance remain explicit reports outside the game.
+Switching away pauses input and aborts an active round. Return validates fresh input and requires a new Ready. A phone that was backgrounded requires a foreground Resume tap. Recovery explains one actionable problem at a time and must not make players choose the same wand again unnecessarily.

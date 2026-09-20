@@ -1,3 +1,4 @@
+import { SPELLS, type Spell } from "../game/contracts";
 import {
   SPEECH_SAMPLE_RATE,
   SpeechEndpoint,
@@ -5,7 +6,7 @@ import {
   type SpeechEndpointEvent,
 } from "./endpoint";
 
-export type SpeechSpell = "stupefy" | "protego" | "expelliarmus";
+export type SpeechSpell = Spell;
 export type SpeechPhase =
   | "off"
   | "starting"
@@ -84,11 +85,6 @@ type HelperResult = {
   spell: SpeechSpell | null;
 };
 
-const SPELLS = new Set<SpeechSpell>([
-  "stupefy",
-  "protego",
-  "expelliarmus",
-]);
 const MAX_RESULT_DELAY_MS = 1000;
 const MAX_PCM_BYTES = SPEECH_SAMPLE_RATE * 3 * 2;
 const FIRST_AUDIO_FRAME_TIMEOUT_MS = 2000;
@@ -469,7 +465,7 @@ function canonicalSpell(text: string): SpeechSpell | null {
     .toLocaleLowerCase("en-US")
     .replace(/^[\s.,!?;:'"“”‘’]+|[\s.,!?;:'"“”‘’]+$/g, "")
     .trim();
-  return SPELLS.has(normalized as SpeechSpell)
+  return SPELLS.some((spell) => spell === normalized)
     ? (normalized as SpeechSpell)
     : null;
 }

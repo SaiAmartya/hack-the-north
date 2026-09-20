@@ -11,8 +11,8 @@ export function flightPosition(
     0,
     Math.min(1, (now - launch) / Math.max(1, impact - launch)),
   );
-  const start = outgoing ? [0.18, 0.76] : [0.5, 0.46];
-  const end = outgoing ? [0.5, 0.46] : [0.5, 0.57];
+  const start = outgoing ? [0.32, 0.62] : [0.7, 0.42];
+  const end = outgoing ? [0.74, 0.44] : [0.26, 0.72];
   return {
     x:
       start[0] +
@@ -107,7 +107,7 @@ export class DuelEffects {
     }
     for (let i = 0; i < 2; i++) {
       const mesh = new THREE.Mesh(plane, shader(SHIELD, 0x85cfff));
-      mesh.scale.set(i === 0 ? 1.25 : 0.64, i === 0 ? 1.3 : 0.7, 1);
+      mesh.scale.set(i === 0 ? 0.58 : 0.46, i === 0 ? 1.1 : 0.85, 1);
       this.scene.add(mesh);
       this.shields.push(mesh);
     }
@@ -165,7 +165,15 @@ export class DuelEffects {
     };
     this.raf = requestAnimationFrame(render);
   }
-  update(state: Snapshot, slot: Slot) {
+  update(state: Snapshot | undefined, slot: Slot = "P1") {
+    if (!state) {
+      this.state = undefined;
+      this.round = -1;
+      this.seen.clear();
+      this.bursts = [];
+      for (const ripple of this.ripples) ripple.at = -Infinity;
+      return;
+    }
     this.slot = slot;
     if (state.roundId !== this.round || state.result?.outcome === "aborted") {
       this.round = state.roundId;
@@ -191,8 +199,8 @@ export class DuelEffects {
   }
   private event(event: GameEvent) {
     const incoming = event.target === this.slot;
-    const x = 0.5,
-      y = incoming ? 0.57 : 0.46;
+    const x = incoming ? 0.26 : 0.74,
+      y = incoming ? 0.72 : 0.44;
     if (event.type === "impactBlocked") {
       const ripple =
         this.ripples.find((r) => this.now() - r.at > 500) ?? this.ripples[0];
@@ -217,7 +225,12 @@ export class DuelEffects {
       const outgoing = p.caster === this.slot;
       const at = flightPosition(p.launchAtMs, p.impactAtMs, now, outgoing);
       head.position.copy(point(at.x, at.y));
-      const color = p.spell === "expelliarmus" ? 0xffca60 : 0xff335d;
+      const color =
+        p.spell === "expelliarmus"
+          ? 0xffca60
+          : p.spell === "incendio"
+            ? 0xff8539
+            : 0xff335d;
       (head.material as THREE.ShaderMaterial).uniforms.color.value.setHex(
         color,
       );
@@ -268,7 +281,7 @@ export class DuelEffects {
       const p =
         state?.players[i === 0 ? this.slot : this.slot === "P1" ? "P2" : "P1"];
       mesh.visible = !!p && p.shieldUntilMs > now && state?.phase === "playing";
-      mesh.position.copy(point(0.5, i === 0 ? 0.55 : 0.46));
+      mesh.position.copy(point(i === 0 ? 0.26 : 0.74, i === 0 ? 0.72 : 0.44));
       (mesh.material as THREE.ShaderMaterial).uniforms.time.value = this.reduce
         ? 0
         : now / 1000;

@@ -143,15 +143,14 @@ class DuelRoom:
         clock_ms: Callable[[], int],
         allow_phone: bool = False,
         allow_replay: bool = False,
-        expelliarmus_enabled: bool = False,
         room_id: str = "main",
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
         self.room_id = room_id
-        self.engine = DuelEngine(expelliarmus_enabled=expelliarmus_enabled)
-        self._rules = ruleset(expelliarmus_enabled=expelliarmus_enabled)
+        self.engine = DuelEngine()
+        self._rules = ruleset()
         self._sessions: dict[str, PlayerSession] = {}
         self._slots: dict[Slot, PlayerSession] = {}
         self._lock = asyncio.Lock()
@@ -688,7 +687,6 @@ class DuelRoom:
                 hp=combat.hp,
                 shield_until_ms=combat.shield_until_ms,
                 offense_locked_until_ms=combat.offense_locked_until_ms,
-                offensive_recovery_until_ms=combat.offensive_recovery_until_ms,
                 cooldown_until_ms={
                     spell.value: combat.cooldown_until_ms.get(spell, 0)
                     for spell in Spell

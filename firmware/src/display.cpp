@@ -80,7 +80,7 @@ void clear_to(Screen s) {
 
 const char *phase_text(uint8_t p) {
   switch (p) {
-    case proto::PH_PRACTICE: return "PRACTICE";
+    case proto::PH_PRACTICE: return "WAND READY";
     case proto::PH_COUNTDOWN: return "GET READY";
     case proto::PH_PLAYING: return "DUEL";
     case proto::PH_WON: return "VICTORY";

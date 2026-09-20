@@ -1,71 +1,68 @@
 # Wandduel — badge or iPhone + local voice
 
-A two-player, motion-and-voice duel: React/Three.js presentation, a Python referee,
-video-only WebRTC and local speech recognition on each laptop. No button casting,
-cloud ASR, serial gameplay gateway or badge IDE dependency.
+A two-player, motion-and-voice duel with an original pixel arena: your wizard faces a rival,
+five spells have independent cooldowns, and a Python referee owns health, effects and results.
+Speech stays on each laptop; optional video-only WebRTC supplies small player portraits.
 
-**This is an incomplete development checkpoint, not a qualified demo release.**
-The iPhone path has direct-first Wi-Fi, explicit Internet fallback, visible sensing and
-player-started grip calibration. The gesture detector is now **v3**: a Wii-remote style segmenter
-(a movement starts on a sharp change and ends when the wand is still again, in whatever pose it
-ended up) with per-player jab/guard templates; it calibrates and recognizes the recorded iPhone jabs
-that v2 rejected. Badge firmware **0.2.0** was the first gameplay image: 50 Hz/±8 g by default, radio
-on after every reset, and the sensor overwrite flag no longer marks every sample discontinuous.
-The current source, **0.2.1**, adds the battery brownout soft start; it is flashed on WAND-B602
-(readback verified) and awaiting the physical QA card; see [the 0.2.x change record](docs/qa/firmware-0.2.0.md).
-The browser reconnects a dropped badge link automatically (bounded) and no longer drops the wand on a
-short page stall. An intermittent Internet-relay freshness failure remains open.
-See [current implementation and measured evidence](docs/qa/input-rebuild.md).
+**Final-sprint features require the new local referee.** The pre-existing deployed referee
+has not been updated. The launcher still defaults to that older deployment, so use
+`--local-referee` explicitly. Two laptops must share one new referee using the
+[LAN instructions](docs/TEAM-SETUP.md#4-two-laptops-sharing-the-new-referee).
+No remote rollout or firmware flash is part of this sprint. See the
+[final-sprint evidence and remaining physical checks](docs/qa/final-sprint.md).
 
 - **[Start here: teammate setup](docs/TEAM-SETUP.md)** — fresh-clone macOS/Windows install,
-  local speech, iPhone connection, multiplayer over the internet, checks and troubleshooting.
-- **[Badge build, backup and flash instructions](firmware/README.md)** — 0.2.1 gameplay image (current source), flashed on WAND-B602, physical QA pending.
+  local speech, wand-first connection, shared-referee multiplayer, checks and troubleshooting.
+- **[Badge build, backup and flash instructions](firmware/README.md)** — 0.3.0 source adds five-spell feedback; flashing and physical verification are still manual.
 - [MVP](MVP-OUTLINE.md) · [Implementation plan](IMPLEMENTATION-PLAN.md) · [Firmware contract](BADGE-FIRMWARE-CONTRACT.md)
 - [Design system](DESIGN_SYSTEMS.md) · [Repository workflow skill](.agents/skills/wand-dev-workflow/SKILL.md)
 
 ## Run an already installed checkout
 
 From the repository root, with Node **26.5.0** on PATH and the Python **3.11** environment
-installed, one command starts everything you need to play, including multiplayer:
+installed, start the frontend, local speech helper and new referee:
 
 ```sh
-apps/host/.venv/bin/python tools/run_game.py
+python3 tools/run_game.py --local-referee
 ```
 
 Windows PowerShell:
 
 ```powershell
-.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py
+.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --local-referee
 ```
 
-That starts the game frontend and the local speech helper on this laptop (the pinned
-transcription model is downloaded on first use if it is missing) and connects them to the
-team's deployed referee, `https://wandduel-referee.onrender.com`, so any two laptops with
-internet can duel. iPhone pairing needs nothing else on the laptop: the deployed referee
-brokers the pairing service, so any laptop pairs any iPhone from the QR code. (The old
-`--save-defaults --phone-service <origin> --phone-secret-file <file>` setup is only for
-`--local-referee` play; `--no-phone` or `--badge-only` skip it.) A previous stack started by
-the launcher is stopped automatically before the new one comes up.
+The launcher uses the installed Python environment and provisions the pinned speech model
+on first use if needed. Sai's laptop already has approved phone-service defaults saved;
+other laptops follow [phone setup](docs/TEAM-SETUP.md#3-connect-an-iphone), or use a badge.
+A previous stack started by the launcher is stopped automatically before the new one comes up.
 
-Wait for **Game ready: http://127.0.0.1:5173** (a keep-alive job normally keeps the deployed
-referee awake; if it was asleep the first launch waits about a minute for it), then open that
-exact URL in desktop Chrome; a tab typed as `localhost:5173` is redirected there. One player clicks
-**Start a duel** and reads the six-character code to the other, who clicks **Join with code**;
-each then connects a badge or iPhone. One referee serves several duels at once, one per code.
-A paired wand lands straight in the battle lobby: the microphone starts for you and the
-recognizer uses one shared gesture profile (any firm jab is Stupefy, any held raise is Protego),
-so there is no calibration or practice step. Ready still requires healthy wand and microphone
-input, and every cast requires speech and movement.
-Switching laptop tabs pauses an active duel while retaining the wand connection where available;
-returning validates fresh input before a new Ready. See [multiplayer checks and remaining work](docs/qa/multiplayer-entry.md).
+Wait for **Game ready: http://127.0.0.1:5173**, then open that exact URL in desktop Chrome;
+a tab typed as `localhost:5173` is redirected there. **Pair a badge or iPhone first.** Only
+after the wand connects can one player create a duel and the other enter its six-character
+code. Both players must use the same referee; separate loopback referees cannot share a room.
+Allow the laptop microphone, hold the wand comfortably still briefly, and give the microphone
+two seconds of quiet while its automatic setup completes. The shared gesture profile
+re-anchors from stillness; Ready requires healthy wand and microphone input.
 
-`--local-referee` runs the referee on this laptop instead: use it offline, for the LAN setup
-in the guide, or for scripted QA. The stable build does not hot-reload; restart after changing
-source. **Ctrl+C** stops the stack. Phone setup, the LAN alternative, Render's limits and the
-demo checklist are in [the setup guide](docs/TEAM-SETUP.md).
+Say the exact spell name while making the movement. There are no spell buttons and no shared
+cooldown between different moves:
 
-Badge firmware 0.2.1 is flashed on WAND-B602 and awaiting its physical QA card; the iPhone
-path is the parallel physical option. Neither physical path is qualified for a demo yet.
+| Spell | Movement | Result | Cooldown |
+| --- | --- | --- | --- |
+| Stupefy | Firm jab | 20 damage | 2 s |
+| Protego | Raise and hold | Block one hit within 1.2 s | 3 s |
+| Expelliarmus | Firm jab | 10 damage and 1 s offensive lock | 6 s |
+| Incendio | Firm jab | 30 damage | 8 s |
+| Episkey | Raise and hold | Restore up to 18 HP | 12 s |
+
+Healing is capped at 100 HP; attempting it at full health spends no cooldown. A disarmed
+wizard can still shield or heal. Reaching 0 HP ends the duel; at 60 seconds, higher HP wins
+and equal HP draws. Simultaneous knockouts can also draw.
+
+Switching laptop tabs aborts an active round while retaining the wand where available;
+returning validates fresh input before a new Ready. The stable build does not hot-reload;
+restart after source changes. **Ctrl+C** stops the stack.
 
 ## Scripted QA
 
@@ -79,8 +76,8 @@ Windows: `.\apps\host\.venv\Scripts\python.exe .\tools\qa_game.py`.
 The suite uses isolated loopback ports `15173`/`18000`, so the live game on
 `5173`/`8000` can remain running. Synthetic controls stay in the test harness.
 Tests do not certify physical microphones, iPhones, badges, batteries, Windows performance
-or two-human play. The [current evidence report](docs/qa/input-rebuild.md) records exact
-results and open gates; [older platform results](docs/qa/game-platform.md) are historical.
+or two-human play. The [final-sprint report](docs/qa/final-sprint.md) records current results
+and open gates; [older platform results](docs/qa/game-platform.md) are historical.
 
 ---
 

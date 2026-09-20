@@ -28,7 +28,6 @@ COUNTDOWN_MS = 3_000
 ROUND_MS = 60_000
 HEARTBEAT_TIMEOUT_MS = 1_500
 MAX_HP = 100
-OFFENSIVE_RECOVERY_MS = 600
 RECENT_EVENT_LIMIT = 64
 EVIDENCE_LIMIT = 256
 
@@ -38,6 +37,7 @@ class SpellRule:
     enabled: bool
     damage: int
     cooldown_ms: int
+    heal: int = 0
     flight_ms: int = 0
     shield_ms: int = 0
     offense_lock_ms: int = 0
@@ -51,25 +51,28 @@ SPELL_RULES: dict[Spell, SpellRule] = {
         enabled=True, damage=0, cooldown_ms=3_000, shield_ms=1_200
     ),
     Spell.EXPELLIARMUS: SpellRule(
-        enabled=False,
+        enabled=True,
         damage=10,
         cooldown_ms=6_000,
         flight_ms=2_200,
         offense_lock_ms=1_000,
     ),
+    Spell.INCENDIO: SpellRule(
+        enabled=True, damage=30, cooldown_ms=8_000, flight_ms=2_400
+    ),
+    Spell.EPISKEY: SpellRule(
+        enabled=True, damage=0, heal=18, cooldown_ms=12_000
+    ),
 }
 
 
-def ruleset(*, expelliarmus_enabled: bool = False) -> RulesetWire:
+def ruleset() -> RulesetWire:
     spells = tuple(
         SpellRuleWire(
             spell=spell,
-            enabled=(
-                expelliarmus_enabled
-                if spell is Spell.EXPELLIARMUS
-                else rule.enabled
-            ),
+            enabled=rule.enabled,
             damage=rule.damage,
+            heal=rule.heal,
             cooldown_ms=rule.cooldown_ms,
             flight_ms=rule.flight_ms,
             shield_ms=rule.shield_ms,
@@ -86,7 +89,6 @@ class CombatPlayer:
     ready: bool = False
     shield_until_ms: int = 0
     offense_locked_until_ms: int = 0
-    offensive_recovery_until_ms: int = 0
     cooldown_until_ms: dict[Spell, int] = field(default_factory=dict)
 
 
@@ -94,7 +96,7 @@ class CombatPlayer:
 class Projectile:
     id: str
     action_id: str
-    spell: Literal[Spell.STUPEFY, Spell.EXPELLIARMUS]
+    spell: Literal[Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO]
     caster: Slot
     target: Slot
     launch_at_ms: int
@@ -161,8 +163,7 @@ class CommandDecision:
 class DuelEngine:
     """One-room state machine with deterministic IDs and explicit time."""
 
-    def __init__(self, *, expelliarmus_enabled: bool = False) -> None:
-        self.expelliarmus_enabled = expelliarmus_enabled
+    def __init__(self) -> None:
         self.room_generation = 1
         self.round_id = 0
         self.state_version = 0
@@ -425,7 +426,6 @@ class DuelEngine:
             player.ready = True
             player.shield_until_ms = 0
             player.offense_locked_until_ms = 0
-            player.offensive_recovery_until_ms = 0
             player.cooldown_until_ms.clear()
             self._seen_evidence[slot].clear()
             self._evidence_order[slot].clear()
@@ -446,27 +446,18 @@ class DuelEngine:
         self._remember_evidence(command)
 
         rule = SPELL_RULES[command.spell]
-        enabled = (
-            self.expelliarmus_enabled
-            if command.spell is Spell.EXPELLIARMUS
-            else rule.enabled
-        )
-        if not enabled:
+        if not rule.enabled:
             return self._cast_reject(command, "spell_disabled")
         if command.at_ms < player.cooldown_until_ms.get(command.spell, 0):
             return self._cast_reject(command, "cooldown")
-        if command.spell is not Spell.PROTEGO:
+        if rule.damage:
             if command.at_ms < player.offense_locked_until_ms:
                 return self._cast_reject(command, "offense_locked")
-            if command.at_ms < player.offensive_recovery_until_ms:
-                return self._cast_reject(command, "offensive_recovery")
+        if rule.heal and player.hp == MAX_HP:
+            return self._cast_reject(command, "full_health")
 
         action_id = self._next_action_id()
         player.cooldown_until_ms[command.spell] = command.at_ms + rule.cooldown_ms
-        if command.spell is not Spell.PROTEGO:
-            player.offensive_recovery_until_ms = (
-                command.at_ms + OFFENSIVE_RECOVERY_MS
-            )
 
         self._event(
             "castAccepted",
@@ -494,12 +485,32 @@ class DuelEngine:
                 action_id=action_id,
             )
 
+        if command.spell is Spell.EPISKEY:
+            amount = min(rule.heal, MAX_HP - player.hp)
+            player.hp += amount
+            self._event(
+                "healed",
+                command.at_ms,
+                actor=command.slot,
+                target=command.slot,
+                spell=command.spell,
+                action_id=action_id,
+                effect_id=self._next_effect_id(),
+                amount=amount,
+            )
+            return CommandDecision(
+                command_id=command.command_id,
+                command="cast",
+                accepted=True,
+                action_id=action_id,
+            )
+
         projectile_id = self._next_projectile_id()
         target = Slot.P2 if command.slot is Slot.P1 else Slot.P1
         projectile = Projectile(
             id=projectile_id,
             action_id=action_id,
-            spell=command.spell,  # type: ignore[arg-type]
+            spell=command.spell,
             caster=command.slot,
             target=target,
             launch_at_ms=command.at_ms,

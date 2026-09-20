@@ -96,6 +96,10 @@ async def test_broker_mints_with_the_secret_only_server_side_and_rate_limits_per
     with pytest.raises(RoomError) as down:
         await broker.pair("token-a")
     assert down.value.code == "pair_unavailable" and down.value.status_code == 503
+    with pytest.raises(RoomError) as retry:
+        await broker.pair("token-a")
+    assert retry.value.code == "pair_busy" and len(calls) == 3
+    clock["now"] += PAIR_COOLDOWN_MS
     with pytest.raises(RoomError) as junk:
         await broker.pair("token-a")
     assert junk.value.code == "pair_unavailable"

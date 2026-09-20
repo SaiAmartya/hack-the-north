@@ -3,6 +3,7 @@ import { DuelController } from "./controller";
 import { SpeechClient, type SpeechOnset } from "../speech/client";
 import { WandClient } from "../wand/client";
 import { GameClient } from "./client";
+import { PresentationPhase } from "../wand/protocol";
 
 class FakeWebSocket {
   static readonly OPEN = 1;
@@ -192,7 +193,7 @@ it("pairs through the referee when this laptop holds no phone secret", async () 
   expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/phone/config", "/api/game/health", "/api/game/phone/pair"]);
   const pairRequest = fetchMock.mock.calls[2][1] as RequestInit;
   expect(pairRequest.method).toBe("POST");
-  expect((pairRequest.headers as Record<string, string>).Authorization).toBe("Bearer game-token-xxxxxxxxxxxxxxxxxxxxx");
+  expect(pairRequest.headers).toBeUndefined();
   expect(controller.phoneHosted).toBe(true);
   expect(controller.phoneUrl).toBe(pair.phoneUrl);
   expect(FakeWebSocket.instances[0].url).toBe(pair.socketUrl);
@@ -233,6 +234,7 @@ it("keeps the trusted-LAN code flow when neither this laptop nor the referee bro
   vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
   vi.spyOn(GameClient.prototype, "pair").mockResolvedValue({
     code: "ABCDEFGHIJ",
+    ownerToken: "test-wand-owner-token-".padEnd(32, "x"),
     expiresAtMs: 60_000,
   });
   const controller = new DuelController();
@@ -351,5 +353,34 @@ it("re-establishes the referee session when a badge retry succeeds after an init
   await controller.retryWand();
   expect(gameConnect).toHaveBeenCalledWith("ble", "K7X2PD");
   expect(controller.busy).toBe(false);
+  controller.destroy();
+});
+
+
+it("a paired wand receives ready feedback before creating a room and after leaving one", async () => {
+  vi.spyOn(WandClient.prototype, "onSample").mockImplementation(() => () => {});
+  vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
+  const snapshot = WandClient.prototype.getSnapshot;
+  vi.spyOn(WandClient.prototype, "getSnapshot").mockImplementation(function (this: WandClient) {
+    return { ...snapshot.call(this), phase: "streaming" };
+  });
+  const feedback = vi.spyOn(WandClient.prototype, "setState").mockImplementation(() => {});
+  const gameConnect = vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
+  vi.spyOn(SpeechClient.prototype, "start").mockResolvedValue();
+  vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
+  const controller = new DuelController();
+  await controller.connect("ble");
+  vi.advanceTimersByTime(100);
+  expect(gameConnect).not.toHaveBeenCalled();
+  expect(controller.roomCode).toBe("");
+  expect(feedback).toHaveBeenLastCalledWith(expect.objectContaining({ phase: PresentationPhase.Practice, hp: 100, statusFlags: 0 }));
+  const epoch = feedback.mock.calls.at(-1)![0].presentationEpoch;
+  const disconnect = vi.spyOn(controller.wand!, "disconnect");
+  controller.roomCode = "K7X2PD";
+  controller.leaveRoom();
+  vi.advanceTimersByTime(100);
+  expect(disconnect).not.toHaveBeenCalled();
+  expect(feedback.mock.calls.at(-1)![0].presentationEpoch).not.toBe(epoch);
+  expect(feedback.mock.calls.at(-1)![0].phase).toBe(PresentationPhase.Practice);
   controller.destroy();
 });

@@ -26,7 +26,6 @@ from phantom_host.duel_models import (
     HealthResponse,
     HeartbeatMessage,
     LeaveMessage,
-    PairResponse,
     ReadyMessage,
     RELAY_AUTH_ADAPTER,
     RELAY_OWNER_MESSAGE_ADAPTER,
@@ -74,7 +73,6 @@ class DuelSettings:
     allowed_origins: frozenset[str] = DEFAULT_ALLOWED_ORIGINS
     dev_relay_enabled: bool = False
     allow_replay: bool = False
-    expelliarmus_enabled: bool = False
     start_background_tick: bool = True
     ice: IceSettings = IceSettings()
     phone: PhoneSettings = PhoneSettings()
@@ -98,9 +96,6 @@ class DuelSettings:
             allowed_origins=origins,
             dev_relay_enabled=_environment_flag("WAND_DEV_RELAY"),
             allow_replay=_environment_flag("WAND_ALLOW_REPLAY"),
-            expelliarmus_enabled=_environment_flag(
-                "WAND_ENABLE_EXPELLIARMUS"
-            ),
             ice=IceSettings.from_environment(),
             phone=PhoneSettings.from_environment(),
         )
@@ -119,7 +114,6 @@ def create_app(
         clock_ms=active_clock,
         allow_phone=active_settings.dev_relay_enabled,
         allow_replay=active_settings.allow_replay,
-        expelliarmus_enabled=active_settings.expelliarmus_enabled,
     )
     relay = DevWandRelay(
         clock_ms=active_clock,
@@ -160,7 +154,7 @@ def create_app(
 
     @app.get("/api/game/rules")
     async def game_rules():
-        return ruleset(expelliarmus_enabled=active_settings.expelliarmus_enabled)
+        return ruleset()
 
     @app.post("/api/game/room", response_model=RoomResponse)
     async def create_room(request: Request) -> RoomResponse:
@@ -179,11 +173,10 @@ def create_app(
         request: Request,
     ) -> SessionResponse:
         _require_origin(request.headers.get("origin"), active_settings)
-        room = registry.room_for_code(payload.code)
-        if room is None:
-            raise HTTPException(status_code=404, detail="room_not_found")
         try:
-            return await room.create_session(name=payload.name, source=payload.source)
+            return await registry.create_session(
+                name=payload.name, source=payload.source, code=payload.code
+            )
         except RoomError as error:
             raise HTTPException(
                 status_code=error.status_code,
@@ -214,15 +207,18 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        """Mint a hosted phone pairing room for a phone session; the secret stays on this referee."""
+        """Pair a wand before room selection; the enrollment secret stays on the referee."""
 
         _require_origin(request.headers.get("origin"), active_settings)
-        token = _bearer_token(authorization)
-        session = registry.session_for_token(token)
-        if session is None:
-            raise HTTPException(status_code=401, detail="invalid_token")
-        if session.source is not Source.PHONE:
-            raise HTTPException(status_code=409, detail="phone_source_required")
+        if authorization:
+            token = _bearer_token(authorization)
+            session = registry.session_for_token(token)
+            if session is None:
+                raise HTTPException(status_code=401, detail="invalid_token")
+            if session.source is not Source.PHONE:
+                raise HTTPException(status_code=409, detail="phone_source_required")
+        else:
+            token = f"wand:{request.client.host if request.client else 'unknown'}"
         try:
             return await phone.pair(token)
         except RoomError as error:
@@ -231,23 +227,26 @@ def create_app(
                 detail=error.code,
             ) from None
 
-    @app.post("/api/game/pair", response_model=PairResponse)
+    @app.post("/api/game/pair")
     async def create_pair(
         request: Request,
         authorization: str | None = Header(default=None),
-    ) -> PairResponse:
+    ) -> dict[str, Any]:
         _require_origin(request.headers.get("origin"), active_settings)
         if not active_settings.dev_relay_enabled:
             raise HTTPException(status_code=404, detail="dev_relay_disabled")
-        token = _bearer_token(authorization)
+        token = _bearer_token(authorization) if authorization else None
         try:
-            code, expires_at_ms = await relay.create_grant(token)
+            if token is None:
+                token, code, expires_at_ms = await relay.create_standalone_grant()
+            else:
+                code, expires_at_ms = await relay.create_grant(token)
         except RoomError as error:
             raise HTTPException(
                 status_code=error.status_code,
                 detail=error.code,
             ) from None
-        return PairResponse(code=code, expires_at_ms=expires_at_ms)
+        return {"code": code, "expiresAtMs": expires_at_ms, "ownerToken": token}
 
     @app.websocket("/ws/game")
     async def game_socket(websocket: WebSocket) -> None:

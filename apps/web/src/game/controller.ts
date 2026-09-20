@@ -8,13 +8,19 @@ import {
   type HostedClaim,
   type HostedPair,
 } from "../phone/relay";
-import { MotionRecognizer, type SpellName } from "../input/motion";
+import { MotionRecognizer } from "../input/motion";
 import { CastFusion } from "../input/fusion";
 import { SpeechClient } from "../speech/client";
 import { GameClient, ROOM_CODE_PATTERN, normalizeRoomCode } from "./client";
 import { VideoLink } from "./video";
-import { CueEffect, PresentationPhase, SpellCode, StateStatusFlag, formatDeviceId } from "../wand/protocol";
-import type { Source } from "./contracts";
+import {
+  CueEffect,
+  PresentationPhase,
+  SpellCode,
+  StateStatusFlag,
+  formatDeviceId,
+} from "../wand/protocol";
+import type { Source, Spell } from "./contracts";
 
 export class DuelController {
   readonly game = new GameClient();
@@ -40,7 +46,7 @@ export class DuelController {
   localVideo?: MediaStream;
   remoteVideo?: MediaStream;
   cameraIssue = "";
-  lastSpell?: SpellName;
+  lastSpell?: Spell;
   lastSpellAt = 0;
   renderingReady = false;
   private peer: VideoLink;
@@ -123,7 +129,11 @@ export class DuelController {
         this.notice =
           message.reason === "cooldown"
             ? "Spell recharging"
-            : "Spell not ready";
+            : message.reason === "full_health"
+              ? "Your health is already full"
+              : message.reason === "offense_locked"
+                ? "Disarmed — defend or heal"
+                : "Spell not ready";
         this.noticeAt = performance.now();
         this.lastSpell = undefined;
         this.onChange();
@@ -171,12 +181,20 @@ export class DuelController {
     this.syncInputState();
     this.issue = "";
     this.autoStartMic();
-    if (this.game.issue || (wand?.getSnapshot().phase === "streaming" && !this.game.snapshot))
+    if (
+      this.game.issue ||
+      (wand?.getSnapshot().phase === "streaming" && !this.game.snapshot)
+    )
       await this.reconnectBattle();
     this.onChange();
   }
   private sendUnhealthyHeartbeat() {
-    this.game.send({ type: "heartbeat", clientMs: performance.now(), inputGeneration: this.generation, healthy: false });
+    this.game.send({
+      type: "heartbeat",
+      clientMs: performance.now(),
+      inputGeneration: this.generation,
+      healthy: false,
+    });
   }
   healthy() {
     const mic = this.speech.getSnapshot().phase;
@@ -191,22 +209,37 @@ export class DuelController {
   }
   /** Open a new room on the referee and show its code for the opponent. */
   async startDuel() {
-    if (this.busy || this.roomCode) return;
+    if (
+      this.busy ||
+      this.roomCode ||
+      !this.source ||
+      this.wand?.getSnapshot().phase !== "streaming"
+    )
+      return;
     this.busy = true;
     this.issue = "";
     this.onChange();
     try {
-      this.roomCode = await this.game.createRoom();
+      await this.game.connect(this.source);
+      this.roomCode = this.game.snapshot!.roomId;
     } catch (error) {
-      this.issue = error instanceof Error ? error.message : "Could not start a duel";
+      this.game.disconnect();
+      this.issue =
+        error instanceof Error ? error.message : "Could not start a duel";
     } finally {
       this.busy = false;
       this.onChange();
     }
   }
-  /** Accept a code the opponent shared; the referee confirms it exists when the wand connects. */
-  joinDuel(input: string) {
-    if (this.busy || this.roomCode) return;
+  /** Join the opponent's room using the already paired wand. */
+  async joinDuel(input: string) {
+    if (
+      this.busy ||
+      this.roomCode ||
+      !this.source ||
+      this.wand?.getSnapshot().phase !== "streaming"
+    )
+      return;
     const code = normalizeRoomCode(input);
     if (!ROOM_CODE_PATTERN.test(code)) {
       this.issue = "Enter the six-character duel code.";
@@ -214,7 +247,35 @@ export class DuelController {
       return;
     }
     this.issue = "";
-    this.roomCode = code;
+    this.busy = true;
+    this.onChange();
+    try {
+      await this.game.connect(this.source, code);
+      this.roomCode = code;
+    } catch (error) {
+      this.game.disconnect();
+      this.issue =
+        error instanceof Error ? error.message : "Could not join the duel.";
+    } finally {
+      this.busy = false;
+      this.onChange();
+    }
+  }
+  leaveRoom() {
+    this.game.disconnect();
+    this.game.issue = "";
+    this.roomCode = "";
+    this.peer.stop();
+    this.videoPeerKey = "";
+    this.remoteVideo = undefined;
+    this.context = "";
+    this.feedbackKey = "";
+    this.seen.clear();
+    this.issue = "";
+    this.wand?.stopFeedback();
+    this.generation++;
+    this.fusion.reset(this.generation);
+    this.motion.clearPending();
     this.onChange();
   }
   async reconnectBattle() {
@@ -233,7 +294,10 @@ export class DuelController {
       if (!reattached) await this.game.connect(this.source, this.roomCode);
     } catch (error) {
       if (!this.dead && request === this.attemptGeneration)
-        this.issue = error instanceof Error ? error.message : "Could not reconnect to the battle.";
+        this.issue =
+          error instanceof Error
+            ? error.message
+            : "Could not reconnect to the battle.";
     } finally {
       if (!this.dead && request === this.attemptGeneration) {
         this.busy = false;
@@ -268,7 +332,6 @@ export class DuelController {
     this.videoPeerKey = "";
     this.remoteVideo = undefined;
     try {
-      if (!this.roomCode) throw new Error("Start or join a duel first.");
       // Start the chooser inside the user's click, before any HTTP request.
       if (source === "ble") {
         if (!navigator.bluetooth)
@@ -282,10 +345,8 @@ export class DuelController {
         const hosted = await hostedPhoneBroker(phoneRequest.signal);
         if (!hosted && location.protocol !== "https:")
           throw new Error("iPhone pairing is not set up on this referee.");
-        await this.game.connect("phone", this.roomCode);
-        if (request !== this.attemptGeneration || this.dead) return;
         const hostedPair = hosted
-          ? await createHostedPair(phoneRequest.signal, hosted, this.game.token)
+          ? await createHostedPair(phoneRequest.signal, hosted)
           : undefined;
         const localPair = hostedPair ? undefined : await this.game.pair();
         if (request !== this.attemptGeneration || this.dead) {
@@ -313,7 +374,7 @@ export class DuelController {
                 this.onChange();
               },
             })
-          : new PhoneRelayChannel(this.game.token);
+          : new PhoneRelayChannel(localPair!.ownerToken);
         if (relay instanceof PhoneSession) this.phoneSession = relay;
         else this.phoneRelay = relay;
         this.wand = new WandClient(
@@ -325,7 +386,8 @@ export class DuelController {
       if (request !== this.attemptGeneration || this.dead) return;
       const state = this.wand!.getSnapshot();
       if (state.phase === "unsupported") return;
-      if (["suspended", "recovering", "validating"].includes(state.phase)) return;
+      if (["suspended", "recovering", "validating"].includes(state.phase))
+        return;
       if (state.phase === "fault" && state.canRetry) {
         this.pairingCode = this.phoneUrl = "";
         this.phoneClaim = undefined;
@@ -333,7 +395,7 @@ export class DuelController {
       }
       if (state.phase !== "streaming")
         throw new Error(state.issue || "Wand connection failed");
-      if (source === "ble") await this.game.connect("ble", this.roomCode);
+      if (this.roomCode) await this.game.connect(source, this.roomCode);
       if (request !== this.attemptGeneration || this.dead) return;
       this.pairingCode = "";
       this.phoneUrl = "";
@@ -373,20 +435,23 @@ export class DuelController {
     this.onChange();
     try {
       await wand.retryRecovery();
-      if (request !== this.attemptGeneration || this.dead || this.wand !== wand) return;
+      if (request !== this.attemptGeneration || this.dead || this.wand !== wand)
+        return;
       const state = wand.getSnapshot();
       if (state.phase !== "streaming") {
-        if (state.phase === "fault" && !state.canRetry) this.issue = state.issue || "Wand connection failed";
+        if (state.phase === "fault" && !state.canRetry)
+          this.issue = state.issue || "Wand connection failed";
         return;
       }
-      if (this.source === "ble" && !this.game.snapshot)
+      if (this.source === "ble" && this.roomCode && !this.game.snapshot)
         await this.game.connect("ble", this.roomCode);
       if (request !== this.attemptGeneration || this.dead) return;
       this.syncInputState();
       this.autoStartMic();
     } catch (error) {
       if (request === this.attemptGeneration)
-        this.issue = error instanceof Error ? error.message : "Could not reconnect";
+        this.issue =
+          error instanceof Error ? error.message : "Could not reconnect";
     } finally {
       if (request === this.attemptGeneration) {
         this.busy = false;
@@ -408,7 +473,10 @@ export class DuelController {
     this.onChange();
   }
   cancelPhonePairing() {
-    if (this.source !== "phone" || this.wand?.getSnapshot().phase === "streaming")
+    if (
+      this.source !== "phone" ||
+      this.wand?.getSnapshot().phase === "streaming"
+    )
       return;
     this.attemptGeneration++;
     this.phoneRequest?.abort();
@@ -439,8 +507,12 @@ export class DuelController {
         if (sample.breaksGesture) this.fusion.reset(this.generation);
         this.motion.push(sample, this.generation);
         const state = wand.getSnapshot();
-        this.phoneSession?.reportAccepted({ sequence: sample.seq, accepted: state.accepted,
-          receivedHz: state.observedHz ?? 0, ageMs: Math.max(0, sample.ageUpperMs) });
+        this.phoneSession?.reportAccepted({
+          sequence: sample.seq,
+          accepted: state.accepted,
+          receivedHz: state.observedHz ?? 0,
+          ageMs: Math.max(0, sample.ageUpperMs),
+        });
         this.speech.setRecognitionEnabled(
           this.motion.getState().phase === "ready",
         );
@@ -478,17 +550,30 @@ export class DuelController {
   }
   /** The microphone starts as soon as the wand streams; a failure leaves the lobby's mic button. */
   private autoStartMic() {
-    if (document.hidden || this.wand?.getSnapshot().phase !== "streaming") return;
-    if (this.speech.getSnapshot().phase !== "off" && this.speech.getSnapshot().phase !== "fault") return;
+    if (document.hidden || this.wand?.getSnapshot().phase !== "streaming")
+      return;
+    if (
+      this.speech.getSnapshot().phase !== "off" &&
+      this.speech.getSnapshot().phase !== "fault"
+    )
+      return;
     void this.startMic();
   }
   private updatePhoneCoaching() {
     const motion = this.motion.getState();
     const mic = this.speech.getSnapshot().phase;
-    const instruction = !["listening", "busy"].includes(mic) ? "Enable the laptop microphone"
-      : motion.phase === "ready" ? "Move and speak your spell" : "Continue on the laptop";
-    this.phoneSession?.coach({ instruction, completed: 0, total: 0, hint: motion.lastIssue,
-      diagnostics: this.motion.getDiagnostics() });
+    const instruction = !["listening", "busy"].includes(mic)
+      ? "Enable the laptop microphone"
+      : motion.phase === "ready"
+        ? "Move and speak your spell"
+        : "Continue on the laptop";
+    this.phoneSession?.coach({
+      instruction,
+      completed: 0,
+      total: 0,
+      hint: motion.lastIssue,
+      diagnostics: this.motion.getDiagnostics(),
+    });
   }
   async startMic() {
     this.issue = "";
@@ -557,13 +642,30 @@ export class DuelController {
     }
     const state = this.game.snapshot,
       slot = this.game.slot;
-    if (!state || !slot) return;
-    const context = `${state.roundId}:${state.phase}`;
+    const context =
+      state && slot ? `${state.roundId}:${state.phase}` : "paired";
     if (context !== this.context) {
       this.context = context;
       this.presentationEpoch = (this.presentationEpoch + 1) >>> 0 || 1;
       this.fusion.reset(this.generation);
       this.motion.clearPending();
+    }
+    if (!state || !slot) {
+      const key = `paired:${this.presentationEpoch}`;
+      if (
+        this.wand?.getSnapshot().phase === "streaming" &&
+        this.feedbackKey !== key
+      ) {
+        this.feedbackKey = key;
+        this.wand.setState({
+          phase: PresentationPhase.Practice,
+          hp: 100,
+          maxHp: 100,
+          statusFlags: 0,
+          presentationEpoch: this.presentationEpoch,
+        });
+      }
+      return;
     }
     const own = state.players[slot],
       other = state.players[slot === "P1" ? "P2" : "P1"];
@@ -603,8 +705,12 @@ export class DuelController {
         hp: own.hp,
         maxHp: own.maxHp,
         statusFlags:
-          (own.shieldUntilMs > this.game.now() ? StateStatusFlag.ShieldActive : 0) |
-          (own.offenseLockedUntilMs > this.game.now() ? StateStatusFlag.OffenseLocked : 0),
+          (own.shieldUntilMs > this.game.now()
+            ? StateStatusFlag.ShieldActive
+            : 0) |
+          (own.offenseLockedUntilMs > this.game.now()
+            ? StateStatusFlag.OffenseLocked
+            : 0),
         presentationEpoch: this.presentationEpoch,
       };
       const key = JSON.stringify(feedback);
@@ -665,11 +771,18 @@ export class DuelController {
 }
 
 /** The local broker explains refusals in a small JSON body; show that instead of a generic line. */
-async function brokerIssue(response: Response, fallback: string): Promise<string> {
+async function brokerIssue(
+  response: Response,
+  fallback: string,
+): Promise<string> {
   try {
     const value: unknown = await response.json();
-    const issue = value && typeof value === "object" ? (value as { issue?: unknown }).issue : undefined;
-    if (typeof issue === "string" && issue.length > 0 && issue.length <= 120) return issue;
+    const issue =
+      value && typeof value === "object"
+        ? (value as { issue?: unknown }).issue
+        : undefined;
+    if (typeof issue === "string" && issue.length > 0 && issue.length <= 120)
+      return issue;
   } catch {
     // no usable body
   }
@@ -677,8 +790,15 @@ async function brokerIssue(response: Response, fallback: string): Promise<string
 }
 
 async function brokerPost(path: string, signal: AbortSignal): Promise<unknown> {
-  const response = await fetch(path, { cache: "no-store", method: "POST", signal });
-  if (!response.ok) throw new Error(await brokerIssue(response, "Phone pairing is unavailable."));
+  const response = await fetch(path, {
+    cache: "no-store",
+    method: "POST",
+    signal,
+  });
+  if (!response.ok)
+    throw new Error(
+      await brokerIssue(response, "Phone pairing is unavailable."),
+    );
   return response.json();
 }
 
@@ -689,7 +809,9 @@ async function brokerPost(path: string, signal: AbortSignal): Promise<unknown> {
  */
 type PhoneBroker = "local" | "referee";
 
-async function hostedPhoneBroker(signal: AbortSignal): Promise<PhoneBroker | undefined> {
+async function hostedPhoneBroker(
+  signal: AbortSignal,
+): Promise<PhoneBroker | undefined> {
   const value = await brokerPost("/api/phone/config", signal);
   if (
     !value ||
@@ -700,20 +822,28 @@ async function hostedPhoneBroker(signal: AbortSignal): Promise<PhoneBroker | und
   )
     throw new Error("Phone pairing returned an invalid response.");
   if ((value as { enabled: boolean }).enabled) return "local";
-  const response = await fetch("/api/game/health", { cache: "no-store", signal });
+  const response = await fetch("/api/game/health", {
+    cache: "no-store",
+    signal,
+  });
   if (!response.ok) throw new Error("Start the game server to connect.");
   const health: unknown = await response.json();
-  return health && typeof health === "object" && (health as { phoneBroker?: unknown }).phoneBroker === true
+  return health &&
+    typeof health === "object" &&
+    (health as { phoneBroker?: unknown }).phoneBroker === true
     ? "referee"
     : undefined;
 }
 
-async function createHostedPair(signal: AbortSignal, broker: PhoneBroker, token: string): Promise<HostedPair> {
-  if (broker === "local") return parseHostedPair(await brokerPost("/api/phone/pair", signal));
+async function createHostedPair(
+  signal: AbortSignal,
+  broker: PhoneBroker,
+): Promise<HostedPair> {
+  if (broker === "local")
+    return parseHostedPair(await brokerPost("/api/phone/pair", signal));
   const response = await fetch("/api/game/phone/pair", {
     cache: "no-store",
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
     signal,
   });
   if (!response.ok)
@@ -726,12 +856,16 @@ async function createHostedPair(signal: AbortSignal, broker: PhoneBroker, token:
     );
   return parseHostedPair(await response.json());
 }
-const stopTracks = (stream?: MediaStream) => stream?.getTracks().forEach((track) => track.stop());
-export const nameOf = (spell: SpellName) =>
-  spell[0].toUpperCase() + spell.slice(1);
-const codeOf = (spell: SpellName) =>
+const stopTracks = (stream?: MediaStream) =>
+  stream?.getTracks().forEach((track) => track.stop());
+export const nameOf = (spell: Spell) => spell[0].toUpperCase() + spell.slice(1);
+const codeOf = (spell: Spell) =>
   spell === "stupefy"
     ? SpellCode.Stupefy
     : spell === "protego"
       ? SpellCode.Protego
-      : SpellCode.Expelliarmus;
+      : spell === "expelliarmus"
+        ? SpellCode.Expelliarmus
+        : spell === "incendio"
+          ? SpellCode.Incendio
+          : SpellCode.Episkey;

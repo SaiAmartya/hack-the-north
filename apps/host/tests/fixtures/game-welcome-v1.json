@@ -12,12 +12,12 @@
     "heartbeatMs": 500,
     "heartbeatTimeoutMs": 1500,
     "maxHp": 100,
-    "offensiveRecoveryMs": 600,
     "spells": [
       {
         "spell": "stupefy",
         "enabled": true,
         "damage": 20,
+        "heal": 0,
         "cooldownMs": 2000,
         "flightMs": 2000,
         "shieldMs": 0,
@@ -27,6 +27,7 @@
         "spell": "protego",
         "enabled": true,
         "damage": 0,
+        "heal": 0,
         "cooldownMs": 3000,
         "flightMs": 0,
         "shieldMs": 1200,
@@ -34,12 +35,33 @@
       },
       {
         "spell": "expelliarmus",
-        "enabled": false,
+        "enabled": true,
         "damage": 10,
+        "heal": 0,
         "cooldownMs": 6000,
         "flightMs": 2200,
         "shieldMs": 0,
         "offenseLockMs": 1000
+      },
+      {
+        "spell": "incendio",
+        "enabled": true,
+        "damage": 30,
+        "heal": 0,
+        "cooldownMs": 8000,
+        "flightMs": 2400,
+        "shieldMs": 0,
+        "offenseLockMs": 0
+      },
+      {
+        "spell": "episkey",
+        "enabled": true,
+        "damage": 0,
+        "heal": 18,
+        "cooldownMs": 12000,
+        "flightMs": 0,
+        "shieldMs": 0,
+        "offenseLockMs": 0
       }
     ]
   },
@@ -68,11 +90,12 @@
         "maxHp": 100,
         "shieldUntilMs": 0,
         "offenseLockedUntilMs": 0,
-        "offensiveRecoveryUntilMs": 0,
         "cooldownUntilMs": {
           "stupefy": 0,
           "protego": 0,
-          "expelliarmus": 0
+          "expelliarmus": 0,
+          "incendio": 0,
+          "episkey": 0
         }
       },
       "P2": null
@@ -98,7 +121,9 @@
   },
   "iceServers": [
     {
-      "urls": ["stun:stun.cloudflare.com:3478"],
+      "urls": [
+        "stun:stun.cloudflare.com:3478"
+      ],
       "username": null,
       "credential": null
     }

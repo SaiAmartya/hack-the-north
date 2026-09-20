@@ -1,6 +1,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { GameClient, normalizeRoomCode } from "./client";
-import welcome from "../../../host/tests/fixtures/game-welcome-v1.json";
+import fixture from "../../../host/tests/fixtures/game-welcome-v1.json";
+
+const welcome = {
+  ...fixture,
+  roomId: "K7X2PD",
+  snapshot: { ...fixture.snapshot, roomId: "K7X2PD" },
+};
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -41,17 +47,17 @@ class FakeWebSocket {
   }
 }
 
-async function connectedClient() {
+async function connectedClient(create = false) {
   vi.useFakeTimers();
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal("location", new URL("http://127.0.0.1:5173"));
   const request = vi.fn().mockImplementation(() =>
-    Promise.resolve(Response.json({ token: "test-only-session", slot: "P1" })),
+    Promise.resolve(Response.json({ token: "test-only-session", slot: "P1", roomId: "K7X2PD" })),
   );
   vi.stubGlobal("fetch", request);
   const client = new GameClient();
-  const connecting = client.connect("ble", "K7X2PD");
+  const connecting = client.connect("ble", create ? undefined : "K7X2PD");
   await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
   const socket = FakeWebSocket.instances[0];
   socket.open();
@@ -59,6 +65,41 @@ async function connectedClient() {
   await connecting;
   return { client, socket, request };
 }
+
+it("creates and reserves a duel with one session request and uses its verified room code", async () => {
+  const { client, request } = await connectedClient(true);
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(request.mock.calls[0][0]).toBe("/api/game/session");
+  expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ name: "Wizard", source: "ble" });
+  expect(client.snapshot?.roomId).toBe("K7X2PD");
+  client.disconnect();
+});
+
+it.each([undefined, "main", "ZZZZZZ"])("rejects an invalid or wrong session room %s before connecting", async (roomId) => {
+  const request = vi.fn().mockResolvedValue(Response.json({ token: "test-only-session", slot: "P1", roomId }));
+  const socket = vi.fn();
+  vi.stubGlobal("fetch", request);
+  vi.stubGlobal("WebSocket", socket);
+  const client = new GameClient();
+  await expect(client.connect("ble", "K7X2PD")).rejects.toThrow("Invalid game session");
+  expect(socket).not.toHaveBeenCalled();
+  expect(request.mock.calls[1][1].method).toBe("DELETE");
+  expect(client.token).toBe("");
+});
+
+it("rejects a welcome for a different room without replacing the last valid snapshot", async () => {
+  const { client, socket } = await connectedClient();
+  socket.close();
+  const reconnecting = client.reconnect();
+  const rejected = expect(reconnecting).rejects.toThrow();
+  const replacement = FakeWebSocket.instances[1];
+  replacement.open();
+  replacement.message({ ...welcome, roomId: "ZZZZZZ", snapshot: { ...welcome.snapshot, roomId: "ZZZZZZ" } });
+  await rejected;
+  expect(client.snapshot?.roomId).toBe("K7X2PD");
+  expect(replacement.readyState).toBe(FakeWebSocket.CLOSED);
+  client.disconnect();
+});
 
 it("creates rooms, sends the code with the session and explains an unknown code", async () => {
   const request = vi
@@ -102,7 +143,7 @@ it("releases a session returned after cancellation without opening a socket", as
   const client = new GameClient();
   const connecting = client.connect("ble", "K7X2PD");
   client.disconnect();
-  finish(Response.json({ token: "test-only-session", slot: "P1" }));
+  finish(Response.json({ token: "test-only-session", slot: "P1", roomId: "K7X2PD" }));
   await expect(connecting).rejects.toThrow("Connection cancelled");
   expect(socket).not.toHaveBeenCalled();
   expect(request.mock.calls[1][1].method).toBe("DELETE");

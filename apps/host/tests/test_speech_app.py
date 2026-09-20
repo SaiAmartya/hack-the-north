@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from phantom_host.speech_app import SpeechRuntime, create_app
+from phantom_host.speech_app import SpeechRuntime, canonical_spell, create_app
 
 SECRET = "test-only-per-launch-secret"
 
@@ -135,6 +135,13 @@ def test_noncanonical_words_never_become_a_spell() -> None:
     assert response.status_code == 200
     assert response.json()["text"] == "please cast stupefy"
     assert response.json()["spell"] is None
+
+
+@pytest.mark.parametrize("spell", ["stupefy", "protego", "expelliarmus", "incendio", "episkey"])
+def test_all_five_incantations_require_the_exact_spell(spell: str) -> None:
+    assert canonical_spell(f" {spell.upper()}! ") == spell
+    assert canonical_spell(f"please cast {spell}") is None
+    assert canonical_spell(f"{spell} protego") is None
 
 
 def test_single_worker_rejects_a_second_request_without_queueing() -> None:

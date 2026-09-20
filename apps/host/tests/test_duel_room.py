@@ -153,6 +153,69 @@ async def test_two_players_ready_play_duplicate_cast_and_exact_heartbeat_timeout
 
 
 @pytest.mark.asyncio
+async def test_both_players_receive_the_same_damage_healing_lock_and_cooldown_state():
+    room = DuelRoom(clock_ms=FakeClock(), allow_replay=True)
+    sessions = [await room.create_session(name=name, source=Source.REPLAY) for name in ("One", "Two")]
+    peers = [GamePeer(), GamePeer()]
+    for index, (session, peer) in enumerate(zip(sessions, peers, strict=True)):
+        await room.attach(token=session.token, peer=peer, now_ms=0)
+        await room.heartbeat(peer=peer, message=_heartbeat(), receipt_ms=100)
+        await room.submit_ready(peer=peer, message=_ready(f"wand-{index}"), receipt_ms=100)
+    await room.tick(100)
+
+    async def advance(at_ms):
+        for peer in peers:
+            await room.heartbeat(peer=peer, message=_heartbeat(), receipt_ms=at_ms)
+        await room.tick(at_ms)
+
+    async def cast(peer, spell, at_ms, attempt):
+        await room.submit_cast(
+            peer=peer,
+            message=CastMessage(
+                round_id=1,
+                attempt_id=attempt,
+                spell=spell,
+                gesture_id=f"g-{attempt}",
+                speech_id=f"s-{attempt}",
+                input_generation=1,
+            ),
+            receipt_ms=at_ms,
+        )
+
+    async def both_snapshots():
+        snapshots = []
+        for peer in peers:
+            for _ in range(10):
+                message = await asyncio.wait_for(peer.mailbox.next_message(), 0.1)
+                if message["type"] == "snapshot":
+                    snapshots.append(message["snapshot"])
+                    break
+        assert len(snapshots) == 2 and snapshots[0] == snapshots[1]
+        return snapshots[0]
+
+    await advance(3_100)
+    for spell in (Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO):
+        await cast(peers[0], spell, 3_200, spell.value)
+    await advance(3_200)
+    flight = await both_snapshots()
+    assert len(flight["projectiles"]) == 3
+    await advance(5_600)
+    hit = await both_snapshots()
+    assert hit["players"]["P2"]["hp"] == 40
+    assert hit["players"]["P2"]["offenseLockedUntilMs"] == 6_400
+    await cast(peers[1], Spell.EPISKEY, 5_601, "heal")
+    await cast(peers[1], Spell.PROTEGO, 5_601, "guard")
+    await advance(5_601)
+    restored = await both_snapshots()
+    defender = restored["players"]["P2"]
+    assert defender["hp"] == 58
+    assert defender["shieldUntilMs"] == 6_801
+    assert defender["cooldownUntilMs"]["episkey"] == 17_601
+    assert defender["cooldownUntilMs"]["protego"] == 8_601
+    assert any(event["type"] == "healed" and event["amount"] == 18 for event in restored["recentEvents"])
+
+
+@pytest.mark.asyncio
 async def test_generation_or_health_change_aborts_and_requires_fresh_ready():
     clock = FakeClock()
     room = DuelRoom(clock_ms=clock, allow_replay=True)

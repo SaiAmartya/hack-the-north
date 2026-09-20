@@ -3,8 +3,8 @@ import { flightPosition } from "./effects";
 describe("authoritative effect timing", () => {
   it("seeks late flights and clamps bounds without inventing an outcome", () => {
     expect(flightPosition(100, 2100, 100, true)).toEqual({
-      x: 0.18,
-      y: 0.76,
+      x: 0.32,
+      y: 0.62,
       progress: 0,
     });
     expect(flightPosition(100, 2100, 1100, true).progress).toBe(0.5);

@@ -1,4 +1,5 @@
-import type { GestureEvidence, SpellName } from "./motion";
+import type { Spell } from "../game/contracts";
+import type { GestureEvidence } from "./motion";
 
 export type UtteranceOnset = {
   id: string;
@@ -7,14 +8,14 @@ export type UtteranceOnset = {
 };
 
 export type UtteranceEvidence = UtteranceOnset & {
-  spell: SpellName;
+  spell: Spell;
   endMs: number;
   finalAtMs: number;
 };
 
 export type CastAttempt = {
   id: string;
-  spell: SpellName;
+  spell: Spell;
   gestureId: string;
   utteranceId: string;
   generation: number;
@@ -167,7 +168,10 @@ export class CastFusion {
     const voice = this.pendingUtterance;
     const gesture = this.pendingGesture;
     if (!voice || !gesture || this.generation === undefined) return;
-    if (voice.spell !== gesture.spell) {
+    const requiredGesture = voice.spell === "protego" || voice.spell === "episkey"
+      ? "protego"
+      : "stupefy";
+    if (gesture.spell !== requiredGesture && gesture.spell !== voice.spell) {
       this.reject("spell-gesture-mismatch");
       return;
     }

@@ -1,10 +1,12 @@
 export type Slot = "P1" | "P2";
-export type Spell = "stupefy" | "protego" | "expelliarmus";
+export const SPELLS = ["stupefy", "protego", "expelliarmus", "incendio", "episkey"] as const;
+export type Spell = (typeof SPELLS)[number];
 export type Source = "phone" | "ble" | "replay";
 export type SpellRule = {
   spell: Spell;
   enabled: boolean;
   damage: number;
+  heal: number;
   cooldownMs: number;
   flightMs: number;
   shieldMs: number;
@@ -14,7 +16,6 @@ export type Rules = {
   version: number;
   roundMs: number;
   maxHp: number;
-  offensiveRecoveryMs: number;
   spells: SpellRule[];
 };
 export type Player = {
@@ -31,13 +32,12 @@ export type Player = {
   maxHp: number;
   shieldUntilMs: number;
   offenseLockedUntilMs: number;
-  offensiveRecoveryUntilMs: number;
   cooldownUntilMs: Record<Spell, number>;
 };
 export type Projectile = {
   id: string;
   actionId: string;
-  spell: "stupefy" | "expelliarmus";
+  spell: "stupefy" | "expelliarmus" | "incendio";
   caster: Slot;
   target: Slot;
   launchAtMs: number;
@@ -85,7 +85,7 @@ const finite = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v);
 const slot = (v: unknown): v is Slot => v === "P1" || v === "P2";
 const spell = (v: unknown): v is Spell =>
-  ["stupefy", "protego", "expelliarmus"].includes(String(v));
+  SPELLS.some((name) => v === name);
 const deadline = (v: unknown) => v === null || finite(v);
 export function parseRules(value: unknown): Rules {
   if (
@@ -93,15 +93,15 @@ export function parseRules(value: unknown): Rules {
     value.version !== 1 ||
     !finite(value.roundMs) ||
     !finite(value.maxHp) ||
-    !finite(value.offensiveRecoveryMs) ||
     !Array.isArray(value.spells) ||
-    value.spells.length > 3 ||
+    value.spells.length !== SPELLS.length ||
+    new Set(value.spells.map((r) => object(r) ? r.spell : null)).size !== SPELLS.length ||
     !value.spells.every(
       (r) =>
         object(r) &&
         spell(r.spell) &&
         typeof r.enabled === "boolean" &&
-        ["damage", "cooldownMs", "flightMs", "shieldMs", "offenseLockMs"].every(
+        ["damage", "heal", "cooldownMs", "flightMs", "shieldMs", "offenseLockMs"].every(
           (k) => finite(r[k]) && (r[k] as number) >= 0,
         ),
     )
@@ -172,10 +172,9 @@ export function parseSnapshot(value: unknown): Snapshot {
         "maxHp",
         "shieldUntilMs",
         "offenseLockedUntilMs",
-        "offensiveRecoveryUntilMs",
       ].every((k) => finite(p[k])) ||
       !object(p.cooldownUntilMs) ||
-      !Object.values(p.cooldownUntilMs).every(finite)
+      !SPELLS.every((name) => object(p.cooldownUntilMs) && finite(p.cooldownUntilMs[name]))
     )
       throw new Error("Invalid player state");
   }
@@ -187,7 +186,7 @@ export function parseSnapshot(value: unknown): Snapshot {
         object(p) &&
         typeof p.id === "string" &&
         typeof p.actionId === "string" &&
-        ["stupefy", "expelliarmus"].includes(String(p.spell)) &&
+        ["stupefy", "expelliarmus", "incendio"].includes(String(p.spell)) &&
         slot(p.caster) &&
         slot(p.target) &&
         ["launchAtMs", "impactAtMs", "damage", "offenseLockMs"].every((k) =>

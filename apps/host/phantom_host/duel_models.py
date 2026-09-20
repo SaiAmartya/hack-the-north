@@ -34,6 +34,8 @@ class Spell(str, Enum):
     STUPEFY = "stupefy"
     PROTEGO = "protego"
     EXPELLIARMUS = "expelliarmus"
+    INCENDIO = "incendio"
+    EPISKEY = "episkey"
 
 
 class Phase(str, Enum):
@@ -69,7 +71,7 @@ class RoomResponse(WireModel):
 class SessionRequest(WireModel):
     name: str = Field(min_length=1, max_length=24)
     source: Source
-    code: RoomCode
+    code: RoomCode | None = None
 
     @field_validator("name")
     @classmethod
@@ -104,6 +106,7 @@ class SpellRuleWire(WireModel):
     spell: Spell
     enabled: bool
     damage: int = Field(ge=0, le=100)
+    heal: int = Field(ge=0, le=100)
     cooldown_ms: int = Field(ge=0)
     flight_ms: int = Field(ge=0)
     shield_ms: int = Field(ge=0)
@@ -118,7 +121,6 @@ class RulesetWire(WireModel):
     heartbeat_ms: Literal[500] = 500
     heartbeat_timeout_ms: Literal[1500] = 1500
     max_hp: Literal[100] = 100
-    offensive_recovery_ms: Literal[600] = 600
     spells: tuple[SpellRuleWire, ...]
 
 
@@ -205,14 +207,13 @@ class PlayerSnapshot(WireModel):
     max_hp: Literal[100] = 100
     shield_until_ms: int
     offense_locked_until_ms: int
-    offensive_recovery_until_ms: int
     cooldown_until_ms: dict[str, int]
 
 
 class ProjectileSnapshot(WireModel):
     id: str
     action_id: str
-    spell: Literal[Spell.STUPEFY, Spell.EXPELLIARMUS]
+    spell: Literal[Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO]
     caster: Slot
     target: Slot
     launch_at_ms: int
@@ -232,6 +233,7 @@ EventType = Literal[
     "projectileLaunched",
     "impactBlocked",
     "damage",
+    "healed",
     "offenseLocked",
     "roundEnded",
     "roundAborted",

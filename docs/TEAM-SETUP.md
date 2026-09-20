@@ -5,25 +5,28 @@ Commands assume a terminal at the **repository root** unless a block explicitly 
 Initial package/model/browser downloads need internet; this guide does not deploy a service,
 change certificate trust, open firewall rules or flash a badge automatically.
 
+**For this final sprint, run `python3 tools/run_game.py --local-referee`.** The deployed
+referee still has the previous rules and pairing API. A plain launcher run still selects that
+deployment; it cannot serve this five-spell build until a separately authorized rollout.
+For two laptops, share one new referee using [Section 4](#4-two-laptops-sharing-the-new-referee).
+Current verification and the manual handoff live in [the final-sprint report](qa/final-sprint.md).
+
 ## 1. Checkpoint and prerequisites
 
 - Install **Git, Python 3.11 and Node 26.5.0 with npm** on each laptop. Use desktop Chrome;
   physical phones use iPhone Safari. Windows x64 is the target, but full Windows qualification
   is still pending. Do not substitute a newer Python for the documented environment.
-- Each player needs their own laptop microphone, camera and one phone or qualified BLE badge.
-  Voice stays on that laptop; the phone requests motion access only.
-- The current firmware source is **0.2.1**. 0.2.0 was the first gameplay-profile image (50 Hz/±8 g,
-  radio on after every reset, measured-gap discontinuity instead of the sensor's overwrite flag);
-  0.2.1 adds the battery brownout soft start. 0.2.1 is flashed on WAND-B602 with readback
-  verification but must still be physically QA'd per [the 0.2.x change record](qa/firmware-0.2.0.md)
-  before a badge is called qualified. See [firmware installation and recovery](../firmware/README.md).
+- Each player needs their own laptop microphone and one phone or qualified BLE badge.
+  A camera is optional. Voice stays on that laptop; the phone requests motion access only.
+- The current firmware source is **0.3.0**, with five-spell display and LED feedback.
+  It has not been flashed by this sprint. See [firmware evidence](qa/firmware-0.3.0.md)
+  and [installation and recovery](../firmware/README.md) before the manual flash/test handoff.
 - iPhone recognition has been rebuilt, but real held-out movement/speech testing is pending.
   Internet relay has an unresolved intermittent 500 ms freshness failure. Prefer the direct
   route for the next physical test; do not describe either input as fully qualified yet.
-- The public phone service and the game referee are already deployed. Teammates need **no**
-  Wrangler, Cloudflare login, deployment, API key, certificate or credential: a plain launcher
-  run uses the deployed referee (Section 5), which also brokers iPhone pairing for every
-  laptop, so two laptops anywhere with internet can duel with nothing else to set up.
+- The public phone service is pre-existing and can still provide phone pairing. Sai's laptop
+  has approved phone defaults saved; a new laptop needs the setup in Section 3. The deployed
+  game referee is also pre-existing, but has not received this sprint's code.
 
 Clone, or update an existing checkout without discarding local work:
 
@@ -50,7 +53,7 @@ apps/host/.venv/bin/python -m pip install -e './apps/host[dev,speech]'
 cd apps/web
 npm ci
 cd ../..
-apps/host/.venv/bin/python tools/run_game.py
+python3 tools/run_game.py --local-referee
 ```
 
 ### Windows PowerShell
@@ -63,13 +66,13 @@ py -3.11 -m venv apps/host/.venv
 Set-Location apps/web
 npm.cmd ci
 Set-Location ../..
-.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py
+.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --local-referee
 ```
 
 No virtual-environment activation or PowerShell execution-policy change is required.
-The launcher starts the local speech helper and the frontend and connects them to the team's
-deployed referee (Section 5); `--local-referee` runs a referee on this laptop instead. There
-are no other workers.
+These commands start the local speech helper, frontend and current referee on this laptop.
+The Python environment installed above supplies the runtime dependencies. A second laptop
+must connect to this same referee through Section 4, rather than start an independent one.
 
 The first launch downloads the pinned `faster-whisper base.en` weights once, outside the repo
 (`.cache/wand-speech/faster-whisper-base.en` under your home directory), by running
@@ -86,10 +89,25 @@ still wrong: permissions/origin checks are scoped to the selected origin. Startu
 frontend, referee and warm speech worker; it is not a declaration that physical calibration or
 multiplayer has passed.
 
-On the page, one player chooses **Start a duel** and reads the six-character duel code to the
-other, who chooses **Join with code**; both then connect a wand. The referee keeps one room
-per code, so several pairs can duel on the same referee; a room nobody occupies for ten
-minutes disappears. **Leave duel** returns to the code screen.
+On the page, **each player pairs a badge or iPhone first**. Once connected, one creates a duel
+and shares its six-character code; the other joins with that code. No duel room or player slot
+is reserved just to pair a wand. The referee keeps one room per code; an empty room expires
+after ten minutes. **Leave duel** returns to room selection while keeping the connected wand.
+
+Say the exact incantation while moving the wand. Attack spells use a firm jab; support spells
+use a raise and hold. Cooldowns are independent, so a different ready move can follow immediately.
+
+| Spell | Movement | Result | Cooldown |
+| --- | --- | --- | --- |
+| Stupefy | Firm jab | 20 damage | 2 s |
+| Protego | Raise and hold | Block one hit within 1.2 s | 3 s |
+| Expelliarmus | Firm jab | 10 damage and 1 s offensive lock | 6 s |
+| Incendio | Firm jab | 30 damage | 8 s |
+| Episkey | Raise and hold | Restore up to 18 HP | 12 s |
+
+Everyone starts with 100 HP. Healing cannot exceed 100 HP; a full-health attempt spends no
+cooldown. Shielding and healing remain available while disarmed. Zero HP ends the duel;
+at the 60-second deadline higher HP wins, with equal HP or simultaneous knockouts producing a draw.
 
 The default launcher builds a stable temporary frontend snapshot. Source edits do not replace
 a running session. **Ctrl+C**, wait for shutdown, then rerun after updates. `--dev` opts into
@@ -101,18 +119,14 @@ failure.
 | Service | Default address | Responsibility |
 | --- | --- | --- |
 | Player frontend | `127.0.0.1:5173` | UI; tightly scoped game, speech and phone proxies |
-| Referee | `wandduel-referee.onrender.com`, or `127.0.0.1:8000` with `--local-referee` | Authoritative two-player rooms, one per join code |
+| Referee for this sprint | `127.0.0.1:8000` with `--local-referee`, or laptop A's selected private IP | Authoritative two-player rooms, one per join code |
 | Speech helper | `127.0.0.1:8001` | Only this laptop's audio; per-launch authentication |
 
 ## 3. Connect an iPhone
 
-Nothing to install: with the deployed referee (the default), **Connect iPhone** asks the referee
-to mint the pairing room, and the referee holds the phone service's enrollment secret. Any
-laptop pairs any iPhone by scanning the QR; no certificate, secret file or extra launcher flag.
-Skip to the numbered steps below.
-
-**Only for `--local-referee` or LAN play** (Section 4), where no deployed referee is involved,
-this laptop must broker pairing itself with the secret file. Ask Sai/the service owner for the
+With the current local/LAN build, the laptop brokers QR pairing using its saved approved
+phone-service defaults. **Sai's laptop already has these defaults; skip to the numbered steps.**
+On a new laptop, ask Sai/the service owner for the
 **existing** enrollment-secret file through an approved private channel. Store it outside the
 repository, readable only by your user. On macOS the launcher requires mode `0600`; on Windows
 restrict the file's Security permissions to its intended owner. Do not paste the value into
@@ -126,20 +140,20 @@ macOS, from the root:
 ```sh
 wandPhoneSecret="$HOME/.config/wandduel/phone-enrollment-secret"
 chmod 600 "$wandPhoneSecret"
-apps/host/.venv/bin/python tools/run_game.py --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file "$wandPhoneSecret"
+python3 tools/run_game.py --local-referee --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file "$wandPhoneSecret"
 ```
 
 Windows PowerShell, from the root:
 
 ```powershell
 $wandPhoneSecret = Join-Path $env:USERPROFILE '.config/wandduel/phone-enrollment-secret'
-.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file $wandPhoneSecret
+.\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --local-referee --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file $wandPhoneSecret
 ```
 
 `--save-defaults` writes only the service origin and the secret file's **path** to `launcher.json`
 under `~/.local/share/wandduel/` (or `$XDG_DATA_HOME/wandduel`) on macOS and
 `%LOCALAPPDATA%\wandduel\` on Windows; the secret itself stays in your private file. From then on
-a plain `tools/run_game.py` uses those defaults, `--no-phone` ignores them for one run and
+a `tools/run_game.py --local-referee` run uses those phone defaults, `--no-phone` ignores them for one run and
 `--badge-only` also skips them. The same command starts the stack, so continue below.
 
 1. On the laptop choose **Connect iPhone**. Scan its fresh QR with the phone camera and open
@@ -151,12 +165,12 @@ a plain `tools/run_game.py` uses those defaults, `--no-phone` ignores them for o
    changes route during play. Internet is needed for initial QR pairing/signalling either way.
 3. Move gently. Check **Sensor active** and **Reaching laptop** on the phone. If either fails,
    open Connection details; socket connection alone does not mean valid motion is arriving.
-4. As soon as the wand streams you are in the **battle lobby**: the laptop microphone is
-   started for you (allow it and give it two seconds of quiet) and one shared gesture profile is
-   active for everyone: any firm jab is Stupefy, any held raise is Protego, lowering the wand is
-   ignored. There is no calibration or practice step. Try a spell in the lobby if you like (the
-   announcement shows what was heard and seen), enable the camera, then **Ready**. Speech and a
-   matching movement are still both required for every cast.
+4. Once the wand streams, create or join a duel. Allow the laptop microphone and give it
+   two seconds of quiet for automatic noise calibration. Hold the wand comfortably still
+   briefly so the shared motion profile can anchor its resting pose; it re-anchors from
+   stillness during play. A firm jab plus the exact spoken incantation chooses one of the
+   three attacks; a raise and hold plus speech chooses Protego or Episkey. Lowering alone
+   casts nothing. Camera portraits are optional. Choose **Ready** when wand and voice are ready.
 
 Switching laptop tabs retains the selected wand where available, pauses input and aborts an active
 duel. Returning checks fresh input; microphone and battle recovery stay available in the lobby.
@@ -170,10 +184,12 @@ It requires separate certificate/trust and LAN-exposure approval; see the
 [workflow](../.agents/skills/wand-dev-workflow/references/workflow.md#3-optional-private-lan-phone-session).
 Do not tunnel the game, referee or speech helper publicly.
 
-## 4. Two laptops on one LAN without internet
+## 4. Two laptops sharing the new referee
 
-The default is the deployed referee in Section 5. Use this section only when internet is
-unavailable or blocked: laptop A runs the referee and laptop B points at it. Finish
+Use this setup for the final-sprint two-player build: laptop A runs the new referee and
+laptop B points at it. Running `--local-referee` independently on both creates separate
+room lists, so their codes will not match. Phone QR setup still requires internet;
+badge play can use the LAN after dependencies and speech models are installed. Finish
 installation on **both** laptops. Use the same approved private network and get approval
 before exposing laptop A's referee or adjusting a narrowly scoped firewall rule. Do not disable
 the firewall, bind a wildcard/public interface or add router forwarding. Replace the example
@@ -209,9 +225,16 @@ connection, with no deployed TURN fallback. Wi-Fi peer isolation can block phone
 For a later **qualified** badge, replace the two `--phone-*` options on that player's launcher
 with `--no-phone` (saved phone defaults would otherwise still apply) and select Connect badge.
 Badge-only qualification can use `--badge-only` instead, which also skips them.
-A badge on a 0.1.x diagnostic image cannot pass Ready; flash the current 0.2.x image (0.2.1) rather than changing browser gates.
+A badge on a diagnostic image cannot pass Ready. The manual handoff uses the current 0.3.0
+image and its physical checks; keep the browser gates intact.
 
-## 5. Multiplayer over the internet (the default)
+## 5. Pre-existing internet deployment — not updated for this sprint
+
+The following deployment details describe the older hosted setup. **This sprint does not
+push, deploy, restart or reconfigure it.** The new browser expects wand-first pairing and
+five-spell rules, so use Sections 2 and 4 until a separate remote rollout is authorized.
+The launcher still defaults to this older server unless `--local-referee` or a LAN referee
+is explicitly selected. Hosting, TURN and tunnel instructions below are reference only.
 
 The team referee is deployed at **https://wandduel-referee.onrender.com** from
 [`render.yaml`](../render.yaml). A plain `tools/run_game.py` uses it: each laptop runs only its
@@ -262,7 +285,7 @@ no uptime guarantee. Checked against Render's documentation on September 19, 202
   header; the code (about a billion possibilities, expiring rooms, a 32-room cap) is what keeps
   strangers out of a duel.
 
-### Demo checklist
+### Historical hosted demo checklist
 
 1. Freeze `main`; do not deploy the referee on demo day.
 2. Both laptops: `tools/run_game.py` two minutes early. Confirm `Game ready` and the
@@ -326,22 +349,20 @@ in [the input rebuild report](qa/input-rebuild.md).
 | --- | --- |
 | No `Game ready` / speech unavailable | Keep the first startup error. Verify Python 3.11 environment, speech extra, pinned model path (internet is needed for its one-time download) and free ports. Do not start a second partial stack. |
 | `DLL load failed` / native dependency error on Windows | Capture only the package/error and Python/architecture versions. Windows runtime setup needs qualification; do not substitute cloud speech or remove health gates. |
-| `iPhone pairing is not set up on this referee.` or `Phone connection unavailable` | With the deployed referee this means its `WAND_PHONE_SERVICE`/`WAND_PHONE_CREATE_SECRET` environment variables are missing or wrong (service owner: set them in Render and restart between matches). With `--local-referee`, use both hosted-service flags (or saved defaults), the existing credential, private file permissions and working internet. A failed or cancelled pairing attempt can be retried at once; only a successful pair starts a two-second cooldown (`Wait a moment, then reconnect`). Never print the credential. |
+| `iPhone pairing is not set up on this referee.` or `Phone connection unavailable` | Confirm this build is using `--local-referee` or the shared new LAN referee, then check both phone-service flags (or saved defaults), the existing credential file permissions and internet access. Hosted referee pairing requests have a two-second retry cooldown after success or failure (`Wait a moment, then reconnect`). The old deployment does not support wand-first requests. Never print the credential. |
 | Laptop shows `Connection interrupted. Reconnecting…` after Connect iPhone and never recovers | Check the address bar: the game must be open at `http://127.0.0.1:5173`. The hosted phone service refuses the laptop's connection from any other origin, `localhost:5173` included; the frontend now redirects such a tab to the exact origin, so close or reload an older tab. If the origin is already correct, report route and last failure from Connection details. |
 | Certificate warning | The selected phone URL must be the public HTTPS service, not a stale LAN-IP bookmark. Start from a fresh QR; do not bypass TLS warnings. |
 | Direct connection unavailable | Check venue peer isolation; explicitly try Internet if desired. Its intermittent freshness failure is still open. Do not loosen timing limits. |
 | Sensor active, but no Reaching laptop | Report route, received rate, age and visible last failure from Connection details. Export a trace only deliberately. |
-| Spells not recognized in the lobby | Speech and movement are both required: say the exact spell name while jabbing (Stupefy) or raising and holding the wand (Protego). The shared profile accepts any firm jab direction; a weak wobble or a slow tilt is ignored on purpose. Watch the announcement line, which shows the heard spell and the accepted movement; report which half is missing. |
-| Badge missing after a cold boot | A badge still on 0.1.8 boots with BLE off after any power cycle. Flash the current 0.2.x image (0.2.1: radio on for every reset, advertising watchdog, brownout soft start); check `id` on the console, not repeated blind reconnects. |
-| Badge says firmware needs repair / diagnostic INFO only | The badge is on a 0.1.x image or a diagnostic boot row (`profile creator|rate`). Flash 0.2.1 or select `profile range on`; never restore capability bits in the browser. |
+| Spells not recognized | Say the exact spell while jabbing for Stupefy, Expelliarmus or Incendio, or raising and holding for Protego or Episkey. Allow quiet microphone setup and briefly hold the wand still first. The shared profile accepts any firm jab direction; a weak wobble or a slow tilt is ignored. Report the failed move and visible message. |
+| Badge missing after a cold boot | Check the installed image and the 0.3.0 manual flash/physical QA handoff. Earlier 0.1.x images may boot with BLE disabled. Capture `id`/`status` for the failing device instead of repeatedly reconnecting. |
+| Badge says firmware needs repair / diagnostic INFO only | Follow the current firmware handoff and report the installed version/profile. A diagnostic image cannot become playable by changing browser capability gates. |
 | Laptop says Reconnecting your badge… | Normal bounded auto-reconnect after a dropped link (up to three per minute). If it ends in Reconnect badge, press it once; if that fails, power-cycle the badge and report `status`. |
 | Camera or multiplayer peers cannot connect | Confirm both clients selected the same referee, their own local origin, network approval and peer reachability. Video relays through TURN only when the hosted referee has a TURN key; otherwise it needs a direct or STUN-reachable path. |
 | `No duel with that code.` | The code was mistyped, the room sat empty for ten minutes, or the two laptops point at different referees. Compare the referee printed at `Game ready` on both laptops, then start a new duel and share the fresh code. |
 | `Waking the hosted referee…` then `readiness timed out` | The free instance takes about a minute to wake; rerun once. If it repeats, open `https://wandduel-referee.onrender.com/api/game/health` in a browser and check the Render dashboard for a failed deploy. Without internet, run `--local-referee` (single laptop) or Section 4 (LAN). |
 | Port occupied | A stack started by this launcher is stopped automatically on the next run; anything else holding `5173`, `8000` or `8001` must be stopped by whoever owns it. Do not kill every Node/Python process or print full process environments/arguments. |
 
-Keep the next physical card small: **Sensor active → Reaching laptop → visible stillness →
-accepted jab examples**. Reply with **commit/build · route/devices · failed step · expected →
-observed · visible reason/rates**. Continue to spoken practice and two-player play only after
-that gate. [Current evidence](qa/input-rebuild.md) keeps scripted, physical iPhone and real-badge
-results separate; a passing test count does not erase an unmeasured or failing physical gate.
+Follow the [final-sprint manual QA handoff](qa/final-sprint.md) after autonomous checks finish.
+Report **commit/build · route/devices · failed step · expected → observed · visible message**.
+That report separates scripted results from actual microphone, phone, badge and two-laptop evidence.

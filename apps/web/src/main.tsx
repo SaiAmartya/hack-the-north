@@ -2,7 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { lazy, Suspense } from "react";
 import { GameApp } from "./game/GameApp";
-import { PhoneWand } from "./phone/PhoneWand";
+const PhoneWand = lazy(() =>
+  import("./phone/PhoneWand").then((m) => ({ default: m.PhoneWand })),
+);
 
 const QaLab =
   import.meta.env.VITE_WAND_QA === "1"
@@ -16,7 +18,9 @@ const QaGame =
     : undefined;
 const view =
   location.pathname === "/phone" ? (
-    <PhoneWand />
+    <Suspense fallback={null}>
+      <PhoneWand />
+    </Suspense>
   ) : location.pathname === "/__qa/device-lab" && QaLab ? (
     <Suspense fallback={null}>
       <QaLab />

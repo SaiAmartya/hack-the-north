@@ -36,8 +36,8 @@ MODEL_REPOSITORY = "Systran/faster-whisper-base.en"
 MODEL_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c"
 FASTER_WHISPER_VERSION = "1.2.1"
 MODEL_METADATA = ".wand-speech-model.json"
-GLOSSARY = "Stupefy. Protego. Expelliarmus."
-SPELLS = frozenset({"stupefy", "protego", "expelliarmus"})
+GLOSSARY = "Stupefy. Protego. Expelliarmus. Incendio. Episkey."
+SPELLS = frozenset({"stupefy", "protego", "expelliarmus", "incendio", "episkey"})
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 

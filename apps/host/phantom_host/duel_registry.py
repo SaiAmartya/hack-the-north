@@ -10,6 +10,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable
 
+from phantom_host.duel_models import SessionResponse, Source
 from phantom_host.duel_room import DuelRoom, GamePeer, PlayerSession, RoomError
 
 ROOM_CODE_LENGTH = 6
@@ -25,12 +26,10 @@ class RoomRegistry:
         clock_ms: Callable[[], int],
         allow_phone: bool = False,
         allow_replay: bool = False,
-        expelliarmus_enabled: bool = False,
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
-        self.expelliarmus_enabled = expelliarmus_enabled
         self._rooms: dict[str, DuelRoom] = {}
         self._empty_since_ms: dict[str, int] = {}
 
@@ -48,7 +47,6 @@ class RoomRegistry:
             clock_ms=self.clock_ms,
             allow_phone=self.allow_phone,
             allow_replay=self.allow_replay,
-            expelliarmus_enabled=self.expelliarmus_enabled,
             room_id=code,
         )
         self._empty_since_ms[code] = self.clock_ms()
@@ -56,6 +54,23 @@ class RoomRegistry:
 
     def room_for_code(self, code: str) -> DuelRoom | None:
         return self._rooms.get(code)
+
+    async def create_session(
+        self, *, name: str, source: Source, code: str | None = None
+    ) -> SessionResponse:
+        created = code is None
+        if code is None:
+            code = self.create_room()
+        room = self._rooms.get(code)
+        if room is None:
+            raise RoomError("room_not_found", status_code=404)
+        try:
+            return await room.create_session(name=name, source=source)
+        except BaseException:
+            if created:
+                self._rooms.pop(code, None)
+                self._empty_since_ms.pop(code, None)
+            raise
 
     def room_for_token(self, token: str) -> DuelRoom | None:
         for room in self._rooms.values():

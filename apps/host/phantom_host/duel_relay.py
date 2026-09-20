@@ -28,6 +28,7 @@ from phantom_host.duel_room import OutboundMailbox, PlayerSession, RoomError
 
 PAIR_TTL_MS = 60_000
 MAX_PENDING_OPERATIONS = 32
+MAX_PAIR_GRANTS = 128
 PAIR_CODE_LENGTH = 10
 PAIR_ALPHABET = string.ascii_uppercase + string.digits
 
@@ -46,6 +47,7 @@ class PairGrant:
     code: str
     expires_at_ms: int
     generation: int
+    standalone: bool = False
     owner: RelayPeer | None = None
     phone: RelayPeer | None = None
     pair_id: str | None = None
@@ -67,18 +69,26 @@ class DevWandRelay:
         self._grant_by_code: dict[str, PairGrant] = {}
         self._generation = 0
 
-    async def create_grant(self, token: str) -> tuple[str, int]:
+    async def create_standalone_grant(self) -> tuple[str, str, int]:
+        token = secrets.token_urlsafe(32)
+        code, expires = await self.create_grant(token, standalone=True)
+        return token, code, expires
+
+    async def create_grant(self, token: str, *, standalone: bool = False) -> tuple[str, int]:
         async with self._lock:
-            session = self.session_lookup(token)
-            if session is None:
-                raise RoomError("invalid_token", status_code=401)
-            if session.source is not Source.PHONE:
-                raise RoomError("phone_source_required", status_code=409)
+            if not standalone:
+                session = self.session_lookup(token)
+                if session is None:
+                    raise RoomError("invalid_token", status_code=401)
+                if session.source is not Source.PHONE:
+                    raise RoomError("phone_source_required", status_code=409)
             existing = self._grant_by_token.get(token)
             if existing is not None:
                 self._invalidate_locked(existing, "pair_replaced")
             now_ms = self.clock_ms()
             self._purge_expired_locked(now_ms)
+            if len(self._grants_by_id) >= MAX_PAIR_GRANTS:
+                raise RoomError("too_many_pairs", status_code=429)
             code = self._new_code_locked()
             self._generation += 1
             grant = PairGrant(
@@ -87,6 +97,7 @@ class DevWandRelay:
                 code=code,
                 expires_at_ms=now_ms + PAIR_TTL_MS,
                 generation=self._generation,
+                standalone=standalone,
             )
             self._grants_by_id[grant.id] = grant
             self._grant_by_token[token] = grant
@@ -97,12 +108,13 @@ class DevWandRelay:
         async with self._lock:
             now_ms = self.clock_ms()
             self._purge_expired_locked(now_ms)
-            session = self.session_lookup(token)
-            if session is None:
-                raise RoomError("invalid_token", status_code=401)
-            if session.source is not Source.PHONE:
-                raise RoomError("phone_source_required", status_code=409)
             grant = self._grant_by_token.get(token)
+            if grant is None or not grant.standalone:
+                session = self.session_lookup(token)
+                if session is None:
+                    raise RoomError("invalid_token", status_code=401)
+                if session.source is not Source.PHONE:
+                    raise RoomError("phone_source_required", status_code=409)
             if grant is None or grant.expires_at_ms <= now_ms:
                 raise RoomError("pair_code_required", status_code=409)
             if grant.owner is not None:
@@ -125,7 +137,7 @@ class DevWandRelay:
             if grant.phone is not None:
                 raise RoomError("phone_already_connected", status_code=409)
             session = self.session_lookup(grant.token)
-            if session is None or session.source is not Source.PHONE:
+            if not grant.standalone and (session is None or session.source is not Source.PHONE):
                 self._invalidate_locked(grant, "session_expired")
                 raise RoomError("invalid_pair_code", status_code=401)
             grant.phone = peer

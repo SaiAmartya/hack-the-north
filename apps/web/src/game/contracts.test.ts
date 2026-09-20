@@ -8,7 +8,8 @@ describe("Python/TypeScript wire fixture", () => {
       parseRules(fixture.rules)
         .spells.filter((s) => s.enabled)
         .map((s) => s.spell),
-    ).toEqual(["stupefy", "protego"]);
+    ).toEqual(["stupefy", "protego", "expelliarmus", "incendio", "episkey"]);
+    expect(parseRules(fixture.rules).spells.find((s) => s.spell === "episkey")?.heal).toBe(18);
     expect(parseSnapshot(fixture.snapshot).players.P1?.bootId).toBeNull();
     expect(
       parseSnapshot(fixture.snapshot).recentEvents[0].stateVersion,
@@ -44,5 +45,16 @@ describe("Python/TypeScript wire fixture", () => {
         ],
       }),
     ).toThrow();
+  });
+  it("requires all five distinct moves and their cooldown state", () => {
+    expect(() => parseRules({ ...fixture.rules, spells: fixture.rules.spells.slice(0, 3) })).toThrow();
+    expect(() => parseRules({ ...fixture.rules, spells: Array(5).fill(fixture.rules.spells[0]) })).toThrow();
+    expect(() => parseSnapshot({
+      ...fixture.snapshot,
+      players: {
+        ...fixture.snapshot.players,
+        P1: { ...fixture.snapshot.players.P1, cooldownUntilMs: { stupefy: 0, protego: 0 } },
+      },
+    })).toThrow();
   });
 });

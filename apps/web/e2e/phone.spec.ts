@@ -366,6 +366,11 @@ test("phone relay performs the byte handshake, motion, feedback, and page-hide t
 }) => {
   const operations: RelayOperation[] = [];
   const relayReplies: string[] = [];
+  const duelReservations: string[] = [];
+  owner.on("request", request => {
+    if (request.method() === "POST" && /\/api\/game\/(room|session)$/.test(request.url()))
+      duelReservations.push(request.url());
+  });
   owner.on("websocket", (socket) => {
     if (!socket.url().endsWith("/ws/dev-wand")) return;
     socket.on("framesent", ({ payload }) => {
@@ -394,28 +399,12 @@ test("phone relay performs the byte handshake, motion, feedback, and page-hide t
     );
     const { WandClient } = await import(/* @vite-ignore */ clientPath);
     const game = new GameClient();
-    const code = await game.createRoom();
-    const deadline = performance.now() + 7_000;
-    while (true) {
-      try {
-        await game.connect("phone", code);
-        break;
-      } catch (error) {
-        if (
-          !(error instanceof Error) ||
-          error.message !== "This duel is full." ||
-          performance.now() >= deadline
-        )
-          throw error;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
     const pair = await game.pair();
     const wand = new WandClient(
       new VirtualWandTransport(
         undefined,
         undefined,
-        new PhoneRelayChannel(game.token),
+        new PhoneRelayChannel(pair.ownerToken),
       ),
     );
     const ready = wand.connect();
@@ -490,6 +479,7 @@ test("phone relay performs the byte handshake, motion, feedback, and page-hide t
     return harness.wand.getSnapshot();
   });
   expect(handshake.phase).toBe("streaming");
+  expect(duelReservations).toEqual([]);
 
   const handshakeOperations = operations.slice();
   expect(

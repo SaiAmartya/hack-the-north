@@ -1,46 +1,25 @@
 import { expect, test } from "@playwright/test";
 
-test("a duel is started or joined by code before badge and iPhone are the only wand actions", async ({ page }) => {
+test("the homepage requires a wand before offering duel creation or a code", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Find your opponent." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Wands at.*the ready/ })).toBeVisible();
   await expect(page.getByRole("button")).toHaveCount(2);
-  await expect(page.getByRole("button", { name: "Start a duel", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Join with code", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start a duel", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Join with code", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("textbox")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Connect badge", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect iPhone", exact: true })).toBeVisible();
   await expect(page.getByText(/virtual|device lab|simulated/i)).toHaveCount(0);
   await page.screenshot({ path: "/tmp/wandduel-home.png", fullPage: true });
-
-  await page.getByLabel("Duel code").fill("abc");
-  await page.getByRole("button", { name: "Join with code", exact: true }).click();
-  await expect(page.getByRole("alert")).toHaveText("Enter the six-character duel code.");
-
-  await page.getByRole("button", { name: "Start a duel", exact: true }).click();
-  await expect(page.getByLabel("Duel code")).toHaveText(/^[A-Z0-9]{6}$/);
-  await expect(
-    page.getByRole("button", { name: "Connect badge", exact: true }),
-  ).toBeVisible();
-  await expect(page.getByRole("button",{name:"Connect iPhone",exact:true})).toBeVisible();
-  await expect(page.getByText(/virtual|device lab|simulated/i)).toHaveCount(0);
-  await page.screenshot({ path: "/tmp/wandduel-wands.png", fullPage: true });
-
-  await page.getByRole("button", { name: "Leave duel", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Start a duel", exact: true })).toBeVisible();
-
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
   await expect(page.getByRole("button")).toHaveCount(2);
-  await page.getByLabel("Duel code").fill("k7x-2pd");
-  await page.getByRole("button", { name: "Join with code", exact: true }).click();
-  await expect(page.getByLabel("Duel code")).toHaveText("K7X2PD");
-  await expect(
-    page.getByRole("button", { name: "Connect badge", exact: true }),
-  ).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: "/tmp/wandduel-mobile.png", fullPage: true });
 });
 
 test("failed phone setup offers a fresh connection instead of a preparing screen", async ({ page }) => {
   await page.route("**/api/phone/config", route => route.fulfill({ status: 503 }));
   await page.goto("/");
-  await page.getByRole("button", { name: "Start a duel", exact: true }).click();
   await page.getByRole("button", { name: "Connect iPhone", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Let's reconnect." })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Preparing your iPhone…" })).toHaveCount(0);
@@ -97,12 +76,12 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
             url,
             sent: [] as string[],
             closed: false,
-            claim: () => undefined,
+            claim: (): void => undefined,
           };
           Reflect.set(window, "__hostedPhoneSocket", record);
           const socket = {
             url,
-            readyState: NativeWebSocket.CONNECTING,
+            readyState: NativeWebSocket.CONNECTING as number,
             bufferedAmount: 0,
             onopen: null as ((event: Event) => void) | null,
             onmessage: null as ((event: MessageEvent<string>) => void) | null,
@@ -143,7 +122,6 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
   );
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Start a duel", exact: true }).click();
   await page.getByRole("button", { name: "Connect iPhone" }).click();
   await expect(
     page.getByRole("heading", { name: "Scan with iPhone." }),
@@ -183,7 +161,7 @@ test("hosted iPhone pairing uses POST-only brokers, a public QR, and explicit ap
 
   await page.getByRole("button", { name: "Yes, connect" }).click();
   await expect(
-    page.getByRole("heading", { name: "Connecting your iPhone…" }),
+    page.getByRole("heading", { name: /Connecting.*your iPhone…/ }),
   ).toBeVisible();
   const afterApproval = await page.evaluate(() =>
     Reflect.get(window, "__hostedPhoneSocket"),

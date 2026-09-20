@@ -5,6 +5,7 @@ import {
   type UtteranceEvidence,
 } from "./fusion";
 import type { GestureEvidence, SpellName } from "./motion";
+import type { Spell } from "../game/contracts";
 
 function gesture(
   id: string,
@@ -18,7 +19,7 @@ function gesture(
 
 function utterance(
   id: string,
-  spell: SpellName,
+  spell: Spell,
   startMs: number,
   endMs: number,
   finalAtMs = endMs + 300,
@@ -37,6 +38,32 @@ function finish(fusion: CastFusion, evidence: UtteranceEvidence): void {
 }
 
 describe("speech and gesture fusion", () => {
+  it.each([
+    ["stupefy", "stupefy"],
+    ["expelliarmus", "stupefy"],
+    ["incendio", "stupefy"],
+    ["protego", "protego"],
+    ["episkey", "protego"],
+  ] as const)("selects %s from speech and the %s movement", (spell, movement) => {
+    const attempts: CastAttempt[] = [];
+    const fusion = new CastFusion((attempt) => attempts.push(attempt));
+    finish(fusion, utterance("voice", spell, 1_000, 1_500));
+    fusion.pushGesture(gesture("motion", movement, 1_300, 1_700));
+    expect(attempts.map((attempt) => attempt.spell)).toEqual([spell]);
+  });
+
+  it.each(["incendio", "expelliarmus", "episkey"] as const)(
+    "rejects the wrong movement for %s without weakening fusion timing",
+    (spell) => {
+      const attempts: CastAttempt[] = [];
+      const fusion = new CastFusion((attempt) => attempts.push(attempt));
+      finish(fusion, utterance("voice", spell, 1_000, 1_500));
+      fusion.pushGesture(gesture("motion", spell === "episkey" ? "stupefy" : "protego", 1_300, 1_700));
+      expect(attempts).toHaveLength(0);
+      expect(fusion.getState().lastRejection).toBe("spell-gesture-mismatch");
+    },
+  );
+
   it("accepts either arrival order once and consumes duplicate IDs", () => {
     const attempts: CastAttempt[] = [];
     const fusion = new CastFusion((attempt) => attempts.push(attempt));
