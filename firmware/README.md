@@ -233,14 +233,56 @@ and ST7735/ST7789 **1.11.0**. No stock Lua IDE is needed. Generated `.pio/` and 
 are ignored, not release artifacts to commit. The application is
 `firmware/.pio/build/badge/firmware.bin`; the generated table is `partitions.bin` beside it.
 
-**Never use `pio run -t upload` on a badge.** It writes the bootloader and partition table as well as
-the app, and PlatformIO's bundled esptool crashed mid-write on this Mac on September 19, leaving a
-partially written bootloader that had to be restored from the stock backup. Since that day,
-`badge_flash.py flash` is the app-only procedure: it verifies the device-bound stock backup, refuses to
-write if the bootloader/partition region no longer matches that backup (`restore-boot` fixes it),
-writes only the app slot with a consistent `esptool` and `--no-progress`, and reads the whole
-application back before rebooting. Its `restore` command still writes the entire 4 MiB stock image at
-offset zero and is for full recovery only.
+**Never use `pio run -t upload` or `python tools/badge_flash.py flash` on a badge.** Both are
+multi-artifact upload paths that can write the bootloader and partition table as well as the app.
+PlatformIO's bundled esptool crashed mid-write on this Mac on September 19, leaving a partially
+written bootloader that had to be restored from the stock backup. The guarded app-only procedure in
+[section 3](#3-guarded-app-only-installation) is the only installation path: it verifies the
+device-bound stock backup, refuses to write if the bootloader/partition region no longer matches that
+backup (`restore-boot` fixes it), writes only the app slot with a consistent `esptool`, and reads the
+whole application back before rebooting. `badge_flash.py restore` writes the entire 4 MiB stock image
+at offset zero and is for separately approved full recovery only.
+
+### macOS recovery and successful flash sequence
+
+Run these commands from the **repository root**, not from `firmware/`. They document the successful
+September 19 workflow without embedding a badge MAC, backup path, or hash in Git.
+
+1. If the linker reports duplicate definitions from paths ending in names such as
+   `Adafruit_SPITFT 2.cpp`, the generated dependency cache was copied or otherwise corrupted. Confirm
+   the symptom, remove only the generated environment cache, then rebuild:
+
+   ```sh
+   find firmware/.pio/libdeps/badge -name '* 2.*'
+   rm -rf firmware/.pio/libdeps/badge firmware/.pio/build/badge
+   source firmware/.venv/bin/activate
+   pio run -d firmware -e badge
+   find firmware/.pio/libdeps/badge -name '* 2.*'
+   ```
+
+   The first `find` may print duplicate files; the final one must print nothing. Do not let Finder,
+   sync software, or a manual copy operation modify `firmware/.pio/` while PlatformIO is building.
+
+2. Confirm the build ends in `SUCCESS`, then connect one badge with a data-capable USB cable. Close
+   the badge IDE, serial monitor, Chrome, and BLE test tools. List the port:
+
+   ```sh
+   python tools/badge_flash.py list
+   ```
+
+3. Enter ROM download mode: unplug USB, hold **START** (the play button/GPIO9), reconnect USB, then
+   release START. A blank display is expected. Re-run `list` because the port can change, then take the
+   two-read verified backup from section 2. A failed `no-reset` connection means the badge is not in
+   download mode; repeat this step rather than trying a write.
+
+4. Keep the badge in download mode and run the macOS guarded app-only block in section 3 with the
+   exact newly listed port, the base MAC returned by `read-mac`, and that badge's verified private
+   backup image. The block must complete its live identity check, partition comparisons, write at
+   `0x10000`, and byte-for-byte application readback before it is considered flashed.
+
+5. Boot normally using the badge's approved reset/power procedure **without holding START**. Re-list
+   the port and run the diagnostics in section 4. A verified flash/readback is not firmware or BLE
+   qualification; preserve the command output and complete the remaining hardware gates separately.
 
 ### 2. Identify and preserve one explicitly approved badge
 
