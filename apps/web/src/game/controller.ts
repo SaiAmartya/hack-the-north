@@ -141,7 +141,7 @@ export class DuelController {
           speechPhase: this.speech.getSnapshot().phase, tutorial: this.game.snapshot?.tutorial ?? null });
         // Speech capture and wand input have separate generations, just as at onset.
         if (e.generation === this.speech.getSnapshot().generation)
-          this.fusion.cancelUtterance(e.id, this.generation, e.disposition);
+          this.fusion.cancelUtterance(e.id, this.generation);
         this.recordFusion();
       }),
       this.speech.onDiagnostic(event => this.telemetry.record(`speech.${event.type}`, event, event.atMs)),
@@ -684,7 +684,7 @@ export class DuelController {
         if (this.wand !== wand || document.hidden) return;
         this.syncInputState();
         if (sample.breaksGesture) {
-          this.fusion.reset(this.generation);
+          this.fusion.clearMotion();
           this.spikes.reset();
         }
         this.motion.push(sample, this.generation);

@@ -113,8 +113,10 @@ Before the multiplayer demo, each laptop should complete a real microphone-and-w
 solo, then both players should verify damage and shielding in the shared room. Speech decoding
 runs locally with its own one-second result deadline; a healthy Render referee does not measure
 that laptop's microphone or inference speed. Normal mode pairs capture intervals with up to
-two seconds of separation in either order. For diagnosis, leave **Simple motion off** so that
-the typed jab/raise path is still exercised.
+two seconds of separation in either order. A confirmed spell stays armed for its next gesture;
+background sounds cannot cancel it. To change an uncast spell, wait two seconds after finishing
+the first word, then say the new one. For diagnosis, leave **Simple motion off** so that the
+typed jab/raise path is still exercised.
 
 **Tutorial duel**, directly beneath **Duel a bot**, teaches each spell's gesture and effect.
 Instructions pause the battle; choose **Try it**, speak while moving, and wait for the confirmed

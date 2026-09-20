@@ -209,7 +209,7 @@ describe("speech and gesture fusion", () => {
     }
   });
 
-  it("pairs a completed movement before a newer sound without losing the newer command", () => {
+  it("arms one confirmed spell through subsequent sounds until its gesture is consumed", () => {
     const attempts: CastAttempt[] = [];
     const fusion = new CastFusion(value => attempts.push(value));
     finish(fusion, utterance("first", "protego", 1_000, 1_500, 1_700));
@@ -217,29 +217,27 @@ describe("speech and gesture fusion", () => {
     // The raise settles after the next onset callback, but was captured before it.
     fusion.pushGesture(gesture("raise", "protego", 1_400, 1_800));
     expect(attempts.map(value => value.spell)).toEqual(["protego"]);
-    expect(fusion.getState().activeUtterance?.id).toBe("next");
+    expect(fusion.getState().activeUtterance).toBeUndefined();
     fusion.pushGesture(gesture("jab", "stupefy", 2_100, 2_500));
     fusion.pushUtterance(utterance("next", "incendio", 1_850, 2_200, 2_600));
+    expect(attempts.map(value => value.spell)).toEqual(["protego"]);
+    finish(fusion, utterance("fresh", "incendio", 2_600, 2_900));
     expect(attempts.map(value => value.spell)).toEqual(["protego", "incendio"]);
   });
 
-  it.each(["cancel", "continuation"] as const)("clears an older word when a newer command is ambiguous after %s", ending => {
+  it.each(["cancel", "continuation"] as const)("retains an armed word through an ambiguous later sound after %s", ending => {
     const attempts: CastAttempt[] = [];
     const fusion = new CastFusion(value => attempts.push(value));
     finish(fusion, utterance("word", "protego", 0, 400, 800));
     fusion.beginUtterance({ id: "newer", generation: 4, startMs: 1_000 });
-    fusion.pushGesture(gesture("ambiguous", "protego", 900, 1_400));
     if (ending === "cancel") fusion.cancelUtterance("newer", 4);
-    else fusion.beginUtterance({ id: "tail", generation: 4, startMs: 2_860 });
-    expect(fusion.getState()).toMatchObject({ activeUtterance: undefined, pendingUtterance: undefined, pendingGesture: undefined });
-    fusion.cancelUtterance("newer", 4, "confirmed-nonspell");
-    fusion.pushUtterance(utterance("newer", "stupefy", 1_000, 2_800, 3_000));
+    else fusion.beginUtterance({ id: "tail", generation: 4, startMs: 1_200 });
+    expect(fusion.getState().pendingUtterance?.id).toBe("word");
+    fusion.cancelUtterance("newer", 4);
+    fusion.pushUtterance(utterance("newer", "stupefy", 1_000, 1_300, 1_500));
     fusion.pushGesture(gesture("ambiguous", "protego", 900, 1_400));
-    expect(attempts).toEqual([]);
-    finish(fusion, utterance("fresh", "protego", 5_000, 5_400));
-    expect(attempts).toEqual([]);
-    fusion.pushGesture(gesture("fresh-raise", "protego", 5_100, 5_600));
-    expect(attempts.map(value => [value.utteranceId, value.gestureId])).toEqual([["fresh", "fresh-raise"]]);
+    fusion.pushGesture(gesture("ambiguous", "protego", 900, 1_400));
+    expect(attempts.map(value => [value.utteranceId, value.gestureId])).toEqual([["word", "ambiguous"]]);
   });
 
   it("protects confirmed speech from later noise and accepts a delayed classified raise once", () => {
@@ -247,7 +245,7 @@ describe("speech and gesture fusion", () => {
     const fusion = new CastFusion(value => attempts.push(value));
     finish(fusion, utterance("spell", "protego", 1_000, 1_600, 2_000));
     fusion.beginUtterance({ id: "noise", generation: 4, startMs: 1_970 });
-    fusion.cancelUtterance("noise", 4, "confirmed-nonspell");
+    fusion.cancelUtterance("noise", 4);
     fusion.pushUtterance(utterance("noise", "stupefy", 1_970, 2_100, 2_300));
     fusion.pushGesture(gesture("raise", "protego", 2_300, 2_900));
     fusion.pushGesture(gesture("raise", "protego", 2_300, 2_900));
@@ -263,28 +261,38 @@ describe("speech and gesture fusion", () => {
     expect(attempts.map(value => value.gestureId)).toEqual(["recent"]);
   });
 
-  it("lets a newly confirmed spell replace an unmatched word without casting it from the new movement", () => {
+  it("admits a replacement command after two seconds instead of locking speech for the seven-second retention TTL", () => {
     const attempts: CastAttempt[] = [];
     const fusion = new CastFusion(value => attempts.push(value));
     finish(fusion, utterance("first", "stupefy", 1_000, 1_500));
-    fusion.beginUtterance({ id: "second", generation: 4, startMs: 2_000 });
-    fusion.pushGesture(gesture("second-jab", "stupefy", 2_100, 2_400));
+    fusion.beginUtterance({ id: "second", generation: 4, startMs: 3_501 });
+    expect(fusion.getState().pendingUtterance).toBeUndefined();
+    fusion.pushGesture(gesture("second-jab", "stupefy", 3_600, 3_900));
     expect(attempts).toEqual([]);
-    fusion.pushUtterance(utterance("second", "incendio", 2_000, 2_500));
+    fusion.pushUtterance(utterance("second", "incendio", 3_501, 4_000));
     expect(attempts.map(value => value.spell)).toEqual(["incendio"]);
     finish(fusion, utterance("first", "stupefy", 1_000, 1_500));
     expect(attempts).toHaveLength(1);
   });
 
-  it("holds a confirmed word through unverified noise and pairs after a no-speech discard", () => {
+  it("casts during later noise without waiting for that noise to resolve", () => {
     const attempts: CastAttempt[] = [];
     const fusion = new CastFusion(value => attempts.push(value));
     finish(fusion, utterance("word", "protego", 1_000, 1_500));
     fusion.beginUtterance({ id: "noise", generation: 4, startMs: 1_800 });
     fusion.pushGesture(gesture("raise", "protego", 1_700, 2_100));
-    expect(attempts).toEqual([]);
-    fusion.cancelUtterance("noise", 4, "confirmed-nonspell");
     expect(attempts.map(value => value.spell)).toEqual(["protego"]);
+    fusion.cancelUtterance("noise", 4);
+    expect(attempts.map(value => value.spell)).toEqual(["protego"]);
+  });
+
+  it("retains a recent motion-first candidate when a new command replaces an expired armed word", () => {
+    const attempts: CastAttempt[] = [];
+    const fusion = new CastFusion(value => attempts.push(value));
+    finish(fusion, utterance("old", "protego", 1_000, 1_500));
+    fusion.pushGesture(gesture("new-jab", "stupefy", 3_100, 3_400));
+    finish(fusion, utterance("new", "stupefy", 3_501, 3_900));
+    expect(attempts.map(value => [value.spell, value.gestureId])).toEqual([["stupefy", "new-jab"]]);
   });
 
   it("enforces final deadline while accepting exact timing boundaries", () => {
@@ -395,7 +403,7 @@ describe("optional simple motion fusion", () => {
     fusion.setSimpleMotion(true);
     finish(fusion, utterance("word", "stupefy", 1_000, 1_500, 1_600));
     fusion.beginUtterance({ id: "noise", generation: 4, startMs: 1_650 });
-    fusion.cancelUtterance("noise", 4, "confirmed-nonspell");
+    fusion.cancelUtterance("noise", 4);
     fusion.pushUtterance(utterance("noise", "protego", 1_650, 1_700, 1_750));
     expect(fusion.getState().pendingUtterance?.id).toBe("word");
     fusion.pushGesture(spike("motion", 1_800, 1_820));

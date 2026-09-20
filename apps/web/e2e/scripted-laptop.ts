@@ -207,7 +207,9 @@ export async function castWithMicrophone(
   page: Page,
   spell: "stupefy" | "protego",
   order: CastOrder,
-  { gapMs = 1_400, inferenceDelayMs = 350 } = {},
+  { gapMs = 1_400, inferenceDelayMs = 350, speechFirst }: {
+    gapMs?: number; inferenceDelayMs?: number; speechFirst?: "immediate" | "after-final-noise";
+  } = {},
 ) {
   const requests: { bytes: number; startMs: number; endMs: number }[] = [];
   const transcribe = async (route: Route) => {
@@ -215,14 +217,17 @@ export async function castWithMicrophone(
     requests.push({ bytes: request.postDataBuffer()?.byteLength ?? 0,
       startMs: Number(headers["x-wand-voice-start-ms"]), endMs: Number(headers["x-wand-voice-end-ms"]) });
     await new Promise(resolve => setTimeout(resolve, inferenceDelayMs));
+    const noise = speechFirst === "after-final-noise" && requests.length > 1;
     await route.fulfill({ json: {
       utteranceId: headers["x-wand-utterance-id"], generation: Number(headers["x-wand-generation"]),
-      text: spell, transcript: spell, spell, accepted: true, inferenceMs: inferenceDelayMs,
+      text: noise ? "" : spell, transcript: noise ? "unclear background sound" : spell,
+      spell: noise ? null : spell, accepted: !noise, inferenceMs: inferenceDelayMs,
+      ...(noise ? { reason: "low-confidence" } : {}),
     } });
   };
   await page.route("**/api/speech/transcribe", transcribe);
   try {
-    const proof = await page.evaluate(async ({ spellName, order, gapMs }) => {
+    const proof = await page.evaluate(async ({ spellName, order, gapMs, speechFirst }) => {
       const c = Reflect.get(window, "__duelController");
       const badge = Reflect.get(window, "__scriptedBadge");
       const network = Reflect.get(window, "__scriptedNetwork");
@@ -232,12 +237,16 @@ export async function castWithMicrophone(
       type Interval = { id: string; spell: string; startMs: number; endMs: number };
       const gestures: Interval[] = [];
       const voices: (Interval & { arrivedMs: number })[] = [];
+      const onsets: { id: string; startMs: number }[] = [];
+      const discards: { id: string; disposition: string }[] = [];
       const acknowledgements: { accepted: boolean; reason?: string; atMs: number }[] = [];
       const originalGesture = c.fusion.pushGesture.bind(c.fusion), originalAck = c.game.onAck;
       const generation = c.generation, sendsBefore = network.casts.length;
       // Observers delegate unchanged. No fusion reset, fabricated interval or direct evidence injection.
       c.fusion.pushGesture = (evidence: Interval) => { gestures.push({ ...evidence }); originalGesture(evidence); };
       const unsubscribe = c.speech.onSpeech((evidence: Interval & { arrivedMs: number }) => voices.push({ ...evidence }));
+      const unsubscribeOnsets = c.speech.onOnset((onset: { id: string; startMs: number }) => onsets.push({ ...onset }));
+      const unsubscribeDiscards = c.speech.onDiscard((event: { id: string; disposition: string }) => discards.push({ ...event }));
       c.game.onAck = (message: { command: string; accepted: boolean; reason?: string }) => {
         originalAck(message);
         if (message.command === "cast") acknowledgements.push({ accepted: message.accepted, reason: message.reason, atMs: performance.now() });
@@ -250,10 +259,13 @@ export async function castWithMicrophone(
           fusion: c.fusion.getState(), speech: c.speech.getSnapshot(), motion: c.motion.getDiagnostics(),
           wand: c.wand.getSnapshot().issue, phase: c.game.snapshot?.phase })}`);
       };
-      const say = async () => {
+      const sound = async () => {
         microphone.offset.value = 0.08;
         await delay(320);
         microphone.offset.value = 0;
+      };
+      const say = async () => {
+        await sound();
         await until(() => voices.length > 0, "No real speech evidence from synthetic PCM");
       };
       const movement = spellName === "protego" ? "guard" : "jab";
@@ -264,11 +276,24 @@ export async function castWithMicrophone(
           await say();
           await moving;
         } else if (order === "speech-first") {
-          await say();
-          // The existing trace begins with ~350 ms of grip/wind-up before detected onset.
-          // Assertions check the captured interval, not this scheduling approximation.
-          await delay(voices[0].endMs + gapMs - 350 - performance.now());
-          await badge.play(movement);
+          if (speechFirst === "immediate") {
+            await sound();
+            // Start moving as soon as speaking ends, without waiting for ASR.
+            await badge.play(movement);
+          } else if (speechFirst === "after-final-noise") {
+            await say();
+            const noise = sound();
+            await until(() => onsets.length === 2, "No later noise onset from real PCM");
+            await badge.play(movement);
+            await noise;
+            await until(() => discards.length > 0, "Later low-confidence noise was not discarded");
+          } else {
+            await say();
+            // The trace begins with ~350 ms of grip/wind-up before detected onset.
+            // Assertions check the captured interval, not this scheduling approximation.
+            await delay(voices[0].endMs + gapMs - 350 - performance.now());
+            await badge.play(movement);
+          }
         } else {
           await badge.play(movement);
           await until(() => gestures.length > 0, "Raw BLE gesture did not classify");
@@ -279,18 +304,22 @@ export async function castWithMicrophone(
         if (spellName === "protego") await badge.play("lower");
         await delay(500); // Keep live callbacks/timers running to catch duplicate submissions.
         if (c.generation !== generation) throw new Error("Input generation changed during cast proof");
-        return { gestures, voices, acknowledgements, sends: network.casts.slice(sendsBefore),
+        return { gestures, voices, onsets, discards, acknowledgements, sends: network.casts.slice(sendsBefore),
           healthy: c.healthy(), rejectedSamples: c.wand.getSnapshot().rejected };
       } finally {
         microphone.offset.value = 0;
         unsubscribe();
+        unsubscribeOnsets();
+        unsubscribeDiscards();
         c.fusion.pushGesture = originalGesture;
         c.game.onAck = originalAck;
       }
-    }, { spellName: spell, order, gapMs });
-    expect(requests).toHaveLength(1);
-    expect(requests[0].bytes).toBeGreaterThan(0);
-    expect(requests[0].bytes).toBeLessThanOrEqual(96_000);
+    }, { spellName: spell, order, gapMs, speechFirst });
+    expect(requests).toHaveLength(speechFirst === "after-final-noise" ? 2 : 1);
+    for (const request of requests) {
+      expect(request.bytes).toBeGreaterThan(0);
+      expect(request.bytes).toBeLessThanOrEqual(96_000);
+    }
     expect(proof.voices).toHaveLength(1);
     expect(proof.gestures).toHaveLength(1);
     expect(proof.voices[0].spell).toBe(spell);
@@ -303,6 +332,16 @@ export async function castWithMicrophone(
     const intervalGap = Math.max(0, voice.startMs - motion.endMs, motion.startMs - voice.endMs);
     if (order === "overlap") {
       expect(Math.min(voice.endMs, motion.endMs) - Math.max(voice.startMs, motion.startMs)).toBeGreaterThan(0);
+    } else if (order === "speech-first" && speechFirst) {
+      expect(motion.startMs).toBeGreaterThan(voice.endMs);
+      expect(intervalGap).toBeLessThan(2_000);
+      if (speechFirst === "immediate") expect(motion.startMs).toBeLessThan(voice.arrivedMs);
+      else {
+        expect(proof.onsets).toHaveLength(2);
+        expect(proof.onsets[1].startMs).toBeGreaterThanOrEqual(voice.arrivedMs);
+        expect(proof.onsets[1].startMs).toBeLessThan(motion.startMs);
+        expect(proof.discards).toEqual([expect.objectContaining({ id: proof.onsets[1].id, disposition: "ambiguous" })]);
+      }
     } else {
       expect(intervalGap).toBeGreaterThanOrEqual(1_200);
       expect(intervalGap).toBeLessThanOrEqual(1_600);

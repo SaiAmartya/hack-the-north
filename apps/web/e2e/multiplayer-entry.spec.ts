@@ -67,7 +67,7 @@ async function sharedHealth(first: Page, second: Page, hp: number) {
 }
 
 test("two normal players align microphone and wand in every order despite delayed cast delivery", async ({ page, browser }, testInfo) => {
-  test.setTimeout(70_000);
+  test.setTimeout(90_000);
   const first = await scriptedLaptop(page);
   first.enableSpeech();
   await connectBadge(page);
@@ -104,27 +104,46 @@ test("two normal players align microphone and wand in every order despite delaye
   }
   const evidence = [];
   let hp = 100;
-  for (const order of ["overlap", "speech-first", "movement-first"] as const) {
+  const cases = [
+    { order: "overlap", spell: "stupefy" },
+    { order: "speech-first", spell: "stupefy", speechFirst: "immediate" },
+    { order: "movement-first", spell: "stupefy" },
+    { order: "speech-first", spell: "stupefy", speechFirst: "after-final-noise" },
+    { order: "speech-first", spell: "protego", speechFirst: "immediate" },
+    { order: "speech-first", spell: "protego", speechFirst: "after-final-noise" },
+  ] as const;
+  for (const scenario of cases) {
+    const { order, spell } = scenario;
+    const speechFirst = "speechFirst" in scenario ? scenario.speechFirst : undefined;
     for (const player of [page, opponent]) await expect.poll(async () => {
       const state = await snapshot(player);
-      return Math.max(state.players.P1!.cooldownUntilMs.stupefy, state.players.P2!.cooldownUntilMs.stupefy) - state.serverNowMs;
+      return Math.max(state.players.P1!.cooldownUntilMs[spell], state.players.P2!.cooldownUntilMs[spell]) - state.serverNowMs;
     }).toBeLessThanOrEqual(0);
-    const casts = await Promise.all([page, opponent].map(player => castWithMicrophone(player, "stupefy", order)));
+    const casts = await Promise.all([page, opponent].map(player => castWithMicrophone(player, spell, order, { speechFirst })));
     for (const proof of casts) {
       expect(proof.sends[0].sentAtMs! - proof.sends[0].queuedAtMs).toBeGreaterThanOrEqual(150);
       expect(proof.acknowledgements[0].atMs).toBeGreaterThanOrEqual(proof.sends[0].sentAtMs!);
     }
-    evidence.push({ order, casts });
-    hp -= 20;
+    evidence.push({ ...scenario, casts });
+    if (spell === "stupefy") hp -= 20;
     for (const player of [page, opponent]) await expect.poll(async () => {
       const state = await snapshot(player);
       return [state.players.P1?.hp, state.players.P2?.hp];
     }).toEqual([hp, hp]);
+    if (spell === "protego") {
+      // The helper lowers the wand after ACK; the 1.2 s shield may have expired
+      // by now, but both clients must retain the same authoritative effect.
+      const views = await Promise.all([page, opponent].map(snapshot));
+      expect(views[0].players.P1!.shieldUntilMs).toBe(views[1].players.P1!.shieldUntilMs);
+      expect(views[0].players.P2!.shieldUntilMs).toBe(views[1].players.P2!.shieldUntilMs);
+      for (const state of views) for (const actor of ["P1", "P2"])
+        expect(state.recentEvents.some(event => event.type === "shieldRaised" && event.actor === actor)).toBe(true);
+    }
   }
   const evidencePath = testInfo.outputPath("multiplayer-microphone-motion-timing.json");
   await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
   await testInfo.attach("multiplayer-microphone-motion-timing", { path: evidencePath, contentType: "application/json" });
-  const expectedSpells = Array(3).fill("stupefy");
+  const expectedSpells = cases.map(scenario => scenario.spell);
   for (const player of [page, opponent]) {
     const state = await snapshot(player);
     for (const actor of ["P1", "P2"])

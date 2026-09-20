@@ -122,7 +122,7 @@ function fuseSpeech(client: SpeechClient) {
   const fusion = new CastFusion((attempt) => casts.push(attempt));
   client.onOnset((event) => fusion.beginUtterance(event));
   client.onSpeech((event) => fusion.pushUtterance({ ...event, finalAtMs: event.arrivedMs }));
-  client.onDiscard((event) => fusion.cancelUtterance(event.id, event.generation, event.disposition));
+  client.onDiscard((event) => fusion.cancelUtterance(event.id, event.generation));
   return { fusion, casts };
 }
 
@@ -781,7 +781,7 @@ describe("speech client lifecycle", () => {
     ["no-speech", "cutoff", false],
     ["no-speech", "paused", false],
     ["no-speech", "timeout", false],
-  ] as const)("allows prior-word fallback only for confirmed nonspell (%s, %s)", async (reason, ending, mayFallback) => {
+  ] as const)("keeps an armed spell through later microphone noise (%s, %s)", async (reason, ending, confirmedNonspell) => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
     const { fusion, casts } = fuseSpeech(client);
@@ -799,7 +799,7 @@ describe("speech client lifecycle", () => {
     else platform.utterance();
     const newer = new Headers(platform.requests.at(-1)!.init?.headers);
     fusion.pushGesture(matchingGesture(newer, "movement-during-new-sound"));
-    expect(casts).toEqual([]);
+    expect(casts.map(cast => cast.gestureId)).toEqual(["movement-during-new-sound"]);
     if (ending === "paused") client.setRecognitionEnabled(false);
     if (ending === "timeout") await vi.advanceTimersByTimeAsync(1_000);
     platform.transcriptions[1].resolve(Response.json({ utteranceId: newer.get("X-Wand-Utterance-Id"),
@@ -807,9 +807,9 @@ describe("speech client lifecycle", () => {
       spell: null, accepted: false, reason }));
     await flush();
     expect(discards).toEqual([{ id: newer.get("X-Wand-Utterance-Id"), generation: client.getSnapshot().generation,
-      disposition: mayFallback ? "confirmed-nonspell" : "ambiguous" }]);
-    expect(casts.map(cast => cast.gestureId)).toEqual(mayFallback ? ["movement-during-new-sound"] : []);
-    if (!mayFallback) expect(fusion.getState()).toMatchObject({ pendingUtterance: undefined, pendingGesture: undefined });
+      disposition: confirmedNonspell ? "confirmed-nonspell" : "ambiguous" }]);
+    expect(casts.map(cast => cast.gestureId)).toEqual(["movement-during-new-sound"]);
+    expect(fusion.getState()).toMatchObject({ pendingUtterance: undefined, pendingGesture: undefined });
     client.stop();
   });
 

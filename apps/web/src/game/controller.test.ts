@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DuelController } from "./controller";
 import { SpeechClient, type SpeechDiscard, type SpeechOnset } from "../speech/client";
-import { WandClient } from "../wand/client";
+import { WandClient, type CapturedMotion } from "../wand/client";
 import { GameClient } from "./client";
-import { CueEffect, PresentationPhase, SpellCode } from "../wand/protocol";
+import { CueEffect, MotionFlag, PresentationPhase, SpellCode } from "../wand/protocol";
 import { parseRules, parseSnapshot } from "./contracts";
 import welcome from "../../../host/tests/fixtures/game-welcome-v1.json";
 import { DuelTelemetry } from "./telemetry";
@@ -569,6 +569,70 @@ it("a streaming wand is enough: shared profile, microphone started, lobby open, 
   expect(controller.motion.getState().phase).toBe("uncalibrated");
   vi.advanceTimersByTime(100);
   expect(controller.motion.getState().phase).toBe("ready");
+  controller.destroy();
+});
+
+it.each(["active", "confirmed"] as const)("keeps %s speech through a brief motion break but requires a fresh gesture", async (voiceState) => {
+  let sample!: (value: CapturedMotion) => void;
+  vi.spyOn(WandClient.prototype, "onSample").mockImplementation(callback => {
+    sample = callback;
+    return () => {};
+  });
+  vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
+  const getSnapshot = WandClient.prototype.getSnapshot;
+  vi.spyOn(WandClient.prototype, "getSnapshot").mockImplementation(function (this: WandClient) {
+    return { ...getSnapshot.call(this), phase: "streaming" };
+  });
+  vi.spyOn(SpeechClient.prototype, "start").mockResolvedValue();
+  vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
+  const controller = new DuelController();
+  await controller.connect("ble");
+  controller.renderingReady = true;
+  vi.spyOn(controller.speech, "getSnapshot").mockReturnValue({ phase: "listening", issue: "", generation: 1 });
+  controller.game.slot = "P1";
+  controller.game.rules = parseRules(welcome.rules);
+  controller.game.snapshot = parseSnapshot(structuredClone({ ...welcome.snapshot, phase: "playing" }));
+  controller.game.onChange();
+  const send = vi.spyOn(controller.game, "send");
+  const generation = controller.generation;
+  const voice = { id: "before-gap", generation, startMs: 1_000, endMs: 1_400,
+    finalAtMs: 1_500, spell: "stupefy" as const };
+  const oldMotion = { id: "old-motion", generation, startMs: 1_000, endMs: 1_300,
+    quality: 0.9, spell: voiceState === "active" ? "stupefy" as const : "protego" as const };
+  controller.fusion.beginUtterance(voice);
+  if (voiceState === "confirmed") controller.fusion.pushUtterance(voice);
+  controller.fusion.pushGesture(oldMotion);
+  expect(controller.fusion.getState().pendingGesture?.id).toBe("old-motion");
+
+  sample({ version: 1, bootId: 1, seq: 1, captureMs: 1_600, browserMs: 1_600,
+    axMg: 0, ayMg: 0, azMg: 1_000, ageUpperMs: 50, flags: MotionFlag.Valid, breaksGesture: true });
+  const state = controller.fusion.getState();
+  expect(state.pendingGesture).toBeUndefined();
+  expect((voiceState === "active" ? state.activeUtterance : state.pendingUtterance)?.id).toBe("before-gap");
+  if (voiceState === "active") controller.fusion.pushUtterance(voice);
+  // A duplicate callback must not resurrect evidence from before the gap.
+  controller.fusion.pushGesture(oldMotion);
+  expect(controller.fusion.getState().pendingGesture).toBeUndefined();
+  expect(send).not.toHaveBeenCalled();
+
+  controller.fusion.pushGesture({ id: "fresh-motion", generation, spell: "stupefy", quality: 0.9,
+    startMs: 1_700, endMs: 2_000 });
+  expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "cast", spell: "stupefy",
+    gestureId: "fresh-motion", speechId: "before-gap" }));
+  controller.destroy();
+});
+
+it("still retires both active and confirmed speech when the player leaves the room", () => {
+  const controller = new DuelController();
+  const voice = { id: "confirmed", generation: controller.generation, startMs: 1_000,
+    endMs: 1_400, finalAtMs: 1_500, spell: "stupefy" as const };
+  controller.fusion.beginUtterance(voice);
+  controller.fusion.pushUtterance(voice);
+  controller.leaveRoom();
+  expect(controller.fusion.getState().pendingUtterance).toBeUndefined();
+  controller.fusion.beginUtterance({ id: "active", generation: controller.generation, startMs: 2_000 });
+  controller.leaveRoom();
+  expect(controller.fusion.getState().activeUtterance).toBeUndefined();
   controller.destroy();
 });
 

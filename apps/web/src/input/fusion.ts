@@ -123,14 +123,17 @@ export class CastFusion {
       return;
     }
     this.utteranceIds.add(onset.id);
-    // Keep a confirmed word through unverified noise. In normal mode, wait for
-    // the new sound's final/discard before choosing which word owns the motion.
-    if (this.simpleMotion && this.pendingUtterance) return;
+    // Arm one confirmed word while its next gesture can still begin. Breathing
+    // or wand noise must not take ownership away from that command.
+    if (this.pendingUtterance) {
+      if (this.simpleMotion || onset.startMs <= this.pendingUtterance.endMs + this.intervalGapMs) return;
+      this.pendingUtterance = undefined;
+    }
     if (this.activeUtterance) {
       this.reject("second-utterance-onset");
       return;
     }
-    if (!this.pendingUtterance) this.pruneMotions(onset.startMs - this.intervalGapMs);
+    this.pruneMotions(onset.startMs - this.intervalGapMs);
     this.activeUtterance = { ...onset };
     this.lastRejection = "";
   }
@@ -161,14 +164,9 @@ export class CastFusion {
     this.tryPair();
   }
 
-  cancelUtterance(id: string, generation: number, disposition: "confirmed-nonspell" | "ambiguous" = "ambiguous"): void {
+  cancelUtterance(id: string, generation: number): void {
     // A late cancellation must never reset or retire a newer input generation.
     if (generation !== this.generation) return;
-    if (disposition === "confirmed-nonspell" && this.activeUtterance?.id === id && this.pendingUtterance) {
-      this.activeUtterance = undefined;
-      this.tryPair();
-      return;
-    }
     if (this.activeUtterance?.id !== id && this.pendingUtterance?.id !== id) return;
     this.reject("utterance-discarded");
   }
@@ -195,9 +193,6 @@ export class CastFusion {
 
   advance(nowMs: number): void {
     if (!Number.isFinite(nowMs)) throw new Error("Fusion time must be finite");
-    if (this.activeUtterance && this.pendingUtterance && nowMs - this.pendingUtterance.startMs > this.pendingTtlMs) {
-      this.pendingUtterance = undefined;
-    }
     const voice = this.pendingUtterance;
     const oldestStart = this.activeUtterance?.startMs ?? voice?.startMs;
     if (oldestStart !== undefined && nowMs - oldestStart > this.pendingTtlMs) {
@@ -232,6 +227,12 @@ export class CastFusion {
     this.lastRejection = "";
   }
 
+  /** A brief wand gap invalidates movement, not independently captured speech. */
+  clearMotion(): void {
+    this.pendingGesture = undefined;
+    this.motions.length = 0;
+  }
+
   getState(): CastFusionState {
     return {
       generation: this.generation,
@@ -254,7 +255,6 @@ export class CastFusion {
     const requiredGesture = voice.spell === "protego" || voice.spell === "episkey"
       ? "protego" : "stupefy";
     const compatible = this.motions.filter(motion => timingFits(voice, motion, this.simpleMotion) &&
-      (!this.activeUtterance || motion.endMs <= this.activeUtterance.startMs) &&
       (isSpike(motion) || motion.spell === requiredGesture || motion.spell === voice.spell));
     // Select by captured intervals, not callback arrival or an earlier unrelated movement.
     if (!this.simpleMotion) compatible.sort((left, right) => {
@@ -277,16 +277,7 @@ export class CastFusion {
       },
     };
     this.pendingUtterance = undefined;
-    // A movement captured before the next onset belongs to the completed word,
-    // even if classification arrives later. Keep that newer utterance alive.
-    if (this.activeUtterance) {
-      for (let index = this.motions.length - 1; index >= 0; index--)
-        if (this.motions[index].endMs <= this.activeUtterance.startMs) this.motions.splice(index, 1);
-      this.pendingGesture = this.motions[0];
-    } else {
-      this.pendingGesture = undefined;
-      this.motions.length = 0;
-    }
+    this.clearMotion();
     this.lastRejection = "";
     this.onAccepted(attempt);
   }
