@@ -136,6 +136,7 @@ const PLAY_MIN_PEAK_MG = 400;
 const CANDIDATE_MIN_PEAK_MG = 150;  // below this a "movement" is just the hand drifting
 const COACH_MIN_MS = 150;           // shorter, weaker movements get no coaching at all
 const GUARD_MIN_TILT_DEG = 22;
+const QUICK_GUARD_MIN_TILT_DEG = 18;
 const GUARD_MIN_PEAK_MG = 200;
 const DIRECTION_TOLERANCE_DEG = 40;
 const GUARD_TOLERANCE_DEG = 45;
@@ -504,8 +505,17 @@ export class MotionRecognizer {
     if (!burst.earlyEvaluated && this.calibratingSpell !== "protego" && this.impulseComplete(burst, current)) {
       // Fast path for strong strokes. A stroke that is not a spell yet (e.g. a brisk guard raise) is
       // left for the still end, where tilt and hold can be judged.
-      burst.earlyEvaluated = true;
-      if (this.complete(this.features(burst, current.t, false), "early")) burst.settled = true;
+      const features = this.features(burst, current.t, false);
+      const guard = this.templates.get("protego");
+      // The generic jab matches every direction. It must not consume a possible raise before we
+      // have observed its hold, including a brisk raise with a large initial acceleration peak.
+      // Keep looking: a jab's braking acceleration may temporarily tilt the apparent gravity too.
+      const possibleGuard = !this.calibratingSpell && guard?.kind === "guard" && !guard.direction &&
+        this.enabledSpells.has("protego") && features.tiltDeg >= ONSET_TILT_DEG;
+      if (!possibleGuard) {
+        burst.earlyEvaluated = true;
+        if (this.complete(features, "early")) burst.settled = true;
+      }
     }
     if (quiet) {
       const features = this.features(burst, slice![0].t, true);
@@ -766,7 +776,7 @@ export class MotionRecognizer {
       if (template.kind === "impulse") {
         if (reorientation) continue;
         if (features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
-          features.peak >= Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35)) {
+          features.peak >= (template.traces.length ? Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35) : PLAY_MIN_PEAK_MG)) {
           // The quick-play generic template has no traces: any firm stroke scores a perfect match.
           const score = template.traces.length
             ? median(template.traces.map((trace) => dtwDistance(features.impulseTrace, trace)))
@@ -778,8 +788,9 @@ export class MotionRecognizer {
         // lowering the wand afterwards is recognized as such instead of as a second guard.
         const reference = template.direction ?? this.lastGuardDirection;
         const angle = reference ? angleDegrees(features.tiltDirection, reference) : 0;
-        if (features.tiltDeg >= GUARD_MIN_TILT_DEG && angle >= LOWERING_DEG) lowering = true;
-        if (features.tiltDeg >= Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) && angle <= GUARD_TOLERANCE_DEG &&
+        const minimumTilt = template.direction ? Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) : QUICK_GUARD_MIN_TILT_DEG;
+        if (features.tiltDeg >= minimumTilt && angle >= LOWERING_DEG) lowering = true;
+        if (features.tiltDeg >= minimumTilt && angle <= GUARD_TOLERANCE_DEG &&
           features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) && features.peak <= Math.max(template.peak * 4, 1_500))
           guard = { spell, template, quality: clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
       }
@@ -789,9 +800,10 @@ export class MotionRecognizer {
     const best = impulses[0];
     if (best && impulses[1] && impulses[1].score - best.score < DTW_AMBIGUITY_MARGIN)
       return { quality: 0, reason: "ambiguous", message: "That movement matched two spells. Make it clearer." };
-    // A matching guard wins unless the stroke is far too strong to be a raise.
+    // A generic held raise wins over the direction-free jab. Arm acceleration is not evidence that
+    // a valid held pose was an attack; the guard's peak/tilt/quiet checks already bound acceptance.
     if (best && best.score <= best.template.acceptanceDistance &&
-      (!guard || features.peak > Math.max(guard.template.peak * 2, GUARD_PREFER_PEAK_MG))) {
+      (!guard || (guard.template.direction && features.peak > Math.max(guard.template.peak * 2, GUARD_PREFER_PEAK_MG)))) {
       const quality = clamp01(0.75 - best.score / Math.max(best.template.acceptanceDistance, 0.001) * 0.5 +
         Math.min(0.25, features.peak / best.template.peak / 4));
       return { spell: best.spell, quality, message: "" };

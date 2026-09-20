@@ -4,6 +4,7 @@ import { MotionFlag } from "../wand/protocol";
 import { MotionRecognizer, type GestureEvidence, type SpellName } from "./motion";
 import { RawMotionTraceBuilder, createCoreMotionFixtures, type CoreMotionFixtures } from "./traceFixtures";
 import phoneJabs from "./fixtures/phone-jabs-2026-09-19.json";
+import phoneTurn from "./fixtures/phone-turn-2026-09-20.json";
 
 type Pose = readonly [number, number, number];
 type Rotation = readonly [Pose, Pose, Pose];
@@ -490,6 +491,84 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     quiet.forEach((sample) => h.recognizer.push({ ...sample, bootId: 11 }, generation));
     expect(h.evidence).toHaveLength(0);
     expect(h.recognizer.getState().phase).toBe("ready");
+  });
+
+  it("quick play waits for brisk raises instead of consuming them as direction-free jabs", () => {
+    for (const degrees of [20, 35, 45, 60]) {
+      for (const pushMg of [220, 500, 900, 1_400]) {
+        const h = new MotionHarness();
+        h.recognizer.useDefaultProfile(h.generation);
+        h.feed(h.builder.stillness(600));
+        h.feed(h.builder.guard(degrees, 320, 320, pushMg));
+        expect(h.spells(), `${degrees} degrees, ${pushMg} mg arm push`).toEqual(["protego"]);
+        expect(h.recognizer.getDiagnostics().candidate?.stopEvidence).toBe("release");
+        h.feed(h.builder.stillness(600));
+        h.feed(h.builder.lower(degrees));
+        expect(h.spells(), "holding and lowering must not cast again").toEqual(["protego"]);
+        h.feed(h.builder.guard(degrees, 320, 320, pushMg));
+        expect(h.spells()).toEqual(["protego", "protego"]);
+      }
+    }
+  });
+
+  it("keeps quick-play brisk raises independent of the badge or phone grip axes", () => {
+    for (const rotation of [
+      [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+      [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+      [[0.7071, 0, 0.7071], [0, 1, 0], [-0.7071, 0, 0.7071]],
+    ] as Rotation[]) {
+      const h = new MotionHarness();
+      h.recognizer.useDefaultProfile(h.generation);
+      h.feed(rotateTrace(h.builder.stillness(600), rotation));
+      h.feed(rotateTrace(h.builder.guard(35, 320, 320, 900), rotation));
+      h.feed(rotateTrace(h.builder.lower(35), rotation));
+      expect(h.spells()).toEqual(["protego"]);
+    }
+  });
+
+  it("accepts smaller deliberate quick-play moves without accepting a weak fidget", () => {
+    const h = new MotionHarness();
+    h.recognizer.useDefaultProfile(h.generation);
+    h.feed(h.builder.stillness(600));
+    h.feed(h.builder.jab(450));
+    expect(h.spells()).toEqual(["stupefy"]);
+    h.feed(h.builder.guard(18));
+    expect(h.spells()).toEqual(["stupefy", "protego"]);
+    h.feed(h.builder.lower(18));
+    h.feed(h.builder.jab(300));
+    h.feed(h.builder.drift([0, 500, 866], 1_600));
+    expect(h.spells()).toEqual(["stupefy", "protego"]);
+  });
+
+  it("defers the unlabeled recorded phone turn until its apparent raised pose has settled", () => {
+    const h = new MotionHarness();
+    h.recognizer.useDefaultProfile(h.generation);
+    const samples: CapturedMotion[] = phoneTurn.samples.map((row, seq) => {
+      const [browserMs, captureMs, axMg, ayMg, azMg, ageUpperMs, flags] = row as number[];
+      return { version: 1, bootId: 5, seq, browserMs, captureMs, axMg, ayMg, azMg, ageUpperMs, flags, breaksGesture: row[7] === true };
+    });
+    h.feed(samples.filter((sample) => sample.browserMs <= phoneTurn.oldEarlyEndMs));
+    // The previous generic fast path emitted Stupefy here despite a 144-degree apparent tilt.
+    // This recording has no intended-gesture label: assert decision timing, not a claimed raise.
+    expect(h.evidence).toHaveLength(0);
+    h.feed(samples.filter((sample) => sample.browserMs > phoneTurn.oldEarlyEndMs));
+    expect(h.evidence).toHaveLength(1);
+    expect(h.evidence[0].endMs).toBeGreaterThan(phoneTurn.oldEarlyEndMs);
+  });
+
+  it("still refuses stale or broken quick-play raises", () => {
+    for (const fault of ["stale", "gap", "saturated"] as const) {
+      const h = new MotionHarness();
+      h.recognizer.useDefaultProfile(h.generation);
+      h.feed(h.builder.stillness(600));
+      h.feed(h.builder.guard(35, 320, 320, 900).map((sample) => ({
+        ...sample,
+        ageUpperMs: fault === "stale" ? 201 : sample.ageUpperMs,
+        breaksGesture: fault === "gap" || sample.breaksGesture,
+        flags: fault === "saturated" ? MotionFlag.Valid | MotionFlag.Saturated : sample.flags,
+      })));
+      expect(h.evidence, fault).toHaveLength(0);
+    }
   });
 });
 
