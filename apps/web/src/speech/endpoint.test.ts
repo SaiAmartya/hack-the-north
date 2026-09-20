@@ -99,6 +99,7 @@ describe("speech endpoint", () => {
       1000 + ((voiceStartFrame + 20 * BLOCK) * 1000) / SPEECH_SAMPLE_RATE,
     );
     expect(clip?.samples.length).toBe(250 * 16 + 20 * BLOCK + 25 * BLOCK);
+    expect(clip?.endReason).toBe("silence");
   });
 
   it("does not start on less than 60 ms of loud input", () => {
@@ -123,6 +124,7 @@ describe("speech endpoint", () => {
     expect(clip).toBeDefined();
     expect(clip!.endMs - clip!.startMs).toBe(1800);
     expect(clip!.samples.byteLength).toBeLessThanOrEqual(3 * 16_000 * 4);
+    expect(clip!.endReason).toBe("voice-limit");
   });
 
   it("retains calibration but requires uninterrupted quiet before accepting fresh voice", () => {

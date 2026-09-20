@@ -54,6 +54,7 @@ export type SpeechDiagnostic = {
   speechDurationMs?: number;
   avgLogProbability?: number;
   noSpeechProbability?: number;
+  endReason?: "silence" | "voice-limit" | "clip-limit";
 };
 
 type Capture = {
@@ -74,13 +75,14 @@ export type SpeechClientPlatform = {
   ) => Promise<Capture>;
 };
 
-type Draft = SpeechOnset & { suppressed: boolean; suppression?: "recognition-paused" | "overlapping-speech" };
+type Draft = SpeechOnset & { suppressed: boolean; suppression?: "recognition-paused" | "inference-busy" | "ambiguous-continuation" };
 type Pending = {
   id: string;
   generation: number;
   startMs: number;
   endMs: number;
   invalidated: boolean;
+  endReason: "silence" | "voice-limit" | "clip-limit";
   overlapActive: boolean;
   settled: boolean;
   backgroundOnly: boolean;
@@ -301,21 +303,31 @@ export class SpeechClient {
       const recognitionAllowed =
         this.recognitionEnabled && event.startMs >= this.recognitionFromMs;
       const suppressed = !recognitionAllowed || this.pending !== undefined;
+      const ambiguousContinuation = this.pending !== undefined && this.pending.endReason !== "silence";
       if (this.pending) {
-        this.pending.invalidated = true;
-        this.pending.overlapActive = true;
+        if (ambiguousContinuation) {
+          this.pending.invalidated = true;
+          this.pending.overlapActive = true;
+          this.diagnostic({ type: "discard", utteranceId: this.pending.id,
+            detail: "Ambiguous continuation invalidated cutoff utterance", endReason: this.pending.endReason });
+        }
         this.snapshot = {
           ...this.snapshot,
           phase: "busy",
           issue: "",
         };
-        this.diagnostic({ type: "discard", utteranceId: this.pending.id, detail: "Overlapping speech invalidated pending utterance" });
       }
       this.draft = { ...onset, suppressed,
-        suppression: !recognitionAllowed ? "recognition-paused" : suppressed ? "overlapping-speech" : undefined };
-      if (recognitionAllowed)
+        suppression: !recognitionAllowed ? "recognition-paused" : ambiguousContinuation ? "ambiguous-continuation" : suppressed ? "inference-busy" : undefined };
+      // Energy after a completed quiet interval is a later sound, not proof
+      // that the first utterance overlapped. Keep the single request and never
+      // expose that later onset to fusion or queue another inference. A forced
+      // cutoff has no such quiet boundary and keeps the prior invalidation rule.
+      if (recognitionAllowed && (!suppressed || ambiguousContinuation))
         for (const listener of this.onsetListeners) listener(onset);
-      if (recognitionAllowed) this.diagnostic({ type: "onset", utteranceId: onset.id });
+      if (recognitionAllowed) this.diagnostic({ type: "onset", utteranceId: onset.id,
+        voiceStartMs: onset.startMs, detail: ambiguousContinuation ? "ambiguous-continuation: cutoff speech resumed"
+          : suppressed ? "inference-busy: later onset ignored" : undefined });
       return;
     }
     this.clip(event);
@@ -364,6 +376,7 @@ export class SpeechClient {
       startMs: event.startMs,
       endMs: event.endMs,
       invalidated: false,
+      endReason: event.endReason,
       overlapActive: false,
       settled: false,
       backgroundOnly: false,
@@ -456,7 +469,9 @@ export class SpeechClient {
       voiceStartMs: pending.startMs, voiceEndMs: pending.endMs,
       speechDurationMs: result.speechDurationMs ?? undefined, avgLogProbability: result.avgLogProbability ?? undefined,
       noSpeechProbability: result.noSpeechProbability ?? undefined,
-      detail: pending.invalidated ? "Overlapping or paused utterance discarded" : result.reason ?? (spell ? "Incantation accepted" : "Non-spell or uncertain audio ignored") });
+      endReason: pending.endReason,
+      detail: pending.invalidated ? pending.endReason !== "silence" ? "Ambiguous continuation or paused cutoff discarded"
+        : "Paused utterance discarded" : result.reason ?? (spell ? "Incantation accepted" : "Non-spell or uncertain audio ignored") });
     if (pending.invalidated) return;
     pending.backgroundOnly = result.reason === "no-speech";
     if (spell) {
@@ -524,6 +539,10 @@ export class SpeechClient {
     this.pending = undefined;
     if (!emitted) this.notifyDiscard(pending);
     this.endpoint?.resolve(pending.backgroundOnly);
+    // A fast result can finish before a continuing sound reaches its 60ms
+    // onset. Keep the cutoff tail suppressed after this request is gone, while
+    // preserving both its first result and quiet already observed during ASR.
+    if (pending.endReason !== "silence") this.endpoint?.requireQuiet(true);
     this.snapshot = {
       ...this.snapshot,
       phase: "listening",

@@ -26,6 +26,7 @@ export type SpeechEndpointEvent =
       type: "clip";
       startMs: number;
       endMs: number;
+      endReason: "silence" | "voice-limit" | "clip-limit";
       samples: Float32Array;
     }
   | { type: "fault"; issue: string };
@@ -89,6 +90,7 @@ export class SpeechEndpoint {
   private active?: ActiveVoice;
   private failed = false;
   private quietFramesNeeded = 0;
+  private observedQuietFrames = 0;
   private completedNoiseFloor?: number;
 
   constructor(
@@ -105,6 +107,8 @@ export class SpeechEndpoint {
     }
 
     if (!this.calibrated) return this.calibrate(frame);
+    this.observedQuietFrames = frame.rms <= this.endThreshold()
+      ? Math.min(END_SILENCE_FRAMES, this.observedQuietFrames + frame.samples.length) : 0;
     if (this.quietFramesNeeded > 0) {
       this.quietFramesNeeded = frame.rms <= this.endThreshold()
         ? Math.max(0, this.quietFramesNeeded - frame.samples.length)
@@ -129,11 +133,11 @@ export class SpeechEndpoint {
         active.silenceStartFrame !== undefined &&
         frameEnd - active.silenceStartFrame >= END_SILENCE_FRAMES
       ) {
-        events.push(this.finish(active.silenceStartFrame, frameEnd));
+        events.push(this.finish(active.silenceStartFrame, frameEnd, "silence"));
       } else if (frameEnd >= voiceLimit) {
-        events.push(this.finish(voiceLimit, Math.min(frameEnd, clipLimit)));
+        events.push(this.finish(voiceLimit, Math.min(frameEnd, clipLimit), "voice-limit"));
       } else if (frameEnd >= clipLimit) {
-        events.push(this.finish(Math.min(frameEnd, clipLimit), clipLimit));
+        events.push(this.finish(Math.min(frameEnd, clipLimit), clipLimit, "clip-limit"));
       }
       return events;
     }
@@ -179,12 +183,13 @@ export class SpeechEndpoint {
     this.completedNoiseFloor = undefined;
   }
 
-  requireQuiet(): void {
+  requireQuiet(keepObservedQuiet = false): void {
     this.active = undefined;
     this.candidateStartFrame = undefined;
     this.noiseFrozen = false;
     this.completedNoiseFloor = undefined;
-    this.quietFramesNeeded = END_SILENCE_FRAMES;
+    this.quietFramesNeeded = keepObservedQuiet
+      ? END_SILENCE_FRAMES - this.observedQuietFrames : END_SILENCE_FRAMES;
   }
 
   isCalibrated(): boolean {
@@ -241,7 +246,7 @@ export class SpeechEndpoint {
     );
   }
 
-  private finish(voiceEndFrame: number, clipEndFrame: number): SpeechEndpointEvent {
+  private finish(voiceEndFrame: number, clipEndFrame: number, endReason: "silence" | "voice-limit" | "clip-limit"): SpeechEndpointEvent {
     const active = this.active!;
     const wantedFrames = Math.max(
       0,
@@ -266,6 +271,7 @@ export class SpeechEndpoint {
       type: "clip",
       startMs: this.toMs(active.voiceStartFrame),
       endMs: this.toMs(Math.max(active.voiceStartFrame, voiceEndFrame)),
+      endReason,
       samples: written === samples.length ? samples : samples.slice(0, written),
     };
   }

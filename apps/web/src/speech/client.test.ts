@@ -264,22 +264,28 @@ describe("speech client lifecycle", () => {
     expect(casts[0].spell).toBe(spell);
   });
 
-  it("invalidates the first result on a second onset and never queues the second", async () => {
+  it.each(["before", "after"])("keeps completed speech when noise re-triggers during inference and the result arrives %s the suppressed clip", async resultOrder => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
     const evidence: SpeechEvidence[] = [];
     const onsets: string[] = [];
+    const diagnostics: SpeechDiagnostic[] = [];
     client.onSpeech((item) => evidence.push(item));
     client.onOnset((item) => onsets.push(item.id));
+    client.onDiagnostic(item => diagnostics.push(item));
     await client.start();
     platform.calibrate();
     platform.utterance();
     expect(platform.transcriptions).toHaveLength(1);
-
-    platform.utterance();
-    expect(onsets).toHaveLength(2);
-    expect(platform.transcriptions).toHaveLength(1);
     const headers = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(headers, "first-gesture", "protego"));
+    // A modest energy bump after 200ms of quiet triggers endpointing while
+    // the first job is finishing. It must not erase that completed spell.
+    platform.feed(0.012, 10);
+    expect(onsets).toHaveLength(1);
+    expect(platform.transcriptions).toHaveLength(1);
+    if (resultOrder === "after") platform.feed(0.001, 25);
     platform.transcriptions[0].resolve(
       Response.json({
         utteranceId: headers.get("X-Wand-Utterance-Id"),
@@ -289,11 +295,134 @@ describe("speech client lifecycle", () => {
       }),
     );
     await flush();
-    expect(evidence).toEqual([]);
-    expect(client.getSnapshot()).toMatchObject({
-      phase: "listening",
-      issue: "",
-    });
+    if (resultOrder === "before") platform.feed(0.001, 25);
+    expect(evidence).toHaveLength(1);
+    expect(casts).toHaveLength(1);
+    expect(casts[0].gestureId).toBe("first-gesture");
+    expect(platform.transcriptions).toHaveLength(1);
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "onset", detail: "inference-busy: later onset ignored" }),
+      expect.objectContaining({ type: "discard", detail: "inference-busy" }),
+    ]));
+    expect(client.getSnapshot()).toMatchObject({ phase: "listening", issue: "" });
+    platform.utterance();
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "next-gesture", "protego"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["first-gesture", "next-gesture"]);
+    expect(onsets).toHaveLength(2);
+    client.stop();
+  });
+
+  it("still invalidates a forced-cutoff pending result when speech continues and never queues that continuation", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const onsets = vi.fn();
+    const diagnostics: SpeechDiagnostic[] = [];
+    client.onOnset(onsets);
+    client.onDiagnostic(event => diagnostics.push(event));
+    await client.start();
+    platform.calibrate();
+    platform.feed(0.08, 225);
+    const cut = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(cut, "ambiguous-gesture", "protego"));
+    platform.feed(0.08, 10);
+    expect(onsets).toHaveBeenCalledTimes(2);
+    expect(platform.transcriptions).toHaveLength(1);
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: cut.get("X-Wand-Utterance-Id"),
+      generation: Number(cut.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(casts).toEqual([]);
+    platform.feed(0.08, 20);
+    platform.feed(0.001, 25);
+    expect(fusion.getState().pendingGesture).toBeUndefined();
+    expect(platform.transcriptions).toHaveLength(1);
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "discard", detail: "Ambiguous continuation invalidated cutoff utterance", endReason: "voice-limit" }),
+      expect.objectContaining({ type: "result", detail: "Ambiguous continuation or paused cutoff discarded", endReason: "voice-limit" }),
+    ]));
+    platform.utterance();
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "fresh-complete-gesture", "protego"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["fresh-complete-gesture"]);
+    client.stop();
+  });
+
+  it("preserves acceptance of a cutoff clip when no continuation has invalidated it", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    await client.start();
+    platform.calibrate();
+    platform.feed(0.08, 225);
+    const cut = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(cut, "existing-cutoff-gesture", "protego"));
+    platform.feed(0.001, 25);
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: cut.get("X-Wand-Utterance-Id"),
+      generation: Number(cut.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["existing-cutoff-gesture"]);
+    client.stop();
+  });
+
+  it("does not turn a cutoff tail into a new command after a fast result clears the pending job", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const onsets = vi.fn();
+    client.onOnset(onsets);
+    await client.start();
+    platform.calibrate();
+    platform.feed(0.08, 225);
+    const first = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(first, "first-cutoff", "protego"));
+    // The first result wins the race against the endpoint's 60ms onset delay.
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: first.get("X-Wand-Utterance-Id"),
+      generation: Number(first.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["first-cutoff"]);
+    platform.feed(0.08, 300);
+    expect(onsets).toHaveBeenCalledOnce();
+    expect(platform.transcriptions).toHaveLength(1);
+    platform.feed(0.001, 25);
+    platform.utterance();
+    expect(platform.transcriptions).toHaveLength(2);
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "after-quiet", "protego"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["first-cutoff", "after-quiet"]);
+    expect(onsets).toHaveBeenCalledTimes(2);
+    client.stop();
+  });
+
+  it("still learns a neural-confirmed steady noise floor after a forced clip", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const onsets = vi.fn();
+    client.onOnset(onsets);
+    await client.start();
+    platform.calibrate();
+    platform.feed(0.03, 225);
+    const noise = new Headers(platform.requests.at(-1)!.init?.headers);
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: noise.get("X-Wand-Utterance-Id"),
+      generation: Number(noise.get("X-Wand-Generation")), text: "", spell: null, accepted: false, reason: "no-speech" }));
+    await flush();
+    platform.feed(0.03, 125);
+    expect(platform.transcriptions).toHaveLength(1);
+    expect(onsets).toHaveBeenCalledOnce();
+    platform.feed(0.08, 20);
+    platform.feed(0.03, 25);
+    expect(platform.transcriptions).toHaveLength(2);
+    expect(onsets).toHaveBeenCalledTimes(2);
+    client.stop();
   });
 
   it.each([1, 20])(
