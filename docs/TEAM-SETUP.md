@@ -123,17 +123,20 @@ Choose a spell, then **Start 10 trials** and follow the cues for 100 seconds. **
 keeps successful and missed movements, raw motion and enabled speech diagnostics. Export before
 resetting for another spell. See the [gesture capture contract](qa/gesture-iteration.md#sais-capture-contract).
 
-| Spell | Movement | Result | Cooldown |
-| --- | --- | --- | --- |
-| Stupefy | Firm jab | 20 damage | 2 s |
-| Protego | Raise and hold | Block one hit within 1.2 s | 3 s |
-| Expelliarmus | Firm jab | 10 damage and 1 s offensive lock | 6 s |
-| Incendio | Firm jab | 30 damage | 8 s |
-| Episkey | Raise and hold | Restore up to 18 HP | 12 s |
+| Spell | Movement | Result | Flight | Cooldown |
+| --- | --- | --- | --- | --- |
+| Stupefy | Firm jab | 14 damage; 25% chance to stun for 1.2 s | 0.8 s | 2.5 s |
+| Protego | Raise and hold | Block one hit within 1.5 s; raised within 0.35 s of impact it reflects the spell | - | 4 s |
+| Expelliarmus | Firm jab | 8 damage, 2.5 s offensive lock, shatters a raised shield | 1.1 s | 6 s |
+| Incendio | Firm jab | 22 damage plus 3 burn damage per second for 4 s | 1.8 s | 9 s |
+| Episkey | Raise and hold | Restore up to 22 HP and cure burning | - | 12 s |
 
-Everyone starts with 100 HP. Healing cannot exceed 100 HP; a full-health attempt spends no
-cooldown. Shielding and healing remain available while disarmed. Zero HP ends the duel;
-at the 60-second deadline higher HP wins, with equal HP or simultaneous knockouts producing a draw.
+Everyone starts with 100 HP. Any damaging hit has a 12% critical chance (x1.5). Healing cannot
+exceed 100 HP; a full-health attempt with no burn spends no cooldown. Shielding and healing remain
+available while disarmed; a stunned wizard cannot cast until the stun ends. Relics (Phoenix
+Feather, Bezoar, Felix Felicis, Mirror Charm, Time-Turner) appear mid-court a few times per round
+and go to whoever casts anything next. Zero HP ends the duel; at the 90-second deadline higher HP
+wins, with equal HP or simultaneous knockouts producing a draw. The README has the full table.
 
 The default launcher builds a stable temporary frontend snapshot. Source edits do not replace
 a running session. **Ctrl+C**, wait for shutdown, then rerun after updates. `--dev` opts into

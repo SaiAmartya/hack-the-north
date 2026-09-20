@@ -345,8 +345,15 @@ export class GameQaHarness {
         7_000,
       );
       const firstRound = this.sharedSnapshot()!.roundId;
+      // A Stupefy bolt lands 0.8 s after launch, faster than a raw guard replay can react, so the
+      // defender starts raising while the attacker's jab is still in flight: the 1.5 s shield is
+      // up well before the bolt arrives and old enough at impact to be an ordinary block.
       this.update({ detail: "Casting Stupefy through raw motion", firstRound });
-      const attack = await this.first.cast("stupefy");
+      const attackPromise = this.first.cast("stupefy");
+      await delay(300);
+      this.update({ detail: "Raising Protego through raw motion" });
+      const defensePromise = this.second.cast("protego");
+      const attack = await attackPromise;
       if (!attack.accepted)
         throw new Error(`Stupefy was rejected: ${attack.reason ?? "unknown"}`);
       await waitFor(
@@ -354,22 +361,15 @@ export class GameQaHarness {
         () => this.eventSeen("projectileLaunched", firstRound),
         2_000,
       );
-      const projectile = this.sharedSnapshot()!.projectiles[0];
-      if (!projectile) throw new Error("Accepted Stupefy produced no projectile");
-
-      const guardDelay = Math.max(
-        0,
-        projectile.impactAtMs - this.second.game.now() - 1_600,
-      );
-      await delay(guardDelay);
-      this.update({ detail: "Casting Protego through raw motion" });
-      const defense = await this.second.cast("protego");
+      const defense = await defensePromise;
       if (!defense.accepted)
         throw new Error(`Protego was rejected: ${defense.reason ?? "unknown"}`);
       await waitFor(
         "blocked impact",
-        () => this.eventSeen("impactBlocked", firstRound),
-        2_500,
+        () =>
+          this.eventSeen("impactBlocked", firstRound) ||
+          this.eventSeen("impactReflected", firstRound),
+        3_000,
       );
       const defenderHp = this.sharedSnapshot()!.players.P2?.hp;
       if (defenderHp !== 100) throw new Error("Blocked projectile changed health");

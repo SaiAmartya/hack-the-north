@@ -148,15 +148,28 @@ class DuelRoom:
         allow_replay: bool = False,
         room_id: str = "main",
         mode: Mode = Mode.DUEL,
+        seed: int | None = None,
+        variance: bool = True,
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
         self.room_id = room_id
         self.mode = mode
-        self._tutorial = TutorialDuel(clock_ms()) if mode is Mode.TUTORIAL else None
-        self._bot = self._tutorial or (PracticeBot() if mode is Mode.SOLO else None)
-        self.engine = DuelEngine(round_duration_ms=None if self._tutorial else ROUND_MS)
+        # One seed per room drives crits, stuns, powerups and the bot; tests fix it.
+        self.seed = secrets.randbits(32) if seed is None else seed
+        self._tutorial = (
+            TutorialDuel(clock_ms(), seed=self.seed, variance=variance)
+            if mode is Mode.TUTORIAL else None
+        )
+        self._bot = self._tutorial or (
+            PracticeBot(seed=self.seed) if mode is Mode.SOLO else None
+        )
+        self.engine = DuelEngine(
+            round_duration_ms=None if self._tutorial else ROUND_MS,
+            seed=self.seed,
+            variance=variance,
+        )
         self._rules = ruleset()
         self._sessions: dict[str, PlayerSession] = {}
         self._slots: dict[Slot, PlayerSession] = {}
@@ -730,6 +743,11 @@ class DuelRoom:
                 hp=combat.hp,
                 shield_until_ms=combat.shield_until_ms,
                 offense_locked_until_ms=combat.offense_locked_until_ms,
+                stunned_until_ms=combat.stunned_until_ms,
+                burn_until_ms=combat.burn_until_ms,
+                haste_until_ms=combat.haste_until_ms,
+                mirror_until_ms=combat.mirror_until_ms,
+                lucky=combat.lucky,
                 cooldown_until_ms={
                     spell.value: combat.cooldown_until_ms.get(spell, 0)
                     for spell in Spell
@@ -754,6 +772,7 @@ class DuelRoom:
                     key=lambda item: (item.impact_at_ms, item.id),
                 )
             ),
+            powerup=self.engine.powerup.snapshot() if self.engine.powerup is not None else None,
             recent_events=tuple(self.engine.recent_events),
             tutorial=self._tutorial.snapshot() if self._tutorial is not None else None,
         )

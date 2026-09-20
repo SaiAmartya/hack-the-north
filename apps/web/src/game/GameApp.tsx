@@ -5,8 +5,17 @@ import { DuelEffects } from "./effects";
 import { GestureGuide } from "./GestureGuide";
 import { GestureTrials } from "./GestureTrials";
 import { TelemetryPanel } from "./TelemetryPanel";
-import type { GameEvent, Player, Spell, SpellRule } from "./contracts";
+import type {
+  GameEvent,
+  Player,
+  PowerupKind,
+  Slot,
+  Snapshot,
+  Spell,
+  SpellRule,
+} from "./contracts";
 import "./game.css";
+import "./battle.css";
 
 function PhoneQr({ value }: { value: string }) {
   const drawing = useMemo(() => {
@@ -61,6 +70,51 @@ export function SpellGlyph({ spell }: { spell: Spell }) {
     </svg>
   );
 }
+
+export const POWERUP_INFO: Record<
+  PowerupKind,
+  { name: string; blurb: string; claim: string }
+> = {
+  phoenix: { name: "Phoenix Feather", blurb: "Resets every cooldown", claim: "every spell is ready again" },
+  bezoar: { name: "Bezoar", blurb: "+20 HP and cures burning", claim: "+20 HP" },
+  felix: { name: "Felix Felicis", blurb: "Next hit is a guaranteed critical", claim: "the next hit will be critical" },
+  mirror: { name: "Mirror Charm", blurb: "Reflects the next spell for 8 s", claim: "the next spell will bounce back" },
+  haste: { name: "Time-Turner", blurb: "Cooldowns twice as fast for 8 s", claim: "cooldowns run twice as fast" },
+};
+
+export function PowerupIcon({ kind }: { kind: PowerupKind }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      {kind === "phoenix" ? (
+        <path d="M4 20c2-8 8-14 16-16-1 6-4 11-9 13l-3 1-2 4m3-6 4-4" />
+      ) : kind === "bezoar" ? (
+        <path d="M12 3c5 0 8 4 8 9s-3 9-8 9-8-4-8-9 3-9 8-9Zm-3 8h.5M14 9h.5M11 15h.5" />
+      ) : kind === "felix" ? (
+        <path d="M9 3h6M10 3v5l-5 9c-1 2 0 4 2 4h10c2 0 3-2 2-4l-5-9V3m-4 12h6" />
+      ) : kind === "mirror" ? (
+        <path d="M12 2c4 0 6 3 6 8s-2 8-6 8-6-3-6-8 2-8 6-8Zm0 16v4m-3 0h6" />
+      ) : (
+        <path d="M6 3h12M6 21h12M8 3c0 5 4 6 4 9s-4 4-4 9m8-18c0 5-4 6-4 9s4 4 4 9" />
+      )}
+    </svg>
+  );
+}
+
+type Status = { label: string; kind: string };
+function statusesOf(player: Player | null | undefined, now: number): Status[] {
+  if (!player) return [];
+  const chips: Status[] = [];
+  if (player.hp === 0) return [{ label: "FAINTED", kind: "fainted" }];
+  if (player.mirrorUntilMs > now) chips.push({ label: "MIRROR", kind: "mirror" });
+  if (player.shieldUntilMs > now) chips.push({ label: "SHIELD", kind: "shield" });
+  if (player.stunnedUntilMs > now) chips.push({ label: "STUNNED", kind: "stunned" });
+  if (player.offenseLockedUntilMs > now) chips.push({ label: "DISARMED", kind: "disarmed" });
+  if (player.burnUntilMs > now) chips.push({ label: "BURNING", kind: "burning" });
+  if (player.lucky) chips.push({ label: "LUCKY", kind: "lucky" });
+  if (player.hasteUntilMs > now) chips.push({ label: "HASTE", kind: "haste" });
+  return chips.slice(0, 3);
+}
+
 function HealthPanel({
   player,
   own,
@@ -72,11 +126,8 @@ function HealthPanel({
 }) {
   const health = player?.hp ?? 100,
     max = player?.maxHp ?? 100;
-  const status = player && player.shieldUntilMs > now
-    ? "◇ SHIELDED"
-    : player && player.offenseLockedUntilMs > now
-      ? "✧ DISARMED"
-      : health === 0 ? "FAINTED" : undefined;
+  const statuses = statusesOf(player, now);
+  const level = health <= max * 0.2 ? "low" : health <= max * 0.5 ? "mid" : "high";
   return (
     <section
       className={`health-panel ${own ? "my-health" : "opponent-hud"}`}
@@ -84,6 +135,13 @@ function HealthPanel({
     >
       <div className="health-name">
         <strong>{own ? "YOU" : player?.source === "bot" ? "PRACTICE" : "RIVAL"}</strong>
+        <span className="status-row">
+          {statuses.map((status) => (
+            <span key={status.kind} className={`status-chip status-${status.kind}`}>
+              {status.label}
+            </span>
+          ))}
+        </span>
       </div>
       <div className="health-track">
         <span>HP</span>
@@ -93,10 +151,10 @@ function HealthPanel({
           value={health}
           aria-label={own ? "Your health" : "Opponent health"}
           data-low={health <= max * 0.25}
+          data-level={level}
         />
       </div>
       <div className="health-caption">
-        {status && <span>{status}</span>}
         <b>
           {health} / {max}
         </b>
@@ -106,25 +164,78 @@ function HealthPanel({
 }
 
 function spellSummary(rule: SpellRule) {
-  if (rule.heal) return `+${rule.heal} HP`;
-  if (rule.shieldMs) return "Block one hit";
-  return `${rule.damage} damage${rule.offenseLockMs ? " · Disarm" : ""}`;
+  if (rule.spell === "protego") return "Block one hit · late block reflects";
+  if (rule.heal) return `+${rule.heal} HP · cures burning`;
+  const parts = [`${rule.damage} dmg`];
+  if (rule.spell === "stupefy") parts.push("fast", "may stun");
+  if (rule.breaksShield) parts.push(`disarm ${rule.offenseLockMs / 1000}s`, "breaks shields");
+  if (rule.burnDamage) parts.push(`burn ${rule.burnDamage}/s`);
+  return parts.join(" · ");
 }
 
-function battleMessage(
-  event: GameEvent | undefined,
-  slot: string | undefined,
-): string {
-  const invitation = "Speak a spell and move your wand.";
-  if (!event) return invitation;
-  const actor = event.actor === slot ? "You" : "Your rival";
-  const target = event.target === slot ? "You" : "Your rival";
-  if (event.type === "damage") return `${target} took ${event.amount} damage!`;
-  if (event.type === "healed") return `${target} recovered ${event.amount} HP!`;
-  if (event.type === "impactBlocked") return `${target} blocked the spell!`;
-  if (event.type === "castAccepted" && event.spell)
-    return `${actor} cast ${nameOf(event.spell)}!`;
-  return invitation;
+const NARRATED = new Set([
+  "castAccepted", "damage", "burning", "burned", "stunned", "healed", "impactBlocked",
+  "impactReflected", "shieldBroken", "offenseLocked", "powerupAppeared", "powerupClaimed",
+  "powerupExpired",
+]);
+
+type Names = { who: (s: Slot | null | undefined) => string; whose: (s: Slot | null | undefined) => string };
+function namesFor(game: Snapshot | undefined, slot: Slot | undefined): Names {
+  const other: Slot = slot === "P1" ? "P2" : "P1";
+  const rival = game?.players[other];
+  const rivalName = rival?.source === "bot" ? rival.name : "Your rival";
+  return {
+    who: (s) => (s === slot ? "You" : rivalName),
+    whose: (s) => (s === slot ? "Your" : `${rivalName}'s`),
+  };
+}
+
+const verb = (who: string, second: string, third: string) => (who === "You" ? second : third);
+/** Mid-sentence form: "Your" becomes "your"; a rival's name keeps its capitals. */
+const mid = (whose: string) => (whose === "Your" ? "your" : whose);
+
+/** One or two Pokémon-style lines for an authoritative event. */
+export function describeEvent(event: GameEvent, names: Names): string[] {
+  const spell = event.spell ? nameOf(event.spell) : "the spell";
+  const relic = event.powerup ? POWERUP_INFO[event.powerup] : undefined;
+  switch (event.type) {
+    case "castAccepted":
+      return [`${names.who(event.actor)} used ${spell}!`];
+    case "damage":
+      return [
+        `${names.who(event.target)} took ${event.amount} damage!`,
+        ...(event.critical ? ["A critical hit!"] : []),
+      ];
+    case "burning":
+      return [`${names.who(event.target)} caught fire!`];
+    case "burned":
+      return [`${names.who(event.target)} ${verb(names.who(event.target), "are", "is")} hurt by the burn (-${event.amount}).`];
+    case "stunned":
+      return [`${names.who(event.target)} ${verb(names.who(event.target), "are", "is")} stunned and can't cast!`];
+    case "healed":
+      if (event.reason === "bezoar") return [`${names.who(event.target)} swallowed the Bezoar: +${event.amount} HP!`];
+      if (event.reason === "cured")
+        return [`${names.who(event.target)} recovered ${event.amount} HP and the burn is cured!`];
+      return [`${names.who(event.target)} recovered ${event.amount} HP!`];
+    case "impactBlocked":
+      return [`${names.who(event.target)} blocked ${spell}!`];
+    case "impactReflected":
+      return event.reason === "mirror"
+        ? [`${names.whose(event.target)} Mirror Charm reflected ${spell}!`]
+        : [`PERFECT BLOCK! ${names.who(event.target)} reflected ${spell}!`];
+    case "shieldBroken":
+      return [`Expelliarmus shattered ${mid(names.whose(event.target))} shield!`];
+    case "offenseLocked":
+      return [`${names.who(event.target)} ${verb(names.who(event.target), "were", "was")} disarmed!`];
+    case "powerupAppeared":
+      return relic ? [`A ${relic.name} appeared! Cast any spell to claim it.`] : [];
+    case "powerupClaimed":
+      return relic ? [`${names.who(event.actor)} claimed the ${relic.name}: ${relic.claim}!`] : [];
+    case "powerupExpired":
+      return relic ? [`The ${relic.name} faded away.`] : [];
+    default:
+      return [];
+  }
 }
 
 function PlayOption({
@@ -192,11 +303,11 @@ function MiscastVisual({ spell }: { spell: Spell }) {
 }
 
 const LESSONS: Record<Spell, { purpose: string; success: string }> = {
-  stupefy: { purpose: "A quick strike. Watch your rival's health fall.", success: "A direct hit. Each spell recharges on its own." },
-  protego: { purpose: "Block the incoming spell. Misses reset when you try again.", success: "Blocked. A shield stops one hit, then disappears." },
-  episkey: { purpose: "Recover some health while your attacks recharge.", success: "Health restored. Healing cannot exceed your maximum HP." },
-  expelliarmus: { purpose: "Disarm your rival to briefly stop their attacks.", success: "Disarmed. Your rival can still shield or heal." },
-  incendio: { purpose: "A slower, stronger strike. Watch it cross the courtyard.", success: "A powerful hit. Its longer cooldown rewards good timing." },
+  stupefy: { purpose: "A quick bolt. It flies fast and sometimes stuns.", success: "A direct hit. Each spell recharges on its own." },
+  protego: { purpose: "Block the fireball. Raise late, just before it lands, and it bounces back.", success: "Blocked. A shield stops one hit, then fades." },
+  episkey: { purpose: "Recover health and cure burns while your attacks recharge.", success: "Health restored. Healing never passes your maximum HP." },
+  expelliarmus: { purpose: "Yank the wand away: it shatters shields and stops attacks for a moment.", success: "Disarmed. Your rival can still shield or heal." },
+  incendio: { purpose: "A slow, heavy fireball that leaves your rival burning.", success: "A powerful hit. The burn keeps ticking; a long cooldown rewards timing." },
 };
 
 function TutorialLesson({ controller }: { controller: DuelController }) {
@@ -210,7 +321,7 @@ function TutorialLesson({ controller }: { controller: DuelController }) {
         <div className="tutorial-copy">
           <span className="lesson-count">{lesson.stage === "free" ? "YOUR TURN" : "ALL FIVE SPELLS"}</span>
           <h2>{lesson.stage === "free" ? "Put it together." : "Your first duel."}</h2>
-          <p>Thirty seconds. Use your spells to defeat the Practice Wizard.</p>
+          <p>Forty-five seconds. Relics appear mid-court: cast anything to claim them. Defeat the Tutorial Wizard.</p>
         </div>
         {lesson.stage !== "free" && <button onClick={() => controller.advanceTutorial()}>Begin duel <span aria-hidden="true">→</span></button>}
       </section>
@@ -238,6 +349,8 @@ function TutorialLesson({ controller }: { controller: DuelController }) {
     </section>
   );
 }
+
+type Pop = { id: string; text: string; kind: string; at: "me" | "rival" };
 
 export function GameApp() {
   const [controller, setController] = useState<DuelController>();
@@ -278,10 +391,9 @@ export function GameApp() {
   const c = controller,
     game = c?.game.snapshot,
     slot = c?.game.slot;
+  const otherSlot: Slot = slot === "P1" ? "P2" : "P1";
   const me = slot ? game?.players[slot] : undefined;
-  const opponent = slot
-    ? game?.players[slot === "P1" ? "P2" : "P1"]
-    : undefined;
+  const opponent = slot ? game?.players[otherSlot] : undefined;
   useEffect(() => {
     effects.current?.update(game, slot);
   }, [game, slot]);
@@ -310,38 +422,86 @@ export function GameApp() {
       wand?.phase ?? "",
     );
   const startingMic = mic?.phase === "starting" || mic?.phase === "calibrating";
-  const recent = game?.recentEvents.filter(
-    (event) => event.roundId === game.roundId && now - event.atMs < 5000,
+  const names = namesFor(game, slot);
+  const recent = (game?.recentEvents ?? []).filter(
+    (event) => event.roundId === game?.roundId && event.atMs <= now + 50 && now - event.atMs < 9000,
   );
-  const lastEvent = recent
-    ?.filter((event) =>
-      ["castAccepted", "damage", "healed", "impactBlocked"].includes(
-        event.type,
-      ),
-    )
-    .at(-1);
-  const reaction = (own: boolean) => {
-    const target = own ? slot : slot === "P1" ? "P2" : "P1";
-    const event = recent
-      ?.filter(
-        (event) =>
-          event.target === target &&
-          ["damage", "healed", "impactBlocked"].includes(event.type) &&
-          now - event.atMs < 700,
-      )
+  const within = (types: string[], ms: number, field: "target" | "actor", who: Slot) =>
+    recent
+      .filter((event) => types.includes(event.type) && event[field] === who && now - event.atMs < ms)
       .at(-1);
-    return event
-      ? event.type === "damage"
-        ? "is-hit"
-        : event.type === "healed"
-          ? "is-healing"
-          : "is-blocking"
-      : "";
+  const spriteClasses = (who: Slot) => {
+    const player = game?.players[who];
+    const hit = within(["damage"], 450, "target", who);
+    const classes = [
+      within(["castAccepted"], 350, "actor", who) && "is-casting",
+      hit && "is-hit",
+      hit?.critical && "is-crit",
+      within(["burned"], 350, "target", who) && "is-burn-hit",
+      within(["healed"], 750, "target", who) && "is-healing",
+      within(["impactBlocked"], 600, "target", who) && "is-blocking",
+      within(["impactReflected"], 750, "target", who) && "is-reflecting",
+      within(["offenseLocked", "shieldBroken"], 650, "target", who) && "is-stumbling",
+      within(["powerupClaimed"], 900, "actor", who) && "is-claiming",
+      player && player.stunnedUntilMs > now && "is-stunned",
+      player && player.burnUntilMs > now && "is-burning",
+      player && player.offenseLockedUntilMs > now && "is-disarmed",
+      player?.lucky && "is-lucky",
+      player && player.hasteUntilMs > now && "is-hasted",
+      player && player.mirrorUntilMs > now && "is-mirrored",
+      player?.hp === 0 && "is-fainted",
+    ];
+    return classes.filter(Boolean).join(" ");
   };
+  const lines = live && game?.phase === "playing"
+    ? recent
+        .filter((event) => NARRATED.has(event.type))
+        .sort((a, b) => a.atMs - b.atMs || a.stateVersion - b.stateVersion)
+        .flatMap((event) => describeEvent(event, names).map((text, index) => ({ id: `${event.id}:${index}`, text, at: event.atMs })))
+        .slice(-6)
+    : [];
+  const latest = lines.at(-1);
+  const history = lines.slice(0, -1).slice(-4);
+  const pops: Pop[] = live
+    ? recent
+        .filter((event) => now - event.atMs < 1300)
+        .flatMap((event): Pop[] => {
+          const at = event.target === slot ? "me" : "rival";
+          const actorAt = event.actor === slot ? "me" : "rival";
+          switch (event.type) {
+            case "damage":
+              return [{ id: event.id, text: `${event.critical ? "CRIT " : ""}-${event.amount}`, kind: event.critical ? "crit" : "damage", at }];
+            case "burned":
+              return [{ id: event.id, text: `-${event.amount}`, kind: "burn", at }];
+            case "healed":
+              return [{ id: event.id, text: `+${event.amount}`, kind: "heal", at }];
+            case "impactBlocked":
+              return [{ id: event.id, text: "BLOCKED", kind: "block", at }];
+            case "impactReflected":
+              return [{ id: event.id, text: "REFLECTED!", kind: "reflect", at }];
+            case "shieldBroken":
+              return [{ id: event.id, text: "SHATTERED", kind: "break", at }];
+            case "offenseLocked":
+              return [{ id: event.id, text: "DISARMED", kind: "disarm", at }];
+            case "stunned":
+              return [{ id: event.id, text: "STUNNED", kind: "stun", at }];
+            case "powerupClaimed":
+              return event.powerup ? [{ id: event.id, text: POWERUP_INFO[event.powerup].name.toUpperCase(), kind: "claim", at: actorAt }] : [];
+            default:
+              return [];
+          }
+        })
+    : [];
+  const shakeEvent = live ? recent.filter((event) => ["damage", "shieldBroken", "impactReflected"].includes(event.type) && now - event.atMs < 380).at(-1) : undefined;
+  const shake = shakeEvent ? (shakeEvent.type === "damage" && (shakeEvent.spell === "incendio" || shakeEvent.critical) ? "heavy" : "light") : "";
+  const flash = shake === "heavy" && shakeEvent && now - shakeEvent.atMs < 240 ? shakeEvent : undefined;
+  const relic = live && game?.phase === "playing" ? game.powerup : null;
+  const relicLifetime = c?.game.rules?.powerupLifetimeMs ?? 10_000;
+  const claim = live ? recent.filter((event) => event.type === "powerupClaimed" && now - event.atMs < 900).at(-1) : undefined;
   const status = miscast?.message ?? (
     c?.notice && performance.now() - c.noticeAt < 1400
       ? c.notice
-      : battleMessage(lastEvent, slot));
+      : latest?.text ?? (game?.phase === "playing" ? "Speak a spell and move your wand." : ""));
   const leaveRoom = () => {
     c?.leaveRoom();
     setCodeInput("");
@@ -362,6 +522,7 @@ export function GameApp() {
           : me?.ready
             ? solo ? "Wands up…" : "Waiting for your rival…"
             : tutorial ? "Tutorial duel" : solo ? "Solo duel" : "Battle lobby";
+  const secondsLeft = Math.max(0, Math.ceil(((game?.roundEndsAtMs ?? now) - now) / 1000));
   return (
     <main className={`game-shell ${inRoom ? "in-duel" : "at-home"}`}>
       <header className="game-top">
@@ -571,45 +732,79 @@ export function GameApp() {
               </span>
               <span>ROUND {game?.roundId || 1}</span>
               {live && game?.phase === "playing" && (!tutorial || game.tutorial?.stage === "free") && (
-                <time className="round-clock" aria-label="Time remaining">
-                  {Math.max(
-                    0,
-                    Math.ceil(((game?.roundEndsAtMs ?? now) - now) / 1000),
-                  )}
-                  s
+                <time className={`round-clock ${secondsLeft <= 10 ? "is-urgent" : ""}`} aria-label="Time remaining">
+                  {secondsLeft}s
                 </time>
               )}
             </div>
           )}
           <div
-            className={`arena ${inRoom ? "arena-live" : "arena-preview"} ${result ? "arena-result" : ""}`}
+            className={`arena ${inRoom ? "arena-live" : "arena-preview"} ${result ? "arena-result" : ""} ${shake ? `shake-${shake}` : ""}`}
           >
             <div className="arena-vignette" />
+            {flash && <div key={flash.id} className={`impact-flash flash-${flash.spell ?? "hit"}`} aria-hidden="true" />}
             <div className="duel-platform rival-platform" />
             <div className="duel-platform player-platform" />
-            <div
-              className={`wizard rival-wizard ${reaction(false)} ${opponent?.hp === 0 ? "is-fainted" : ""}`}
-            >
+            <div className={`wizard rival-wizard ${spriteClasses(otherSlot)}`}>
               <img
                 src="/art/wizard-rival-front.png"
                 alt="Rival wizard facing you"
               />
+              <span className="wizard-flames" aria-hidden="true"><i /><i /><i /></span>
+              <span className="stun-stars" aria-hidden="true"><i>✦</i><i>✦</i><i>✦</i></span>
               {opponent && opponent.offenseLockedUntilMs > now && (
                 <span className="wizard-status">DISARMED</span>
               )}
             </div>
-            <div
-              className={`wizard player-wizard ${reaction(true)} ${me?.hp === 0 ? "is-fainted" : ""}`}
-            >
+            <div className={`wizard player-wizard ${slot ? spriteClasses(slot) : ""}`}>
               <img
                 src="/art/wizard-player-back.png"
                 alt="Your wizard, facing the rival"
               />
+              <span className="wizard-flames" aria-hidden="true"><i /><i /><i /></span>
+              <span className="stun-stars" aria-hidden="true"><i>✦</i><i>✦</i><i>✦</i></span>
               {me && me.offenseLockedUntilMs > now && (
                 <span className="wizard-status">DISARMED</span>
               )}
             </div>
             <canvas ref={canvas} className="spell-canvas" aria-hidden="true" />
+            {relic && (
+              <div
+                className={`arena-relic kind-${relic.kind}`}
+                role="status"
+                aria-label={`${POWERUP_INFO[relic.kind].name}: cast any spell to claim it`}
+                data-testid="arena-relic"
+              >
+                <span className="relic-glow" aria-hidden="true" />
+                <span className="relic-icon"><PowerupIcon kind={relic.kind} /></span>
+                <span className="relic-name">{POWERUP_INFO[relic.kind].name}</span>
+                <span className="relic-hint">{POWERUP_INFO[relic.kind].blurb} · cast anything to claim</span>
+                <i
+                  className="relic-timer"
+                  style={{ width: `${Math.max(0, Math.min(100, (100 * (relic.expiresAtMs - now)) / relicLifetime))}%` }}
+                />
+              </div>
+            )}
+            {claim?.powerup && (
+              <div key={claim.id} className={`relic-claim to-${claim.actor === slot ? "me" : "rival"} kind-${claim.powerup}`} aria-hidden="true">
+                <PowerupIcon kind={claim.powerup} />
+              </div>
+            )}
+            <div className="pop-layer" aria-hidden="true">
+              {pops.map((pop, index) => {
+                // Concurrent callouts on one wizard fan out instead of piling onto each other.
+                const stack = pops.slice(0, index).filter((other) => other.at === pop.at).length;
+                return (
+                  <span
+                    key={pop.id}
+                    className={`pop pop-${pop.kind} at-${pop.at}`}
+                    style={{ marginTop: -stack * 14, marginLeft: stack ? (stack % 2 ? 1 : -1) * 64 * Math.ceil(stack / 2) : 0 }}
+                  >
+                    {pop.text}
+                  </span>
+                );
+              })}
+            </div>
             {miscast && <MiscastVisual key={miscast.id} spell={miscast.spell} />}
             {(live || result) && (
               <>
@@ -646,6 +841,17 @@ export function GameApp() {
                       YOU <b>{me?.hp ?? 0}</b>
                       <span>HP</span> — RIVAL <b>{opponent?.hp ?? 0}</b>
                       <span>HP</span>
+                    </p>
+                  )}
+                  {result && result.outcome !== "aborted" && !c?.game.issue && (
+                    <p className="result-reason">
+                      {result.reason === "timeout"
+                        ? "Time ran out. Higher health takes the courtyard."
+                        : result.outcome === "draw"
+                          ? "Both wizards fell at the same moment."
+                          : result.winner === slot
+                            ? solo ? "The Practice Wizard will study harder for the rematch." : "A clean knockout."
+                            : solo ? "Knocked out. The rival eases off for the rematch." : "Knocked out."}
                     </p>
                   )}
                   {(!result ||
@@ -739,28 +945,39 @@ export function GameApp() {
                       : result.outcome === "draw"
                         ? "Equal magic. A rematch will settle it."
                         : "Your wand stays paired. Ready when you are."
-                    : "Five spells. Choose your moment."}
+                    : "Five spells. Relics mid-court. Choose your moment."}
               </p>
               <span className="dialogue-arrow" aria-hidden="true">
                 ▼
               </span>
             </div>
+            {history.length > 0 && (
+              <ol className="battle-log" aria-label="Recent duel events">
+                {history.map((line, index) => (
+                  <li key={line.id} data-age={history.length - 1 - index}>{line.text}</li>
+                ))}
+              </ol>
+            )}
             <div className="spell-dock">
               {c?.game.rules?.spells
                 .filter((rule) => rule.enabled)
                 .map((rule) => {
-                  const remaining = Math.max(
-                    0,
-                    (me?.cooldownUntilMs[rule.spell] ?? 0) - now,
-                  );
+                  const readyAt = me?.cooldownUntilMs[rule.spell] ?? 0;
+                  const remaining = Math.max(0, readyAt - now);
+                  const justReady = readyAt > 0 && !remaining && now - readyAt < 700;
                   const support =
                     rule.spell === "protego" || rule.spell === "episkey";
+                  const lockedOut = !!me && (
+                    me.stunnedUntilMs > now ||
+                    (rule.damage > 0 && me.offenseLockedUntilMs > now)
+                  );
                   const SpellCard = c.devMode ? "button" : "div";
                   const lessonSpell = game?.tutorial?.spell === rule.spell;
+                  const hasted = !!me && me.hasteUntilMs > now;
                   return (
                     <SpellCard
                       key={rule.spell}
-                      className={`spell-slot ${rule.spell} ${remaining ? "recharging" : ""} ${c.devMode ? "spell-cast-button" : ""} ${lessonSpell ? "spell-lesson" : ""}`}
+                      className={`spell-slot ${rule.spell} ${remaining ? "recharging" : ""} ${justReady ? "just-ready" : ""} ${lockedOut && live ? "locked-out" : ""} ${c.devMode ? "spell-cast-button" : ""} ${lessonSpell ? "spell-lesson" : ""}`}
                       aria-label={`${c.devMode ? "Cast " : ""}${nameOf(rule.spell)}: ${remaining ? `recharging ${(remaining / 1000).toFixed(1)} seconds` : "ready"}`}
                       disabled={c.devMode ? !c.canCastSpell(rule.spell) : undefined}
                       onClick={c.devMode ? () => c.castSpell(rule.spell) : undefined}
@@ -768,12 +985,13 @@ export function GameApp() {
                       <div className="spell-title">
                         <SpellGlyph spell={rule.spell} />
                         <strong>{nameOf(rule.spell)}</strong>
+                        {justReady && <em className="ready-flash" aria-hidden="true">READY</em>}
                       </div>
                       <span className="spell-description">
                         {spellSummary(rule)}
                       </span>
                       <div className="spell-meta">
-                        <span>{support ? "RAISE" : "JAB"} + SPEAK</span>
+                        <span>{support ? "RAISE" : "JAB"} + SPEAK{hasted ? " · HASTE" : ""}</span>
                         <b>
                           {remaining
                             ? `${(remaining / 1000).toFixed(1)}s`

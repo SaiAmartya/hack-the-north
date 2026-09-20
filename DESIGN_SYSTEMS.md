@@ -10,7 +10,7 @@ The homepage offers Connect badge and Connect iPhone before any duel is created 
 
 Solo uses the same arena and rules against Practice Wizard, a paced server-owned opponent. It hides invitation controls. Human input still requires the paired wand and local speech. Ready and Rematch start without another player; leaving retains the wand. The game has no webcam feature; iPhone WebRTC carries motion data only.
 
-Tutorial sits immediately below Duel a bot. Its five lessons pause between confirmed spell effects, show a small original vector gesture demonstration, and finish with a 30-second free duel. Guidance uses the server's spell stats and keeps both HP panels visible. Speech and gesture overlap; the tutorial does not infer success from an instruction button.
+Tutorial sits immediately below Duel a bot. Its five lessons pause between confirmed spell effects, show a small original vector gesture demonstration, and finish with a 45-second free duel. Guidance uses the server's spell stats and keeps both HP panels visible. Speech and gesture overlap; the tutorial does not infer success from an instruction button.
 
 Dev mode is an explicit, default-off switch at the homepage's bottom right. It retains wand pairing but permits spell-card clicks without microphone readiness. Those clicks obey the same referee rules and are labeled in a local diagnostic log under the battle. The log includes raw received wand data, classification/fusion outcomes and raw transcription text; no microphone audio or credentials. Keep capture bounded, export on request, and render only a short recent window. Ordinary play has no diagnostic panel or clickable spells. Motion-only casting was explicitly withdrawn.
 

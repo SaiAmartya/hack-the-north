@@ -31,3 +31,6 @@ firmware/backups/
 
 # os
 .DS_Store
+
+# battle showcase screenshots (apps/web/e2e/showcase)
+apps/web/e2e/showcase/shots/

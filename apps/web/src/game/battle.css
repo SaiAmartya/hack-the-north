@@ -1,0 +1,482 @@
+/* Battle presentation: creature-battle pacing on top of the courtyard stage.
+   Every effect below is decorative; the referee's snapshot remains the only truth. */
+
+/* --- health panels: banded colour, trailing drain, status chips ------------------- */
+meter[data-level="mid"]::-webkit-meter-optimum-value {
+  background: linear-gradient(#f4dc8a 0 30%, #c9a43c 30%);
+}
+meter[data-level="low"]::-webkit-meter-optimum-value {
+  background: linear-gradient(#f1a6a0 0 30%, #bd625b 30%);
+  animation: hp-low-pulse 0.9s steps(2, end) infinite;
+}
+meter[data-level="mid"]::-moz-meter-bar {
+  background: #c9a43c;
+}
+meter[data-level="low"]::-moz-meter-bar {
+  background: #bd625b;
+}
+meter::-webkit-meter-optimum-value {
+  transition: width 0.55s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.status-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-height: 14px;
+}
+.status-chip {
+  font-size: 7px;
+  letter-spacing: 0.8px;
+  padding: 3px 5px;
+  border: 1px solid #453b42;
+  background: #e5ddc7;
+  color: #3f3438;
+  white-space: nowrap;
+}
+.status-shield { background: #cfe8fb; border-color: #4f7ea3; color: #234a68; }
+.status-mirror { background: #eef8ff; border-color: #6fa5c6; color: #2e5d7d; }
+.status-disarmed { background: #f3d77e; border-color: #8d6a1e; color: #573d2d; }
+.status-stunned { background: #fff2b3; border-color: #b8942a; color: #6a5212; animation: chip-blink 0.5s steps(2, end) infinite; }
+.status-burning { background: #ffc9a3; border-color: #b5562a; color: #6d2e12; animation: chip-blink 0.7s steps(2, end) infinite; }
+.status-lucky { background: #fff0c2; border-color: #c49a2e; color: #6b4d0d; }
+.status-haste { background: #e5d9ff; border-color: #7c5cc4; color: #42297d; }
+.status-fainted { background: #d8d3cc; border-color: #6b6660; color: #3e3a37; }
+.health-caption b {
+  transition: color 0.2s;
+}
+
+/* --- arena reactions: shake, flash, urgent clock ---------------------------------- */
+.arena.shake-light {
+  animation: arena-shake-light 0.32s steps(4, end) 1;
+}
+.arena.shake-heavy {
+  animation: arena-shake-heavy 0.42s steps(6, end) 1;
+}
+.impact-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  background: #fff3d6;
+  mix-blend-mode: screen;
+  animation: impact-flash 0.24s steps(3, end) both;
+}
+.impact-flash.flash-incendio {
+  background: #ffb27a;
+}
+.round-clock.is-urgent {
+  color: #ff9c8a;
+  animation: clock-urgent 1s steps(2, end) infinite;
+}
+
+/* --- wizard sprites: cast lunge, recoil, stumble, statuses ------------------------ */
+.wizard {
+  transition: filter 0.15s;
+}
+.wizard-flames,
+.stun-stars {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: none;
+}
+.wizard.is-burning .wizard-flames {
+  display: block;
+}
+.wizard-flames i {
+  position: absolute;
+  bottom: 18%;
+  width: 11%;
+  height: 22%;
+  background: linear-gradient(#ffe680, #ff7a2d 55%, #d0361f);
+  clip-path: polygon(50% 0, 88% 40%, 100% 78%, 70% 100%, 30% 100%, 0 78%, 12% 40%);
+  mix-blend-mode: screen;
+  animation: flame-flicker 0.36s steps(3, end) infinite;
+  opacity: 0.85;
+}
+.wizard-flames i:nth-child(1) { left: 30%; animation-delay: 0s; }
+.wizard-flames i:nth-child(2) { left: 47%; height: 30%; bottom: 22%; animation-delay: -0.12s; }
+.wizard-flames i:nth-child(3) { left: 62%; animation-delay: -0.24s; }
+.wizard.is-stunned .stun-stars {
+  display: block;
+}
+.stun-stars i {
+  position: absolute;
+  top: 4%;
+  left: 50%;
+  font-style: normal;
+  color: #fff08a;
+  font-size: clamp(12px, 2.2vw, 22px);
+  text-shadow: 1px 1px 0 #5a4a12;
+  animation: star-orbit 1.1s linear infinite;
+}
+.stun-stars i:nth-child(2) { animation-delay: -0.37s; }
+.stun-stars i:nth-child(3) { animation-delay: -0.73s; }
+.arena-live .player-wizard.is-casting {
+  animation: cast-lunge-player 0.34s steps(3, end) 1;
+}
+.arena-live .rival-wizard.is-casting {
+  animation: cast-lunge-rival 0.34s steps(3, end) 1;
+}
+.wizard.is-hit {
+  animation: wizard-hit 0.4s steps(3, end);
+}
+.wizard.is-hit img {
+  filter: drop-shadow(0 5px 0 #15182b40) brightness(1.9) saturate(0.55) drop-shadow(0 0 10px #ff6b6b);
+}
+.wizard.is-crit {
+  animation: wizard-crit 0.5s steps(4, end);
+}
+.wizard.is-crit img {
+  filter: drop-shadow(0 5px 0 #15182b40) brightness(2.4) saturate(0.3) drop-shadow(0 0 14px #ffe08a);
+}
+.wizard.is-burn-hit img {
+  filter: drop-shadow(0 5px 0 #15182b40) brightness(1.3) drop-shadow(0 0 10px #ff7a2d);
+}
+.wizard.is-stumbling {
+  animation: wizard-stumble 0.65s steps(5, end);
+}
+.wizard.is-disarmed img {
+  filter: drop-shadow(0 5px 0 #15182b40) grayscale(0.25) brightness(0.92);
+}
+.wizard.is-stunned img {
+  animation: wizard-wobble 0.5s steps(4, end) infinite;
+}
+.wizard.is-reflecting img {
+  filter: drop-shadow(0 0 16px #9ff3ff) brightness(1.15);
+}
+.wizard.is-lucky img {
+  filter: drop-shadow(0 5px 0 #15182b40) drop-shadow(0 0 8px #ffd86b);
+}
+.wizard.is-hasted img {
+  filter: drop-shadow(0 5px 0 #15182b40) drop-shadow(0 0 8px #c8a9ff);
+}
+.wizard.is-mirrored img {
+  filter: drop-shadow(0 5px 0 #15182b40) drop-shadow(0 0 10px #e6f6ff);
+}
+.wizard.is-claiming {
+  animation: wizard-claim 0.6s steps(4, end);
+}
+
+/* --- floating numbers and callouts ------------------------------------------------- */
+.pop-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+.pop {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-weight: 800;
+  font-size: clamp(16px, 2.6vw, 30px);
+  letter-spacing: 1px;
+  color: #fff3d6;
+  text-shadow:
+    2px 2px 0 #2a1d2c,
+    -1px -1px 0 #2a1d2c,
+    1px -1px 0 #2a1d2c,
+    -1px 1px 0 #2a1d2c;
+  animation: pop-rise 1.25s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  white-space: nowrap;
+}
+.pop.at-me { left: 31%; top: 47%; }
+.pop.at-rival { left: 69%; top: 21%; }
+.pop-damage { color: #ffd0d6; }
+.pop-crit { color: #ffe08a; font-size: clamp(20px, 3.4vw, 40px); animation-name: pop-crit; }
+.pop-burn { color: #ffb27a; font-size: clamp(13px, 2vw, 22px); }
+.pop-heal { color: #b6ffcf; }
+.pop-block { color: #bfe6ff; font-size: clamp(13px, 2vw, 22px); }
+.pop-reflect { color: #9ff3ff; font-size: clamp(18px, 3vw, 34px); animation-name: pop-crit; }
+.pop-break { color: #d8ecff; font-size: clamp(13px, 2vw, 22px); }
+.pop-disarm { color: #f8dd8a; font-size: clamp(13px, 2vw, 22px); }
+.pop-stun { color: #fff08a; font-size: clamp(13px, 2vw, 22px); }
+.pop-claim { color: #ffd86b; font-size: clamp(11px, 1.6vw, 18px); }
+
+/* --- arena relics (powerups) -------------------------------------------------------- */
+.arena-relic {
+  --relic: #ffd86b;
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  top: 56%;
+  transform: translate(-50%, -50%);
+  width: clamp(140px, 24%, 240px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  text-align: center;
+  color: #fff3d6;
+  pointer-events: none;
+  animation: relic-arrive 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+}
+.arena-relic.kind-bezoar { --relic: #9be0a8; }
+.arena-relic.kind-felix { --relic: #ffe08a; }
+.arena-relic.kind-mirror { --relic: #c9f1ff; }
+.arena-relic.kind-haste { --relic: #d3bdff; }
+.relic-glow {
+  position: absolute;
+  top: 8px;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--relic) 0, transparent 70%);
+  opacity: 0.55;
+  animation: relic-pulse 1.2s ease-in-out infinite;
+}
+.relic-icon {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  background: #2b2540;
+  border: 2px solid var(--relic);
+  box-shadow: 3px 3px 0 #10101c;
+  animation: relic-bob 1.6s ease-in-out infinite;
+}
+.relic-icon svg {
+  width: 34px;
+  height: 34px;
+  stroke: var(--relic);
+  stroke-width: 1.8;
+}
+.relic-name {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1.3px;
+  text-transform: uppercase;
+  color: var(--relic);
+  text-shadow: 1px 1px 0 #1a1524;
+}
+.relic-hint {
+  font-size: 8px;
+  letter-spacing: 0.6px;
+  color: #e9dec0;
+  text-shadow: 1px 1px 0 #1a1524;
+}
+.relic-timer {
+  display: block;
+  height: 3px;
+  background: var(--relic);
+  box-shadow: 0 0 0 1px #1a1524;
+  transition: width 0.25s linear;
+  margin-top: 2px;
+}
+.relic-claim {
+  --relic: #ffd86b;
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  top: 56%;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  background: #2b2540;
+  border: 2px solid var(--relic);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: relic-claim-me 0.85s cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+.relic-claim.to-rival { animation-name: relic-claim-rival; }
+.relic-claim.kind-bezoar { --relic: #9be0a8; }
+.relic-claim.kind-felix { --relic: #ffe08a; }
+.relic-claim.kind-mirror { --relic: #c9f1ff; }
+.relic-claim.kind-haste { --relic: #d3bdff; }
+.relic-claim svg { width: 22px; height: 22px; stroke: var(--relic); }
+
+/* --- battle log and spell cards ----------------------------------------------------- */
+.battle-log {
+  margin: 0;
+  padding: 6px 22px 8px 58px;
+  list-style: none;
+  border-bottom: 2px solid #d4cbb5;
+  background: #efe8d3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.battle-log li {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #6b5d4c;
+}
+.battle-log li[data-age="1"] { opacity: 0.8; }
+.battle-log li[data-age="2"] { opacity: 0.6; }
+.battle-log li[data-age="3"] { opacity: 0.42; }
+.spell-slot {
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.spell-slot.just-ready {
+  animation: card-ready 0.7s steps(4, end) 1;
+  border-color: var(--spell);
+}
+.ready-flash {
+  margin-left: auto;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: #fff8e6;
+  background: var(--spell);
+  padding: 2px 5px;
+  animation: ready-blink 0.35s steps(2, end) 2;
+}
+.spell-slot.locked-out {
+  background: #ece3d3;
+}
+.spell-slot.locked-out .spell-title {
+  opacity: 0.55;
+}
+.spell-slot.locked-out::after {
+  content: "LOCKED";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 7px;
+  letter-spacing: 1px;
+  color: #8d6a1e;
+  background: #f3d77e;
+  padding: 2px 5px;
+}
+.result-reason {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #7d705d;
+  margin: 2px 0 8px;
+}
+
+/* --- keyframes ---------------------------------------------------------------------- */
+@keyframes hp-low-pulse {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.35); }
+}
+@keyframes chip-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@keyframes arena-shake-light {
+  0%, 100% { translate: 0 0; }
+  25% { translate: -0.6% 0.2%; }
+  50% { translate: 0.6% -0.2%; }
+  75% { translate: -0.3% 0.3%; }
+}
+@keyframes arena-shake-heavy {
+  0%, 100% { translate: 0 0; }
+  16% { translate: -1.2% 0.6%; }
+  33% { translate: 1.1% -0.7%; }
+  50% { translate: -0.9% -0.4%; }
+  66% { translate: 0.8% 0.6%; }
+  83% { translate: -0.4% 0.2%; }
+}
+@keyframes impact-flash {
+  0% { opacity: 0.75; }
+  100% { opacity: 0; }
+}
+@keyframes clock-urgent {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes flame-flicker {
+  0%, 100% { transform: scaleY(1) translateY(0); opacity: 0.85; }
+  50% { transform: scaleY(1.25) translateY(-6%); opacity: 1; }
+}
+@keyframes star-orbit {
+  0% { transform: translate(-50%, 0) translateX(-38px) scale(0.7); opacity: 0.4; }
+  25% { transform: translate(-50%, -6px) translateX(0) scale(1.1); opacity: 1; }
+  50% { transform: translate(-50%, 0) translateX(38px) scale(0.7); opacity: 0.4; }
+  75% { transform: translate(-50%, 6px) translateX(0) scale(0.9); opacity: 0.7; }
+  100% { transform: translate(-50%, 0) translateX(-38px) scale(0.7); opacity: 0.4; }
+}
+@keyframes cast-lunge-player {
+  0%, 100% { translate: 0 0; }
+  40% { translate: 5% -4%; }
+}
+@keyframes cast-lunge-rival {
+  0%, 100% { translate: 0 0; }
+  40% { translate: -5% 4%; }
+}
+@keyframes wizard-crit {
+  0%, 100% { translate: 0 0; rotate: 0deg; }
+  20% { translate: 9px -4px; rotate: 4deg; }
+  40% { translate: -9px 3px; rotate: -4deg; }
+  60% { translate: 6px 0; rotate: 2deg; }
+  80% { translate: -4px 0; rotate: -1deg; }
+}
+@keyframes wizard-stumble {
+  0%, 100% { translate: 0 0; rotate: 0deg; }
+  25% { translate: -4% 2%; rotate: -9deg; }
+  55% { translate: -3% 1%; rotate: -6deg; }
+}
+@keyframes wizard-wobble {
+  0%, 100% { rotate: -3deg; }
+  50% { rotate: 3deg; }
+}
+@keyframes wizard-claim {
+  0%, 100% { translate: 0 0; }
+  30% { translate: 0 -6%; }
+}
+@keyframes pop-rise {
+  0% { opacity: 0; translate: 0 10px; scale: 0.7; }
+  15% { opacity: 1; translate: 0 0; scale: 1.15; }
+  30% { scale: 1; }
+  100% { opacity: 0; translate: 0 -46px; }
+}
+@keyframes pop-crit {
+  0% { opacity: 0; scale: 0.5; rotate: -6deg; }
+  15% { opacity: 1; scale: 1.35; rotate: 3deg; }
+  35% { scale: 1.1; rotate: -1deg; }
+  100% { opacity: 0; translate: 0 -40px; scale: 1; }
+}
+@keyframes relic-arrive {
+  0% { opacity: 0; translate: 0 -30px; scale: 0.6; }
+  100% { opacity: 1; translate: 0 0; scale: 1; }
+}
+@keyframes relic-pulse {
+  0%, 100% { opacity: 0.35; scale: 0.9; }
+  50% { opacity: 0.7; scale: 1.1; }
+}
+@keyframes relic-bob {
+  0%, 100% { translate: 0 0; }
+  50% { translate: 0 -6px; }
+}
+@keyframes relic-claim-me {
+  0% { opacity: 1; left: 50%; top: 56%; scale: 1; }
+  100% { opacity: 0; left: 26%; top: 62%; scale: 0.4; }
+}
+@keyframes relic-claim-rival {
+  0% { opacity: 1; left: 50%; top: 56%; scale: 1; }
+  100% { opacity: 0; left: 74%; top: 40%; scale: 0.4; }
+}
+@keyframes card-ready {
+  0%, 100% { box-shadow: none; }
+  50% { box-shadow: 0 0 0 3px var(--spell); }
+}
+@keyframes ready-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+@media (max-width: 700px) {
+  .arena-relic { width: 110px; top: 52%; }
+  .relic-icon { width: 38px; height: 38px; }
+  .relic-name { font-size: 8px; }
+  .relic-hint { display: none; }
+  .pop.at-me { top: 46%; }
+  .pop.at-rival { top: 20%; }
+  .battle-log { padding: 5px 12px 6px 40px; }
+  .battle-log li { font-size: 9px; }
+  .status-chip { font-size: 6px; padding: 2px 3px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .impact-flash { display: none; }
+  .pop { animation: none; opacity: 1; }
+  .wizard-flames i { animation: none; }
+  .stun-stars i { animation: none; transform: translate(-50%, 0); }
+  .stun-stars i:nth-child(2) { transform: translate(-50%, 0) translateX(-30px); }
+  .stun-stars i:nth-child(3) { transform: translate(-50%, 0) translateX(30px); }
+  .relic-claim { display: none; }
+}

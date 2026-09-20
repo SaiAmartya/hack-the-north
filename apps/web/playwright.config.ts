@@ -2,6 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
+  testIgnore: ["**/showcase/**"],
   workers: 1,
   use: {
     baseURL: "http://127.0.0.1:15173",
@@ -24,6 +25,8 @@ export default defineConfig({
       env: {
         WAND_ALLOW_REPLAY: "true",
         WAND_DEV_RELAY: "true",
+        // Scripted scenarios assert exact health: no critical hits, stuns or relics here.
+        WAND_VARIANCE: "false",
         WAND_ALLOWED_ORIGINS: "http://127.0.0.1:15173",
       },
       url: "http://127.0.0.1:18000/api/game/health",

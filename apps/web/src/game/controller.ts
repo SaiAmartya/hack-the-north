@@ -150,7 +150,9 @@ export class DuelController {
               ? "Your health is already full"
               : message.reason === "offense_locked"
                 ? "Disarmed — defend or heal"
-                : "Spell not ready";
+                : message.reason === "stunned"
+                  ? "Stunned — wait a moment"
+                  : "Spell not ready";
         this.noticeAt = performance.now();
         this.lastSpell = undefined;
         this.onChange();
@@ -201,7 +203,8 @@ export class DuelController {
     if (!this.devMode || !this.healthy() || state?.phase !== "playing" || !own || !rule?.enabled) return false;
     if (state.tutorial?.paused || (state.tutorial?.stage === "practice" && state.tutorial.spell !== spell)) return false;
     if (own.cooldownUntilMs[spell] > this.game.now()) return false;
-    if (spell === "episkey" && own.hp >= own.maxHp) return false;
+    if (own.stunnedUntilMs > this.game.now()) return false;
+    if (spell === "episkey" && own.hp >= own.maxHp && own.burnUntilMs <= this.game.now()) return false;
     return !(rule.damage > 0 && own.offenseLockedUntilMs > this.game.now());
   }
   castSpell(spell: Spell): void {
@@ -770,7 +773,8 @@ export class DuelController {
           (own.shieldUntilMs > this.game.now()
             ? StateStatusFlag.ShieldActive
             : 0) |
-          (own.offenseLockedUntilMs > this.game.now()
+          (own.offenseLockedUntilMs > this.game.now() ||
+          own.stunnedUntilMs > this.game.now()
             ? StateStatusFlag.OffenseLocked
             : 0),
         presentationEpoch: this.presentationEpoch,
@@ -808,9 +812,9 @@ export class DuelController {
       const effect =
         event.type === "castAccepted" && event.actor === slot
           ? CueEffect.AcceptedCast
-          : event.type === "impactBlocked" && event.target === slot
+          : ["impactBlocked", "impactReflected"].includes(event.type) && event.target === slot
             ? CueEffect.BlockedIncomingHit
-            : event.type === "damage" && event.target === slot
+            : ["damage", "shieldBroken"].includes(event.type) && event.target === slot
               ? CueEffect.TookDamage
               : event.type === "roundEnded"
                 ? CueEffect.RoundResult

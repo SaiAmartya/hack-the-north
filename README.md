@@ -50,24 +50,43 @@ two seconds of quiet while its automatic setup completes. The shared gesture pro
 re-anchors from stillness; Ready requires healthy wand and microphone input.
 
 Say the exact spell name while making the movement. There are no spell buttons and no shared
-cooldown between different moves:
+cooldown between different moves. Every spell looks, moves and lands differently:
 
-| Spell | Movement | Result | Cooldown |
-| --- | --- | --- | --- |
-| Stupefy | Firm jab | 20 damage | 2 s |
-| Protego | Raise and hold | Block one hit within 1.2 s | 3 s |
-| Expelliarmus | Firm jab | 10 damage and 1 s offensive lock | 6 s |
-| Incendio | Firm jab | 30 damage | 8 s |
-| Episkey | Raise and hold | Restore up to 18 HP | 12 s |
+| Spell | Movement | Result | Flight | Cooldown |
+| --- | --- | --- | --- | --- |
+| Stupefy | Firm jab | 14 damage; 25% chance to stun for 1.2 s (no casting) | 0.8 s bolt | 2.5 s |
+| Protego | Raise and hold | Block one hit within 1.5 s; raised ≤ 0.35 s before impact it **reflects** the spell back | — | 4 s |
+| Expelliarmus | Firm jab | 8 damage, disarms for 2.5 s (no attacks) and **shatters** a raised shield | 1.1 s hook | 6 s |
+| Incendio | Firm jab | 22 damage, then burning: 3 damage per second for 4 s | 1.8 s fireball | 9 s |
+| Episkey | Raise and hold | Restore up to 22 HP and cure burning | — | 12 s |
 
-Healing is capped at 100 HP; attempting it at full health spends no cooldown. A disarmed
-wizard can still shield or heal. Reaching 0 HP ends the duel; at 60 seconds, higher HP wins
-and equal HP draws. Simultaneous knockouts can also draw.
+Every damaging hit has a 12% chance to be a **critical hit** (×1.5). Healing is capped at 100 HP;
+attempting it at full health with no burn spends no cooldown. A disarmed wizard can still shield or
+heal; a stunned wizard cannot cast at all until the stun ends. Reaching 0 HP ends the duel; at
+90 seconds, higher HP wins and equal HP draws. Simultaneous knockouts can also draw.
 
-**Duel a bot** uses those exact rules against Practice Wizard. It waits three seconds before
-acting, then makes a decision every 1.8 seconds: attack, occasionally shield, or heal when hurt.
-Ready and Rematch need only you. There is no second device, invitation code or camera step.
-Your own wand and microphone still work exactly as they do in multiplayer.
+**Relics** appear mid-court a few times per round (first at 8–14 s, then every 12–20 s, each
+lasting 10 s). The next accepted cast by either wizard claims the relic: the Phoenix Feather resets
+every cooldown, the Bezoar restores 20 HP and cures burning, Felix Felicis makes the next hit a
+guaranteed critical, the Mirror Charm reflects the next incoming spell within 8 s, and the
+Time-Turner halves remaining cooldowns and runs new ones at double speed for 8 s. All rolls come
+from one seed per room, so a recorded match replays identically.
+
+**Duel a bot** uses those exact rules against Practice Wizard, an adaptive opponent that
+**matches your tempo**: it waits three seconds before acting, then casts at a pace scaled from
+your own recent casting rate (Apprentice 1.5x slower than you, Duelist about even, Master 0.85x),
+so a player who lands a spell every six seconds faces a rival on a similar clock. It blocks
+visible fireballs and hooks on reaction, but a Stupefy bolt is too quick for Apprentice and
+Duelist to answer; only the Master sometimes blocks late and reflects it. It shatters a raised
+shield with Expelliarmus, heals when hurt and races for relics after a short notice delay. Solo
+starts at Duelist, studies harder after you win a round and eases off after it wins. Ready and
+Rematch need only you. There is no second device, invitation code or camera step. Your own wand
+and microphone still work exactly as they do in multiplayer.
+
+The battle narrates every authoritative event in a creature-battle style log with floating damage
+numbers, status chips (SHIELD, MIRROR, DISARMED, STUNNED, BURNING, LUCKY, HASTE), a wand that is
+yanked away on a disarm, embers on a burning wizard and screen shake on heavy hits. Motion
+preferences are respected: reduced motion keeps the text callouts and drops the animation.
 
 Switching laptop tabs aborts an active round while retaining the wand where available;
 returning validates fresh input before a new Ready. The stable build does not hot-reload;

@@ -8,60 +8,89 @@
     "version": 1,
     "tickMs": 50,
     "countdownMs": 3000,
-    "roundMs": 60000,
+    "roundMs": 90000,
     "heartbeatMs": 500,
     "heartbeatTimeoutMs": 1500,
     "maxHp": 100,
+    "critChancePercent": 12,
+    "critMultiplierPercent": 150,
+    "perfectBlockMs": 350,
+    "powerupLifetimeMs": 10000,
     "spells": [
       {
         "spell": "stupefy",
         "enabled": true,
-        "damage": 20,
+        "damage": 14,
         "heal": 0,
-        "cooldownMs": 2000,
-        "flightMs": 2000,
+        "cooldownMs": 2500,
+        "flightMs": 800,
         "shieldMs": 0,
-        "offenseLockMs": 0
+        "offenseLockMs": 0,
+        "stunMs": 1200,
+        "stunChancePercent": 25,
+        "burnDamage": 0,
+        "burnMs": 0,
+        "breaksShield": false
       },
       {
         "spell": "protego",
         "enabled": true,
         "damage": 0,
         "heal": 0,
-        "cooldownMs": 3000,
+        "cooldownMs": 4000,
         "flightMs": 0,
-        "shieldMs": 1200,
-        "offenseLockMs": 0
+        "shieldMs": 1500,
+        "offenseLockMs": 0,
+        "stunMs": 0,
+        "stunChancePercent": 0,
+        "burnDamage": 0,
+        "burnMs": 0,
+        "breaksShield": false
       },
       {
         "spell": "expelliarmus",
         "enabled": true,
-        "damage": 10,
+        "damage": 8,
         "heal": 0,
         "cooldownMs": 6000,
-        "flightMs": 2200,
+        "flightMs": 1100,
         "shieldMs": 0,
-        "offenseLockMs": 1000
+        "offenseLockMs": 2500,
+        "stunMs": 0,
+        "stunChancePercent": 0,
+        "burnDamage": 0,
+        "burnMs": 0,
+        "breaksShield": true
       },
       {
         "spell": "incendio",
         "enabled": true,
-        "damage": 30,
+        "damage": 22,
         "heal": 0,
-        "cooldownMs": 8000,
-        "flightMs": 2400,
+        "cooldownMs": 9000,
+        "flightMs": 1800,
         "shieldMs": 0,
-        "offenseLockMs": 0
+        "offenseLockMs": 0,
+        "stunMs": 0,
+        "stunChancePercent": 0,
+        "burnDamage": 3,
+        "burnMs": 4000,
+        "breaksShield": false
       },
       {
         "spell": "episkey",
         "enabled": true,
         "damage": 0,
-        "heal": 18,
+        "heal": 22,
         "cooldownMs": 12000,
         "flightMs": 0,
         "shieldMs": 0,
-        "offenseLockMs": 0
+        "offenseLockMs": 0,
+        "stunMs": 0,
+        "stunChancePercent": 0,
+        "burnDamage": 0,
+        "burnMs": 0,
+        "breaksShield": false
       }
     ]
   },
@@ -91,6 +120,11 @@
         "maxHp": 100,
         "shieldUntilMs": 0,
         "offenseLockedUntilMs": 0,
+        "stunnedUntilMs": 0,
+        "burnUntilMs": 0,
+        "hasteUntilMs": 0,
+        "mirrorUntilMs": 0,
+        "lucky": false,
         "cooldownUntilMs": {
           "stupefy": 0,
           "protego": 0,
@@ -102,6 +136,7 @@
       "P2": null
     },
     "projectiles": [],
+    "powerup": null,
     "recentEvents": [
       {
         "id": "g2:r0:e1",
@@ -116,7 +151,9 @@
         "projectileId": null,
         "effectId": null,
         "amount": null,
-        "reason": null
+        "reason": null,
+        "critical": false,
+        "powerup": null
       }
     ],
     "tutorial": null
