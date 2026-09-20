@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
-import { scriptedLaptop, connectBadge, snapshot, cast } from "./scripted-laptop";
+import { scriptedLaptop, connectBadge, snapshot, cast, castWithMicrophone } from "./scripted-laptop";
 
 test.afterEach(async ({ context, browser }, testInfo) => {
   const laptops = browser.contexts();
@@ -14,6 +14,15 @@ test.afterEach(async ({ context, browser }, testInfo) => {
         renderer: gl && debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : "unavailable",
         nativeVisibility: Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState")?.get?.call(document),
         focused: document.hasFocus(), deliveries: badge.deliveries, longTasks: badge.longTasks,
+        healthTransitions: badge.healthTransitions,
+        acknowledgements: Reflect.get(window, "__scriptedNetwork")?.acknowledgements,
+        game: (() => {
+          const controller = Reflect.get(window, "__duelController");
+          const state = controller?.game.snapshot;
+          return { phase: state?.phase, players: state?.players, recentEvents: state?.recentEvents,
+            issue: controller?.issue, gameIssue: controller?.game.issue,
+            speech: controller?.speech.getSnapshot().phase };
+        })(),
       };
     })));
     const path = testInfo.outputPath("scripted-input-timing.json");
@@ -44,7 +53,7 @@ test("wand pairing precedes room creation and opens the lobby without calibratio
   await expect(page.getByRole("button", { name: "Enable microphone", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: /camera/i })).toHaveCount(0);
   await expect(page.locator("video")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Waiting for rival…", exact: true })).toBeDisabled();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: "test-results/multiplayer-lobby-narrow.png", fullPage: true });
@@ -66,6 +75,76 @@ async function sharedHealth(first: Page, second: Page, hp: number) {
   expect((await snapshot(second)).players.P2?.hp).toBe(hp);
 }
 
+test("two normal players align microphone and wand in every order despite delayed cast delivery", async ({ page, browser }, testInfo) => {
+  test.setTimeout(70_000);
+  const first = await scriptedLaptop(page);
+  first.enableSpeech();
+  await connectBadge(page);
+  await page.getByRole("button", { name: "Start a duel", exact: true }).click();
+  await expect(page.getByLabel("Duel code")).toHaveText(/^[A-Z0-9]{6}$/);
+  const code = (await page.getByLabel("Duel code").textContent())!;
+  await expect(page.getByRole("button", { name: "Waiting for rival…", exact: true })).toBeDisabled();
+  const opponentContext = await browser.newContext({ baseURL: new URL(page.url()).origin,
+    viewport: { width: 1440, height: 1000 } });
+  const opponent = await opponentContext.newPage();
+  const second = await scriptedLaptop(opponent);
+  second.enableSpeech();
+  await connectBadge(opponent);
+  await opponent.getByLabel("Already have a duel code?").fill(code);
+  // Make joining visibly asynchronous even against the local referee. Ready
+  // must wait for membership instead of being cleared by that room reset.
+  await opponent.route("**/api/game/session", async route => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await route.continue();
+  });
+  await opponent.getByRole("button", { name: "Join with code", exact: true }).click();
+  for (const player of [page, opponent]) {
+    await expect(player.getByRole("button", { name: "Ready", exact: true })).toBeEnabled({ timeout: 10_000 });
+    await player.getByRole("button", { name: "Ready", exact: true }).click();
+  }
+  for (const player of [page, opponent]) {
+    await expect.poll(async () => (await snapshot(player)).phase).toBe("playing");
+    await player.evaluate(() => {
+      Reflect.get(window, "__scriptedBadge").batchMs = 100;
+      // Delay only outbound cast transport; the real referee still decides and
+      // broadcasts every result. Local input pairing must happen before this delay.
+      Reflect.get(window, "__scriptedNetwork").castDelayMs = 175;
+    });
+  }
+  const evidence = [];
+  let hp = 100;
+  for (const order of ["overlap", "speech-first", "movement-first"] as const) {
+    for (const player of [page, opponent]) await expect.poll(async () => {
+      const state = await snapshot(player);
+      return Math.max(state.players.P1!.cooldownUntilMs.stupefy, state.players.P2!.cooldownUntilMs.stupefy) - state.serverNowMs;
+    }).toBeLessThanOrEqual(0);
+    const casts = await Promise.all([page, opponent].map(player => castWithMicrophone(player, "stupefy", order)));
+    for (const proof of casts) {
+      expect(proof.sends[0].sentAtMs! - proof.sends[0].queuedAtMs).toBeGreaterThanOrEqual(150);
+      expect(proof.acknowledgements[0].atMs).toBeGreaterThanOrEqual(proof.sends[0].sentAtMs!);
+    }
+    evidence.push({ order, casts });
+    hp -= 20;
+    for (const player of [page, opponent]) await expect.poll(async () => {
+      const state = await snapshot(player);
+      return [state.players.P1?.hp, state.players.P2?.hp];
+    }).toEqual([hp, hp]);
+  }
+  const evidencePath = testInfo.outputPath("multiplayer-microphone-motion-timing.json");
+  await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
+  await testInfo.attach("multiplayer-microphone-motion-timing", { path: evidencePath, contentType: "application/json" });
+  const expectedSpells = Array(3).fill("stupefy");
+  for (const player of [page, opponent]) {
+    const state = await snapshot(player);
+    for (const actor of ["P1", "P2"])
+      expect(state.recentEvents.filter(event => event.actor === actor && event.type === "castAccepted").map(event => event.spell)).toEqual(expectedSpells);
+    expect(await player.evaluate(() => {
+      const c = Reflect.get(window, "__duelController");
+      return { dev: c.devMode, simple: c.simpleMotion };
+    })).toEqual({ dev: false, simple: false });
+  }
+});
+
 test("two ordinary player views sync five spells, cooldowns, victory, rematch and recovery", async ({ page, browser }) => {
   test.setTimeout(100_000);
   const errors: string[] = [];
@@ -76,7 +155,7 @@ test("two ordinary player views sync five spells, cooldowns, victory, rematch an
   await expect(page.getByLabel("Duel code")).toHaveText(/^[A-Z0-9]{6}$/);
   const code = (await page.getByLabel("Duel code").textContent())!;
   await expect(page.getByRole("heading", { name: "Battle lobby" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Waiting for rival…", exact: true })).toBeDisabled();
   // Each laptop has its own browser storage and renderer context.
   const opponentContext = await browser.newContext({
     baseURL: new URL(page.url()).origin, viewport: { width: 1440, height: 1000 },

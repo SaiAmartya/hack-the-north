@@ -1,5 +1,19 @@
 import type { Spell } from "../game/contracts";
 import type { GestureEvidence } from "./motion";
+import type { AccelerationSpikeEvidence } from "./spike";
+
+export type MotionEvidence = GestureEvidence | AccelerationSpikeEvidence;
+
+function isSpike(evidence: MotionEvidence): evidence is AccelerationSpikeEvidence {
+  return "kind" in evidence && evidence.kind === "acceleration-spike";
+}
+
+function timingFits(voice: UtteranceEvidence, gesture: MotionEvidence, simpleMotion: boolean): boolean {
+  const gap = Math.max(0, voice.startMs - gesture.endMs, gesture.startMs - voice.endMs);
+  const union = Math.max(voice.endMs, gesture.endMs) - Math.min(voice.startMs, gesture.startMs);
+  return gap <= (simpleMotion ? SIMPLE_GAP_MS : GESTURE_GAP_MS) &&
+    union <= (simpleMotion ? SIMPLE_UNION_MS : GESTURE_UNION_MS);
+}
 
 export type UtteranceOnset = {
   id: string;
@@ -19,26 +33,38 @@ export type CastAttempt = {
   gestureId: string;
   utteranceId: string;
   generation: number;
+  timing: {
+    speechStartMs: number;
+    speechEndMs: number;
+    speechFinalAtMs: number;
+    gestureStartMs: number;
+    gestureEndMs: number;
+    order: "speech-first" | "motion-first" | "overlap";
+    gapMs: number;
+  };
 };
 
 export type CastRejection = {
-  reason: "spell-gesture-mismatch" | "evidence-timing-mismatch" | "pending-evidence-expired" | "multiple-gesture-candidates";
+  reason: "spell-gesture-mismatch" | "evidence-timing-mismatch" | "pending-evidence-expired";
   utterance: UtteranceEvidence;
-  gesture?: GestureEvidence;
+  gesture?: MotionEvidence;
 };
 
 export type CastFusionState = {
   generation?: number;
   activeUtterance?: UtteranceOnset;
   pendingUtterance?: UtteranceEvidence;
-  pendingGesture?: GestureEvidence;
+  pendingGesture?: MotionEvidence;
   lastRejection: string;
 };
 
-const MAX_INTERVAL_GAP_MS = 350;
-const MAX_UNION_MS = 2_000;
+const SIMPLE_GAP_MS = 350;
+const SIMPLE_UNION_MS = 2_000;
+const GESTURE_GAP_MS = 2_000;
+const GESTURE_UNION_MS = 6_000;
 const FINAL_DEADLINE_MS = 1_000;
-const PENDING_TTL_MS = MAX_UNION_MS + FINAL_DEADLINE_MS;
+const SIMPLE_TTL_MS = SIMPLE_UNION_MS + FINAL_DEADLINE_MS;
+const GESTURE_TTL_MS = GESTURE_UNION_MS + FINAL_DEADLINE_MS;
 
 class BoundedIds {
   private readonly values = new Set<string>();
@@ -65,7 +91,9 @@ export class CastFusion {
   private generation?: number;
   private activeUtterance?: UtteranceOnset;
   private pendingUtterance?: UtteranceEvidence;
-  private pendingGesture?: GestureEvidence;
+  private pendingGesture?: MotionEvidence;
+  private readonly motions: MotionEvidence[] = [];
+  private simpleMotion = false;
   private readonly utteranceIds = new BoundedIds();
   private readonly gestureIds = new BoundedIds();
   private lastRejection = "";
@@ -74,6 +102,17 @@ export class CastFusion {
     private readonly onAccepted: (attempt: CastAttempt) => void,
     private readonly onRejected: (rejection: CastRejection) => void = () => {},
   ) {}
+
+  setSimpleMotion(enabled: boolean): void {
+    if (this.simpleMotion === enabled) return;
+    this.simpleMotion = enabled;
+    // Keep consumed IDs: changing mode must not replay an already used attempt.
+    this.activeUtterance = undefined;
+    this.pendingUtterance = undefined;
+    this.pendingGesture = undefined;
+    this.motions.length = 0;
+    this.lastRejection = "";
+  }
 
   beginUtterance(onset: UtteranceOnset): void {
     this.assertOnset(onset);
@@ -84,10 +123,14 @@ export class CastFusion {
       return;
     }
     this.utteranceIds.add(onset.id);
-    if (this.activeUtterance || this.pendingUtterance) {
+    // Keep a confirmed word through unverified noise. In normal mode, wait for
+    // the new sound's final/discard before choosing which word owns the motion.
+    if (this.simpleMotion && this.pendingUtterance) return;
+    if (this.activeUtterance) {
       this.reject("second-utterance-onset");
       return;
     }
+    if (!this.pendingUtterance) this.pruneMotions(onset.startMs - this.intervalGapMs);
     this.activeUtterance = { ...onset };
     this.lastRejection = "";
   }
@@ -118,15 +161,21 @@ export class CastFusion {
     this.tryPair();
   }
 
-  cancelUtterance(id: string, generation: number): void {
+  cancelUtterance(id: string, generation: number, disposition: "confirmed-nonspell" | "ambiguous" = "ambiguous"): void {
     // A late cancellation must never reset or retire a newer input generation.
     if (generation !== this.generation) return;
+    if (disposition === "confirmed-nonspell" && this.activeUtterance?.id === id && this.pendingUtterance) {
+      this.activeUtterance = undefined;
+      this.tryPair();
+      return;
+    }
     if (this.activeUtterance?.id !== id && this.pendingUtterance?.id !== id) return;
     this.reject("utterance-discarded");
   }
 
-  pushGesture(evidence: GestureEvidence): void {
+  pushGesture(evidence: MotionEvidence): void {
     this.assertGesture(evidence);
+    if (isSpike(evidence) !== this.simpleMotion) return;
     if (!this.acceptGeneration(evidence.generation)) return;
     this.advance(evidence.endMs);
     if (this.gestureIds.has(evidence.id)) {
@@ -134,24 +183,42 @@ export class CastFusion {
       return;
     }
     this.gestureIds.add(evidence.id);
-    if (this.pendingGesture) {
-      this.reject("multiple-gesture-candidates");
-      return;
-    }
-    this.pendingGesture = { ...evidence };
+    const voice = this.pendingUtterance ?? this.activeUtterance;
+    if (voice && voice.startMs - evidence.endMs > this.intervalGapMs) return;
+    this.pruneMotions(evidence.endMs - this.pendingTtlMs);
+    if (this.motions.length === (this.simpleMotion ? 32 : 8)) this.motions.shift();
+    this.motions.push({ ...evidence });
+    this.pendingGesture = this.motions[0];
     this.lastRejection = "";
     this.tryPair();
   }
 
   advance(nowMs: number): void {
     if (!Number.isFinite(nowMs)) throw new Error("Fusion time must be finite");
-    const oldestStart = Math.min(
-      this.activeUtterance?.startMs ?? Infinity,
-      this.pendingUtterance?.startMs ?? Infinity,
-      this.pendingGesture?.startMs ?? Infinity,
-    );
-    if (oldestStart !== Infinity && nowMs - oldestStart > PENDING_TTL_MS)
-      this.reject("pending-evidence-expired");
+    if (this.activeUtterance && this.pendingUtterance && nowMs - this.pendingUtterance.startMs > this.pendingTtlMs) {
+      this.pendingUtterance = undefined;
+    }
+    const voice = this.pendingUtterance;
+    const oldestStart = this.activeUtterance?.startMs ?? voice?.startMs;
+    if (oldestStart !== undefined && nowMs - oldestStart > this.pendingTtlMs) {
+      const near = voice && this.motions.find(motion => timingFits(voice, motion, this.simpleMotion));
+      if (near) this.pendingGesture = near;
+      this.reject(near ? "spell-gesture-mismatch" : voice && this.motions.length
+        ? "evidence-timing-mismatch" : "pending-evidence-expired");
+      return;
+    }
+    const hadMotion = this.motions.length > 0;
+    this.pruneMotions(nowMs - this.pendingTtlMs);
+    if (hadMotion && !this.motions.length && oldestStart === undefined)
+      this.lastRejection = "pending-evidence-expired";
+  }
+
+  private get intervalGapMs(): number {
+    return this.simpleMotion ? SIMPLE_GAP_MS : GESTURE_GAP_MS;
+  }
+
+  private get pendingTtlMs(): number {
+    return this.simpleMotion ? SIMPLE_TTL_MS : GESTURE_TTL_MS;
   }
 
   reset(generation?: number): void {
@@ -159,6 +226,7 @@ export class CastFusion {
     this.activeUtterance = undefined;
     this.pendingUtterance = undefined;
     this.pendingGesture = undefined;
+    this.motions.length = 0;
     this.utteranceIds.clear();
     this.gestureIds.clear();
     this.lastRejection = "";
@@ -182,37 +250,43 @@ export class CastFusion {
 
   private tryPair(): void {
     const voice = this.pendingUtterance;
-    const gesture = this.pendingGesture;
-    if (!voice || !gesture || this.generation === undefined) return;
-    const gap = Math.max(
-      0,
-      voice.startMs - gesture.endMs,
-      gesture.startMs - voice.endMs,
-    );
-    const union =
-      Math.max(voice.endMs, gesture.endMs) -
-      Math.min(voice.startMs, gesture.startMs);
-    if (gap > MAX_INTERVAL_GAP_MS || union > MAX_UNION_MS) {
-      this.reject("evidence-timing-mismatch");
-      return;
-    }
+    if (!voice || this.generation === undefined) return;
     const requiredGesture = voice.spell === "protego" || voice.spell === "episkey"
-      ? "protego"
-      : "stupefy";
-    if (gesture.spell !== requiredGesture && gesture.spell !== voice.spell) {
-      this.reject("spell-gesture-mismatch");
-      return;
-    }
+      ? "protego" : "stupefy";
+    const compatible = this.motions.filter(motion => timingFits(voice, motion, this.simpleMotion) &&
+      (!this.activeUtterance || motion.endMs <= this.activeUtterance.startMs) &&
+      (isSpike(motion) || motion.spell === requiredGesture || motion.spell === voice.spell));
+    // Select by captured intervals, not callback arrival or an earlier unrelated movement.
+    if (!this.simpleMotion) compatible.sort((left, right) => {
+      const distance = (motion: MotionEvidence) => Math.max(0, voice.startMs - motion.endMs, motion.startMs - voice.endMs);
+      return distance(left) - distance(right) || Math.abs(left.endMs - voice.endMs) - Math.abs(right.endMs - voice.endMs);
+    });
+    const gesture = compatible[0];
+    if (!gesture) return;
     const attempt: CastAttempt = {
       id: `${this.generation}:cast:${gesture.id}:${voice.id}`,
       spell: voice.spell,
       gestureId: gesture.id,
       utteranceId: voice.id,
       generation: this.generation,
+      timing: {
+        speechStartMs: voice.startMs, speechEndMs: voice.endMs, speechFinalAtMs: voice.finalAtMs,
+        gestureStartMs: gesture.startMs, gestureEndMs: gesture.endMs,
+        order: gesture.startMs > voice.endMs ? "speech-first" : gesture.endMs < voice.startMs ? "motion-first" : "overlap",
+        gapMs: Math.max(0, voice.startMs - gesture.endMs, gesture.startMs - voice.endMs),
+      },
     };
-    this.activeUtterance = undefined;
     this.pendingUtterance = undefined;
-    this.pendingGesture = undefined;
+    // A movement captured before the next onset belongs to the completed word,
+    // even if classification arrives later. Keep that newer utterance alive.
+    if (this.activeUtterance) {
+      for (let index = this.motions.length - 1; index >= 0; index--)
+        if (this.motions[index].endMs <= this.activeUtterance.startMs) this.motions.splice(index, 1);
+      this.pendingGesture = this.motions[0];
+    } else {
+      this.pendingGesture = undefined;
+      this.motions.length = 0;
+    }
     this.lastRejection = "";
     this.onAccepted(attempt);
   }
@@ -230,17 +304,24 @@ export class CastFusion {
     return false;
   }
 
+  private pruneMotions(oldestEndMs: number): void {
+    for (let index = this.motions.length - 1; index >= 0; index--)
+      if (this.motions[index].endMs < oldestEndMs) this.motions.splice(index, 1);
+    this.pendingGesture = this.motions[0];
+  }
+
   private reject(reason: string): void {
     const voice = this.pendingUtterance;
     const gesture = this.pendingGesture;
     this.activeUtterance = undefined;
     this.pendingUtterance = undefined;
     this.pendingGesture = undefined;
+    this.motions.length = 0;
     this.lastRejection = reason;
     // Only a confirmed incantation can produce a fizzle; silence, stale input and
     // ASR cancellation must never look like an attempted spell.
     if (voice && (reason === "spell-gesture-mismatch" || reason === "evidence-timing-mismatch" ||
-      reason === "pending-evidence-expired" || reason === "multiple-gesture-candidates"))
+      reason === "pending-evidence-expired"))
       this.onRejected({ reason, utterance: { ...voice }, gesture: gesture ? { ...gesture } : undefined });
   }
 
@@ -259,7 +340,7 @@ export class CastFusion {
       throw new Error("Utterance evidence has an invalid interval");
   }
 
-  private assertGesture(evidence: GestureEvidence): void {
+  private assertGesture(evidence: MotionEvidence): void {
     if (
       !evidence.id ||
       !Number.isFinite(evidence.startMs) ||

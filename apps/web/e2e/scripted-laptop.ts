@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Page, type Route } from "@playwright/test";
 import type { Snapshot, Spell } from "../src/game/contracts";
 
 // Browser-boundary fixtures retain the real BLE adapter, protocol, controller and referee.
@@ -52,6 +52,8 @@ probe.play = async (movement, recording) => {
   replaying = true;
   const startedAt = Math.ceil(performance.now()) + 20;
   const delivery = { movement, maxLateMs: 0 };
+  const batch = [];
+  let batchStart = startedAt;
   probe.deliveries.push(delivery);
   try {
     for (const sample of samples) {
@@ -65,7 +67,12 @@ probe.play = async (movement, recording) => {
       }));
       // Rebase the device clock into a fresh boot while preserving acquisition intervals.
       // Browser delivery jitter must not change the recorded stroke's duration.
-      if (!emit({ ...sample, captureMs: Math.floor(captureAt) >>> 0 })) throw new Error("Scripted badge is not streaming");
+      batch.push({ ...sample, captureMs: Math.floor(captureAt) >>> 0 });
+      if (!probe.batchMs || captureAt - batchStart >= probe.batchMs || sample === samples.at(-1)) {
+        for (const queued of batch) if (!emit(queued)) throw new Error("Scripted badge is not streaming");
+        batch.length = 0;
+        batchStart = captureAt;
+      }
     }
   } finally {
     if (recording) {
@@ -129,10 +136,28 @@ Object.defineProperty(navigator, "bluetooth", {
     });
   });
   await page.addInitScript(() => {
+    const network = { castDelayMs: 0, casts: [] as { queuedAtMs: number; sentAtMs?: number }[], acknowledgements: [] as unknown[] };
+    Reflect.set(window, "__scriptedNetwork", network);
     window.WebSocket = new Proxy(window.WebSocket, {
       construct(Target, args: ConstructorParameters<typeof WebSocket>) {
         const socket = new Target(...args);
-        if (new URL(socket.url).pathname === "/ws/game") Reflect.set(window, "__battleSocket", socket);
+        if (new URL(socket.url).pathname === "/ws/game") {
+          Reflect.set(window, "__battleSocket", socket);
+          socket.addEventListener("message", event => {
+            const message = JSON.parse(event.data);
+            if (message.type === "ack") network.acknowledgements.push({ command: message.command,
+              accepted: message.accepted, reason: message.reason, atMs: performance.now() });
+          });
+          const send = socket.send.bind(socket);
+          socket.send = data => {
+            if (typeof data !== "string" || JSON.parse(data).type !== "cast") return send(data);
+            const delivery: { queuedAtMs: number; sentAtMs?: number } = { queuedAtMs: performance.now() };
+            network.casts.push(delivery);
+            const deliver = () => { delivery.sentAtMs = performance.now(); send(data); };
+            if (network.castDelayMs) setTimeout(deliver, network.castDelayMs);
+            else deliver();
+          };
+        }
         return socket;
       },
     });
@@ -175,6 +200,120 @@ export async function snapshot(page: Page): Promise<Snapshot> {
   return page.evaluate(() => Reflect.get(window, "__duelController").game.snapshot);
 }
 
+export type CastOrder = "overlap" | "speech-first" | "movement-first";
+
+/** Real microphone capture/endpoint and raw BLE; only local ASR decoding is scripted. */
+export async function castWithMicrophone(
+  page: Page,
+  spell: "stupefy" | "protego",
+  order: CastOrder,
+  { gapMs = 1_400, inferenceDelayMs = 350 } = {},
+) {
+  const requests: { bytes: number; startMs: number; endMs: number }[] = [];
+  const transcribe = async (route: Route) => {
+    const request = route.request(), headers = request.headers();
+    requests.push({ bytes: request.postDataBuffer()?.byteLength ?? 0,
+      startMs: Number(headers["x-wand-voice-start-ms"]), endMs: Number(headers["x-wand-voice-end-ms"]) });
+    await new Promise(resolve => setTimeout(resolve, inferenceDelayMs));
+    await route.fulfill({ json: {
+      utteranceId: headers["x-wand-utterance-id"], generation: Number(headers["x-wand-generation"]),
+      text: spell, transcript: spell, spell, accepted: true, inferenceMs: inferenceDelayMs,
+    } });
+  };
+  await page.route("**/api/speech/transcribe", transcribe);
+  try {
+    const proof = await page.evaluate(async ({ spellName, order, gapMs }) => {
+      const c = Reflect.get(window, "__duelController");
+      const badge = Reflect.get(window, "__scriptedBadge");
+      const network = Reflect.get(window, "__scriptedNetwork");
+      const microphone = Reflect.get(window, "__scriptedMicrophone") as ConstantSourceNode;
+      if (!c.healthy() || c.devMode || c.simpleMotion || c.speech.getSnapshot().phase !== "listening")
+        throw new Error("Microphone timing QA requires healthy normal-mode input");
+      type Interval = { id: string; spell: string; startMs: number; endMs: number };
+      const gestures: Interval[] = [];
+      const voices: (Interval & { arrivedMs: number })[] = [];
+      const acknowledgements: { accepted: boolean; reason?: string; atMs: number }[] = [];
+      const originalGesture = c.fusion.pushGesture.bind(c.fusion), originalAck = c.game.onAck;
+      const generation = c.generation, sendsBefore = network.casts.length;
+      // Observers delegate unchanged. No fusion reset, fabricated interval or direct evidence injection.
+      c.fusion.pushGesture = (evidence: Interval) => { gestures.push({ ...evidence }); originalGesture(evidence); };
+      const unsubscribe = c.speech.onSpeech((evidence: Interval & { arrivedMs: number }) => voices.push({ ...evidence }));
+      c.game.onAck = (message: { command: string; accepted: boolean; reason?: string }) => {
+        originalAck(message);
+        if (message.command === "cast") acknowledgements.push({ accepted: message.accepted, reason: message.reason, atMs: performance.now() });
+      };
+      const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+      const until = async (condition: () => boolean, label: string) => {
+        const deadline = performance.now() + 5_000;
+        while (!condition() && performance.now() < deadline) await delay(10);
+        if (!condition()) throw new Error(`${label}: ${JSON.stringify({ voices, gestures, acknowledgements,
+          fusion: c.fusion.getState(), speech: c.speech.getSnapshot(), motion: c.motion.getDiagnostics(),
+          wand: c.wand.getSnapshot().issue, phase: c.game.snapshot?.phase })}`);
+      };
+      const say = async () => {
+        microphone.offset.value = 0.08;
+        await delay(320);
+        microphone.offset.value = 0;
+        await until(() => voices.length > 0, "No real speech evidence from synthetic PCM");
+      };
+      const movement = spellName === "protego" ? "guard" : "jab";
+      try {
+        if (order === "overlap") {
+          const moving = badge.play(movement);
+          await delay(200);
+          await say();
+          await moving;
+        } else if (order === "speech-first") {
+          await say();
+          // The existing trace begins with ~350 ms of grip/wind-up before detected onset.
+          // Assertions check the captured interval, not this scheduling approximation.
+          await delay(voices[0].endMs + gapMs - 350 - performance.now());
+          await badge.play(movement);
+        } else {
+          await badge.play(movement);
+          await until(() => gestures.length > 0, "Raw BLE gesture did not classify");
+          await delay(gestures[0].endMs + gapMs - performance.now());
+          await say();
+        }
+        await until(() => acknowledgements.length > 0, "No referee acknowledgement");
+        if (spellName === "protego") await badge.play("lower");
+        await delay(500); // Keep live callbacks/timers running to catch duplicate submissions.
+        if (c.generation !== generation) throw new Error("Input generation changed during cast proof");
+        return { gestures, voices, acknowledgements, sends: network.casts.slice(sendsBefore),
+          healthy: c.healthy(), rejectedSamples: c.wand.getSnapshot().rejected };
+      } finally {
+        microphone.offset.value = 0;
+        unsubscribe();
+        c.fusion.pushGesture = originalGesture;
+        c.game.onAck = originalAck;
+      }
+    }, { spellName: spell, order, gapMs });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].bytes).toBeGreaterThan(0);
+    expect(requests[0].bytes).toBeLessThanOrEqual(96_000);
+    expect(proof.voices).toHaveLength(1);
+    expect(proof.gestures).toHaveLength(1);
+    expect(proof.voices[0].spell).toBe(spell);
+    expect(proof.gestures[0].spell).toBe(spell);
+    expect(proof.acknowledgements).toEqual([expect.objectContaining({ accepted: true })]);
+    expect(proof.sends).toHaveLength(1);
+    expect(proof.healthy).toBe(true);
+    expect(proof.rejectedSamples).toBe(0);
+    const voice = proof.voices[0], motion = proof.gestures[0];
+    const intervalGap = Math.max(0, voice.startMs - motion.endMs, motion.startMs - voice.endMs);
+    if (order === "overlap") {
+      expect(Math.min(voice.endMs, motion.endMs) - Math.max(voice.startMs, motion.startMs)).toBeGreaterThan(0);
+    } else {
+      expect(intervalGap).toBeGreaterThanOrEqual(1_200);
+      expect(intervalGap).toBeLessThanOrEqual(1_600);
+      if (order === "speech-first") expect(voice.arrivedMs).toBeLessThan(motion.startMs);
+    }
+    return { ...proof, intervalGap, requests };
+  } finally {
+    await page.unroute("**/api/speech/transcribe", transcribe);
+  }
+}
+
 /** Script only recognized speech; the deliberately wrong movement still crosses the raw BLE boundary. */
 export async function miscast(page: Page, spell: Spell): Promise<void> {
   await page.evaluate(async spellName => {
@@ -196,6 +335,9 @@ export async function miscast(page: Page, spell: Spell): Promise<void> {
       controller.fusion.beginUtterance({ id, generation: controller.generation, startMs });
       controller.fusion.pushUtterance({ id, generation: controller.generation, spell: spellName,
         startMs, endMs, finalAtMs: Math.max(endMs, performance.now()) });
+      const expires = performance.now() + 7_500;
+      while (controller.fusion.getState().pendingUtterance && performance.now() < expires)
+        await new Promise(resolve => setTimeout(resolve, 20));
       if (controller.fusion.getState().lastRejection !== "spell-gesture-mismatch")
         throw new Error(`Expected wrong-gesture rejection: ${JSON.stringify(controller.fusion.getState())}`);
     } finally {
@@ -204,8 +346,8 @@ export async function miscast(page: Page, spell: Spell): Promise<void> {
   }, spell);
 }
 
-export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolean; reason?: string; projectileId?: string }> {
-  return page.evaluate(async spellName => {
+export async function cast(page: Page, spell: Spell, speechGapMs = 0): Promise<{ accepted: boolean; reason?: string; projectileId?: string }> {
+  return page.evaluate(async ({ spellName, speechGapMs }) => {
     const controller = Reflect.get(window, "__duelController");
     const badge = Reflect.get(window, "__scriptedBadge");
     if (!controller.healthy()) throw new Error("Scripted laptop input is unhealthy");
@@ -230,8 +372,9 @@ export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolea
           mic: controller.speech.getSnapshot().issue, phase: controller.game.snapshot?.phase,
           result: controller.game.snapshot?.result,
         })}`);
-      const id = crypto.randomUUID(), startMs = gesture.startMs + 20;
-      const endMs = Math.max(startMs + 20, gesture.endMs);
+      const id = crypto.randomUUID(), startMs = speechGapMs ? gesture.endMs + speechGapMs : gesture.startMs + 20;
+      const endMs = speechGapMs ? startMs + 240 : Math.max(startMs + 20, gesture.endMs);
+      if (endMs > performance.now()) await new Promise(resolve => setTimeout(resolve, Math.ceil(endMs - performance.now())));
       // Only voice recognition is scripted. Raw sensor bytes still traverse the BLE adapter,
       // WandClient and MotionRecognizer, and the real fusion/controller submit the cast.
       controller.fusion.beginUtterance({ id, generation: controller.generation, startMs });
@@ -251,5 +394,5 @@ export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolea
       controller.fusion.pushGesture = originalGesture;
       controller.game.onAck = originalAck;
     }
-  }, spell);
+  }, { spellName: spell, speechGapMs });
 }

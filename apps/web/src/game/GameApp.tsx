@@ -239,8 +239,9 @@ export function describeEvent(event: GameEvent, names: Names): string[] {
 }
 
 function PlayOption({
-  checked, disabled, onChange,
+  kind = "dev", checked, disabled, onChange,
 }: {
+  kind?: "dev" | "motion";
   checked: boolean;
   disabled: boolean;
   onChange: (checked: boolean) => void;
@@ -254,9 +255,11 @@ function PlayOption({
       onClick={() => onChange(!checked)}
     >
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18" />
+        {kind === "motion"
+          ? <path d="m4 20 12-12m-4-4V1m8 11h3M5 7 3 5m14-1 3-2m-2 15 2 2" />
+          : <path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18" />}
       </svg>
-      <span>Dev mode</span>
+      <span>{kind === "motion" ? "Simple motion" : "Dev mode"}</span>
       <span className="option-track" aria-hidden="true"><i /></span>
     </button>
   );
@@ -329,10 +332,12 @@ function TutorialLesson({ controller }: { controller: DuelController }) {
   }
   const complete = lesson.stage === "complete";
   const raised = spell === "protego" || spell === "episkey";
-  const motion = raised ? "raise your wand and hold it still" : "jab forward, then return to rest";
+  const motion = controller.simpleMotion
+    ? "move your wand in any direction"
+    : raised ? "raise your wand and hold it still" : "jab forward, then return to rest";
   return (
     <section className={`tutorial-panel ${spell}`} aria-label="Tutorial guide" data-stage={lesson.stage}>
-      <GestureGuide spell={spell} />
+      {!controller.simpleMotion && <GestureGuide spell={spell} />}
       <div className="tutorial-copy">
         <span className="lesson-count">SPELL {lesson.step + 1} / 5{complete ? " · MASTERED" : ""}</span>
         <h2>{nameOf(spell)}</h2>
@@ -912,10 +917,12 @@ export function GameApp() {
                   ) : null}
                   <div className="ready-actions">
                     <button
-                      disabled={!c?.healthy() || c.busy || !!me?.ready}
+                      disabled={!c?.canReady()}
                       onClick={() => c?.ready()}
                     >
-                      {me?.ready
+                      {!solo && !opponent?.connected
+                        ? "Waiting for rival…"
+                        : me?.ready
                         ? solo ? "Wands up…" : "Waiting for opponent…"
                         : result
                           ? "Rematch"
@@ -991,7 +998,7 @@ export function GameApp() {
                         {spellSummary(rule)}
                       </span>
                       <div className="spell-meta">
-                        <span>{support ? "RAISE" : "JAB"} + SPEAK{hasted ? " · HASTE" : ""}</span>
+                        <span>{c.simpleMotion ? "MOVE" : support ? "RAISE" : "JAB"} + SPEAK{hasted ? " · HASTE" : ""}</span>
                         <b>
                           {remaining
                             ? `${(remaining / 1000).toFixed(1)}s`
@@ -1025,6 +1032,8 @@ export function GameApp() {
       {c?.devMode && c.source && !inRoom && <GestureTrials controller={c} />}
       {!inRoom && (
         <footer className="play-options" aria-label="Play options">
+          {c?.devMode && c.simpleMotion && <p className="simple-motion-hint">Say a spell + move your wand.</p>}
+          {c?.devMode && <PlayOption kind="motion" checked={c.simpleMotion} disabled={c.busy} onChange={(value) => c.setSimpleMotion(value)} />}
           <PlayOption checked={c?.devMode ?? false} disabled={!c || c.busy} onChange={(value) => c?.setDevMode(value)} />
         </footer>
       )}

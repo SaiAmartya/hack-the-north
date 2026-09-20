@@ -1,5 +1,5 @@
 import type { CapturedMotion } from "../wand/client";
-import { MotionFlag } from "../wand/protocol";
+import { MotionFlag, unsignedDelta32 } from "../wand/protocol";
 import {
   dtwDistance,
   prepareImpulseTrace,
@@ -65,10 +65,12 @@ export type MotionDiagnostics = {
 };
 
 type Vector = readonly [number, number, number];
-type Sample = { t: number; a: Vector; jerk: number };
+type Sample = { t: number; captureMs: number; a: Vector; jerk: number };
 type Burst = {
   startMs: number;
+  startCaptureMs: number;
   rest: Vector;            // pose the movement started from (frozen)
+  context: Sample[];       // pre-onset launch context; never extends gesture duration or DTW
   samples: Sample[];
   peak: number;
   peakAt: number;
@@ -128,6 +130,7 @@ const ONSET_JERK_MG = 180;          // two consecutive samples, or one sample ab
 const ONSET_JERK_SINGLE_MG = 450;
 const ONSET_LINEAR_MG = 450;        // weak movements still start a candidate so coaching can say "harder"
 const ONSET_TILT_DEG = 15;          // a slow deliberate raise still starts a movement
+const ONSET_CONTEXT_MS = 120;      // retain the launch if its stronger brake triggers onset
 const MAX_GAP_MS = 150;
 const MOVEMENT_MAX_MS = 2_000;
 const IMPULSE_EARLY_PEAK_MG = 800;  // strokes this strong resolve without waiting for stillness
@@ -286,9 +289,16 @@ export class MotionRecognizer {
       this.breakContinuity("Invalid, saturated or discontinuous motion", "invalid-sample");
       return;
     }
-    const gap = this.previous ? sample.browserMs - this.previous.browserMs : undefined;
-    if (gap !== undefined && (gap <= 0 || gap > MAX_GAP_MS))
-      this.breakContinuity(gap > MAX_GAP_MS ? "Motion gap exceeded 150 ms" : "Motion timestamps were not monotonic", "motion-gap");
+    const mappedGap = this.previous ? sample.browserMs - this.previous.browserMs : undefined;
+    const captureGap = this.previous ? unsignedDelta32(sample.captureMs, this.previous.captureMs) : undefined;
+    // Browser timestamps can step at SYNC; only acquisition gaps break the waveform.
+    // Browser freshness remains enforced above and by WandClient's clock uncertainty.
+    if (captureGap !== undefined && (captureGap === 0 || captureGap > MAX_GAP_MS))
+      this.breakContinuity("Motion timestamps repeated, reversed or exceeded a 150 ms gap", "motion-gap");
+    else if (!this.burst && mappedGap !== undefined && (mappedGap <= 0 || mappedGap > MAX_GAP_MS))
+      // Preserve resting-pose re-anchoring on an abrupt mapping discontinuity.
+      // During an active movement, only acquisition continuity can reset it.
+      this.breakContinuity("Clock alignment changed; re-anchoring resting pose", "motion-gap");
     if (sample.breaksGesture) this.breakContinuity("Motion source marked a gesture break", "motion-gap");
 
     const current = this.observe(sample);
@@ -350,20 +360,32 @@ export class MotionRecognizer {
   // Sample conditioning
 
   private isFiniteSample(sample: CapturedMotion): boolean {
-    return [sample.browserMs, sample.ageUpperMs, sample.axMg, sample.ayMg, sample.azMg].every(Number.isFinite);
+    return [sample.browserMs, sample.captureMs, sample.ageUpperMs, sample.axMg, sample.ayMg, sample.azMg].every(Number.isFinite);
   }
 
   private observe(sample: CapturedMotion): Sample {
     const a = vector(sample);
     const last = this.window[this.window.length - 1];
-    const dt = last ? sample.browserMs - last.t : 0;
+    const dt = last ? unsignedDelta32(sample.captureMs, last.captureMs) : 0;
+    // SYNC may move the browser/device offset while acquisition cadence stays
+    // unchanged. One anchor per burst preserves the waveform and its durations.
+    const t = this.burst
+      ? this.burst.startMs + unsignedDelta32(sample.captureMs, this.burst.startCaptureMs)
+      : sample.browserMs;
+    if (!this.burst && last) {
+      // Follow the latest clock estimate between movements, shifting the whole
+      // small quiet window together rather than deforming one sample interval.
+      const correction = t - last.t - dt;
+      for (const previous of this.window) previous.t += correction;
+      if (this.quietSince !== undefined) this.quietSince += correction;
+    }
     // Sample-to-sample change normalised to a 20 ms step: orientation drift barely registers,
     // a real stroke does, and it is immune to whatever pose the hand has drifted into.
     const jerk = last && dt > 0 ? (magnitude(subtract(a, last.a)) * 20) / Math.max(dt, 5) : 0;
-    const current: Sample = { t: sample.browserMs, a, jerk };
+    const current: Sample = { t, captureMs: sample.captureMs, a, jerk };
     this.window.push(current);
     const keep = Math.max(QUIET_WINDOW_MS, RESUME_MS, STILLNESS_MS) + 100;
-    while (this.window.length > 2 && this.window[0].t < sample.browserMs - keep) this.window.shift();
+    while (this.window.length > 2 && this.window[0].t < t - keep) this.window.shift();
     return current;
   }
 
@@ -487,7 +509,13 @@ export class MotionRecognizer {
         const rest = this.rest!;
         const previous = this.window[this.window.length - 2];
         const lead = previous && current.t - previous.t <= MAX_GAP_MS ? [previous, current] : [current];
-        this.burst = { startMs: lead[0].t, rest, samples: lead, peak: 0, peakAt: lead[0].t, peakIndex: 0, earlyEvaluated: false, settled: false };
+        // Feature context may precede detected onset: a gentle launch can cross
+        // the onset threshold only at its brake. Keep the detected interval for
+        // timing and minimum-duration gates; padding must not turn a twitch into
+        // a deliberate movement. Continuity breaks already clear this window.
+        const startMs = lead[0].t;
+        const context = this.window.filter((sample) => sample.t >= current.t - ONSET_CONTEXT_MS && sample.t < startMs);
+        this.burst = { startMs, startCaptureMs: lead[0].captureMs, rest, context, samples: lead, peak: 0, peakAt: startMs, peakIndex: 0, earlyEvaluated: false, settled: false };
         this.quietSince = undefined;
         this.armed = false;
         for (let index = 0; index < lead.length; index++) this.trackPeak(this.burst, index);
@@ -600,9 +628,10 @@ export class MotionRecognizer {
     // vector, then require a distinct braking lobe and a quiet finish before calling it a lift.
     // A forward jab is largely perpendicular to gravity; a lowering starts in the opposite sense.
     const up = normalized(burst.rest);
-    const launchIndex = linear.findIndex((value) => magnitude(value) >= PLAY_MIN_PEAK_MG);
-    const launchStart = movement[launchIndex]?.t ?? Infinity;
-    const launch = movement.filter((sample) => sample.t >= launchStart && sample.t <= launchStart + 100);
+    const launchMovement = [...burst.context, ...movement];
+    const launchIndex = launchMovement.findIndex((sample) => magnitude(subtract(sample.a, burst.rest)) >= PLAY_MIN_PEAK_MG);
+    const launchStart = launchMovement[launchIndex]?.t ?? Infinity;
+    const launch = launchMovement.filter((sample) => sample.t >= launchStart && sample.t <= launchStart + 100);
     const launchVector = mean(launch.map((sample) => subtract(sample.a, burst.rest)));
     const clearLaunch = launch.length >= 4 && launch[launch.length - 1].t - launchStart >= 60 &&
       magnitude(launchVector) >= PLAY_MIN_PEAK_MG;
@@ -613,7 +642,7 @@ export class MotionRecognizer {
     let liftBrake = false;
     let lowerBrakeStart: number | undefined;
     let lowerBrake = false;
-    for (const sample of movement) {
+    for (const sample of launchMovement) {
       if (sample.t < launchStart + 100) continue;
       if (dot(subtract(sample.a, burst.rest), up) <= -GUARD_MIN_PEAK_MG) {
         brakeStart ??= sample.t;

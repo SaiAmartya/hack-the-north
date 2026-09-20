@@ -37,7 +37,9 @@ export type SpeechOnset = {
   startMs: number;
 };
 
-export type SpeechDiscard = Pick<SpeechOnset, "id" | "generation">;
+export type SpeechDiscard = Pick<SpeechOnset, "id" | "generation"> & {
+  disposition: "confirmed-nonspell" | "ambiguous";
+};
 
 export type SpeechDiagnostic = {
   type: "calibrated" | "onset" | "result" | "discard" | "recovered" | "fault";
@@ -55,6 +57,8 @@ export type SpeechDiagnostic = {
   avgLogProbability?: number;
   noSpeechProbability?: number;
   endReason?: "silence" | "voice-limit" | "clip-limit";
+  busyStartMs?: number;
+  busyEndMs?: number;
 };
 
 type Capture = {
@@ -75,12 +79,13 @@ export type SpeechClientPlatform = {
   ) => Promise<Capture>;
 };
 
-type Draft = SpeechOnset & { suppressed: boolean; suppression?: "recognition-paused" | "inference-busy" | "ambiguous-continuation" };
+type Draft = SpeechOnset & { suppressed: boolean; suppression?: "recognition-paused" | "inference-busy" | "inference-busy-delayed" | "ambiguous-continuation" };
 type Pending = {
   id: string;
   generation: number;
   startMs: number;
   endMs: number;
+  inferenceStartedAtMs: number;
   invalidated: boolean;
   endReason: "silence" | "voice-limit" | "clip-limit";
   overlapActive: boolean;
@@ -130,6 +135,7 @@ export class SpeechClient {
   private unwatch?: () => void;
   private draft?: Draft;
   private pending?: Pending;
+  private completedInference?: { generation: number; startMs: number; endMs: number };
   private recognitionEnabled = true;
   private recognitionFromMs = -Infinity;
   private requestFailures = 0;
@@ -151,6 +157,7 @@ export class SpeechClient {
   setRecognitionEnabled(enabled: boolean): void {
     if (enabled === this.recognitionEnabled) return;
     this.recognitionEnabled = enabled;
+    this.completedInference = undefined;
     if (enabled) {
       this.recognitionFromMs = this.platform.now();
       this.draft = undefined;
@@ -271,6 +278,7 @@ export class SpeechClient {
         }
         this.pending = undefined;
         this.draft = undefined;
+        this.completedInference = undefined;
         this.endpoint = new SpeechEndpoint(generation, timeOriginMs);
         this.snapshot = { phase: "calibrating", issue: "", generation };
         this.diagnostic({ type: "recovered", detail: "Audio gap cleared; recalibrating fresh capture" });
@@ -302,7 +310,14 @@ export class SpeechClient {
       };
       const recognitionAllowed =
         this.recognitionEnabled && event.startMs >= this.recognitionFromMs;
-      const suppressed = !recognitionAllowed || this.pending !== undefined;
+      // Endpoint confirmation trails capture by at least 60ms. A result may
+      // finish during that delay, but must not make the same busy-time sound
+      // into fresh speech. One prior interval is enough for the ordered stream.
+      const previous = this.completedInference;
+      const delayedBusy = this.pending === undefined && previous?.generation === this.generation
+        && event.startMs >= previous.startMs && event.startMs < previous.endMs;
+      if (previous && event.startMs >= previous.endMs) this.completedInference = undefined;
+      const suppressed = !recognitionAllowed || this.pending !== undefined || delayedBusy;
       const ambiguousContinuation = this.pending !== undefined && this.pending.endReason !== "silence";
       if (this.pending) {
         if (ambiguousContinuation) {
@@ -318,7 +333,8 @@ export class SpeechClient {
         };
       }
       this.draft = { ...onset, suppressed,
-        suppression: !recognitionAllowed ? "recognition-paused" : ambiguousContinuation ? "ambiguous-continuation" : suppressed ? "inference-busy" : undefined };
+        suppression: !recognitionAllowed ? "recognition-paused" : ambiguousContinuation ? "ambiguous-continuation"
+          : delayedBusy ? "inference-busy-delayed" : suppressed ? "inference-busy" : undefined };
       // Energy after a completed quiet interval is a later sound, not proof
       // that the first utterance overlapped. Keep the single request and never
       // expose that later onset to fusion or queue another inference. A forced
@@ -327,7 +343,10 @@ export class SpeechClient {
         for (const listener of this.onsetListeners) listener(onset);
       if (recognitionAllowed) this.diagnostic({ type: "onset", utteranceId: onset.id,
         voiceStartMs: onset.startMs, detail: ambiguousContinuation ? "ambiguous-continuation: cutoff speech resumed"
-          : suppressed ? "inference-busy: later onset ignored" : undefined });
+          : delayedBusy ? "inference-busy-delayed: onset captured before prior result"
+            : suppressed ? "inference-busy: later onset ignored" : undefined,
+        busyStartMs: delayedBusy ? previous?.startMs : undefined,
+        busyEndMs: delayedBusy ? previous?.endMs : undefined });
       return;
     }
     this.clip(event);
@@ -339,11 +358,14 @@ export class SpeechClient {
     if (!draft || draft.generation !== this.generation) return;
     if (draft.suppressed) {
       this.diagnostic({ type: "discard", utteranceId: draft.id, detail: draft.suppression,
-        voiceStartMs: draft.startMs, voiceEndMs: event.endMs });
+        voiceStartMs: draft.startMs, voiceEndMs: event.endMs, endReason: event.endReason });
       this.notifyDiscard(draft);
       if (this.pending) this.pending.overlapActive = false;
       else this.endpoint?.resolve();
       this.finishInvalidatedWhenIdle();
+      // Suppression applies to the whole sound, including a tail beyond the
+      // bounded clip. Never reinterpret that tail as a new command.
+      if (event.endReason !== "silence") this.endpoint?.requireQuiet(true);
       return;
     }
     if (this.pending) {
@@ -375,6 +397,7 @@ export class SpeechClient {
       generation: draft.generation,
       startMs: event.startMs,
       endMs: event.endMs,
+      inferenceStartedAtMs: this.platform.now(),
       invalidated: false,
       endReason: event.endReason,
       overlapActive: false,
@@ -492,7 +515,10 @@ export class SpeechClient {
       };
     }
     pending.settled = true;
-    this.completePending(pending, spell !== null);
+    const disposition = pending.endReason === "silence" &&
+      (result.reason === "no-speech" || result.reason === "not-an-incantation")
+      ? "confirmed-nonspell" : "ambiguous";
+    this.completePending(pending, spell !== null, disposition);
   }
 
   private deadline(id: string, generation: number): void {
@@ -528,16 +554,21 @@ export class SpeechClient {
     }
   }
 
-  private notifyDiscard(utterance: SpeechDiscard): void {
+  private notifyDiscard(utterance: Pick<SpeechDiscard, "id" | "generation">,
+    disposition: SpeechDiscard["disposition"] = "ambiguous"): void {
     for (const listener of this.discardListeners)
-      listener({ id: utterance.id, generation: utterance.generation });
+      listener({ id: utterance.id, generation: utterance.generation, disposition });
   }
 
-  private completePending(pending: Pending, emitted = false): void {
+  private completePending(pending: Pending, emitted = false,
+    disposition: SpeechDiscard["disposition"] = "ambiguous"): void {
     if (!this.isPending(pending)) return;
     clearTimeout(pending.deadlineTimer);
     this.pending = undefined;
-    if (!emitted) this.notifyDiscard(pending);
+    this.completedInference = pending.endReason === "silence" && !pending.invalidated && this.recognitionEnabled
+      ? { generation: pending.generation, startMs: pending.inferenceStartedAtMs, endMs: this.platform.now() }
+      : undefined;
+    if (!emitted) this.notifyDiscard(pending, disposition);
     this.endpoint?.resolve(pending.backgroundOnly);
     // A fast result can finish before a continuing sound reaches its 60ms
     // onset. Keep the cutoff tail suppressed after this request is gone, while
@@ -577,6 +608,7 @@ export class SpeechClient {
     this.pending?.abort.abort();
     if (this.pending) clearTimeout(this.pending.deadlineTimer);
     this.pending = undefined;
+    this.completedInference = undefined;
     this.draft = undefined;
     this.endpoint = undefined;
     this.capture?.stop();
@@ -646,6 +678,7 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
       let firstFrameTimeout: ReturnType<typeof setTimeout> | undefined;
       let stopped = false;
       let ended: (() => void) | undefined;
+      let contextStateChanged: (() => void) | undefined;
       const cleanup = () => {
         if (stopped) return;
         stopped = true;
@@ -668,11 +701,14 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
         }
         const track = stream.getAudioTracks()[0];
         if (track && ended) track.removeEventListener("ended", ended);
+        if (context && contextStateChanged) context.removeEventListener("statechange", contextStateChanged);
         for (const item of stream.getTracks()) item.stop();
         if (context) void context.close().catch(() => undefined);
       };
       const lost = (issue: string) => {
-        if (!stopped) onLost(issue);
+        if (stopped) return;
+        cleanup();
+        onLost(issue);
       };
       try {
         const track = stream.getAudioTracks()[0];
@@ -703,8 +739,19 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
         // initial render quantum in Chrome.
         source.connect(node);
         await context.resume();
+        // currentFrame can remain contiguous across a suspended audio clock
+        // while performance.now() advances. Retire this mapping instead of
+        // assigning stale timestamps to resumed or already queued microphone data.
+        contextStateChanged = () => {
+          if (context?.state !== "running")
+            lost("Microphone audio clock stopped; enable speech again");
+        };
+        context.addEventListener("statechange", contextStateChanged);
+        if (context.state !== "running")
+          throw new Error("Microphone audio clock stopped; enable speech again");
         const timeOriginMs = performance.now() - context.currentTime * 1000;
         node.port.onmessage = (message: MessageEvent<CapturedAudioFrame>) => {
+          if (stopped) return;
           if (firstFrameTimeout !== undefined) {
             clearTimeout(firstFrameTimeout);
             firstFrameTimeout = undefined;

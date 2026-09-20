@@ -637,6 +637,112 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     }
   });
 
+  it("retains a sub-onset lift launch before its stronger brake, without confusing the reverse lowering", () => {
+    // A 430 mg launch is strong enough for lift features (400 mg), but below the
+    // 450 mg onset. The opposite brake triggers onset; its preceding 20 ms alone
+    // cannot describe the launch. Acquisition times remain at the actual 50 Hz.
+    for (const rotation of [
+      [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+      [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+    ] as Rotation[]) {
+      for (const direction of [1, -1]) {
+        const h = new MotionHarness();
+        h.recognizer.useDefaultProfile(h.generation);
+        const trace: CapturedMotion[] = Array.from({ length: 71 }, (_, seq) => {
+          const time = seq * 20;
+          const acceleration = time >= 600 && time <= 720 ? 430 : time >= 740 && time <= 840 ? -700 : 0;
+          return { version: 1, bootId: 1, seq, captureMs: time, browserMs: time, ageUpperMs: 40,
+            flags: MotionFlag.Valid, breaksGesture: false, axMg: 0, ayMg: 0, azMg: 1_000 + direction * acceleration };
+        });
+        h.feed(rotateTrace(trace, rotation));
+        expect(h.spells(), direction === 1 ? "lift" : "lowering").toEqual(direction === 1 ? ["protego"] : []);
+        if (direction === 1) expect(h.evidence[0].startMs).toBe(720);
+        for (const fault of ["break", "stale"] as const) {
+          const interrupted = new MotionHarness();
+          interrupted.recognizer.useDefaultProfile(interrupted.generation);
+          interrupted.feed(rotateTrace(trace.map((sample) => sample.captureMs === 700
+            ? { ...sample, breaksGesture: fault === "break", ageUpperMs: fault === "stale" ? 201 : sample.ageUpperMs }
+            : sample), rotation));
+          expect(interrupted.evidence, `pre-onset context must not survive ${fault}`).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it("preserves a deliberate 60 ms jab across measured browser-clock resync steps", () => {
+    const run = (offsetStep: number) => {
+      const h = new MotionHarness();
+      h.recognizer.useDefaultProfile(h.generation);
+      const trace: CapturedMotion[] = Array.from({ length: 56 }, (_, seq) => {
+        const captureMs = seq * 20;
+        const axMg = captureMs === 600 ? 400 : captureMs === 620 ? 700 : captureMs === 640 ? 500 : 0;
+        return { version: 1, bootId: 1, seq, captureMs,
+          browserMs: captureMs + (captureMs >= 640 ? offsetStep : 0), ageUpperMs: 50,
+          flags: MotionFlag.Valid, breaksGesture: false, axMg, ayMg: 0, azMg: 1_000 };
+      });
+      h.feed(trace);
+      return { spells: h.spells(), evidence: h.evidence, candidate: h.recognizer.getDiagnostics().candidate };
+    };
+    const baseline = run(0);
+    expect(baseline.spells).toEqual(["stupefy"]);
+    expect(baseline.candidate?.durationMs).toBe(60);
+    // First two steps were measured; -30 also crosses mapped-time monotonicity.
+    // Raw acquisition remains ordered, fresh and 20 ms apart in every case.
+    for (const offset of [-10.25, 23.75, -30]) expect(run(offset)).toEqual(baseline);
+  });
+
+  it("handles capture-clock wrap and adopts the new browser anchor for the next movement", () => {
+    const h = new MotionHarness();
+    h.recognizer.useDefaultProfile(h.generation);
+    const offset = 23.75;
+    const trace: CapturedMotion[] = Array.from({ length: 81 }, (_, seq) => {
+      const time = seq * 20;
+      const relative = time >= 1_200 ? time - 600 : time;
+      const axMg = relative === 600 ? 400 : relative === 620 ? 700 : relative === 640 ? 500 : 0;
+      return { version: 1, bootId: 1, seq, captureMs: (time + 2 ** 32 - 620) >>> 0,
+        browserMs: time + (time >= 640 ? offset : 0), ageUpperMs: 50,
+        flags: MotionFlag.Valid, breaksGesture: false, axMg, ayMg: 0, azMg: 1_000 };
+    });
+    h.feed(trace);
+    expect(h.evidence.map(({ spell, startMs, endMs }) => ({ spell, startMs, endMs }))).toEqual([
+      { spell: "stupefy", startMs: 600, endMs: 660 },
+      { spell: "stupefy", startMs: 1_200 + offset, endMs: 1_260 + offset },
+    ]);
+  });
+
+  it("re-anchors rest after an abrupt mapped-clock discontinuity between movements", () => {
+    const h = new MotionHarness();
+    h.recognizer.useDefaultProfile(h.generation);
+    const point = (time: number, axMg = 0): CapturedMotion => ({
+      version: 1, bootId: 1, seq: time / 20, captureMs: time,
+      browserMs: time - (time >= 400 ? 30 : 0), ageUpperMs: 80,
+      flags: MotionFlag.Valid, breaksGesture: false, axMg, ayMg: 0, azMg: 1_000,
+    });
+    for (let time = 0; time < 400; time += 20) h.feed([point(time)]);
+    expect(h.recognizer.getState().progressMs).toBe(250);
+    h.feed([point(400)]);
+    expect(h.recognizer.getState()).toMatchObject({ phase: "ready", progress: "armed", progressMs: 0 });
+    // The legacy rest baseline is relearned, without resetting the selected profile.
+    for (let time = 420; time <= 1_400; time += 20)
+      h.feed([point(time, time === 1_000 ? 400 : time === 1_020 ? 700 : time === 1_040 ? 500 : 0)]);
+    expect(h.evidence).toMatchObject([{ spell: "stupefy", startMs: 970, endMs: 1_030 }]);
+    expect(h.evidence).toHaveLength(1);
+  });
+
+  it.each([600, 590, 780, NaN])("clears an in-flight burst on invalid acquisition time %s even with smooth browser time", invalidTime => {
+    const h = new MotionHarness();
+    h.recognizer.useDefaultProfile(h.generation);
+    const trace: CapturedMotion[] = Array.from({ length: 56 }, (_, seq) => {
+      const time = seq * 20;
+      const axMg = time === 600 ? 400 : time === 620 ? 700 : time === 640 ? 500 : 0;
+      return { version: 1, bootId: 1, seq, captureMs: time === 620 ? invalidTime : time,
+        browserMs: time, ageUpperMs: 50, flags: MotionFlag.Valid, breaksGesture: false,
+        axMg, ayMg: 0, azMg: 1_000 };
+    });
+    h.feed(trace);
+    expect(h.evidence).toEqual([]);
+  });
+
   it("ignores a downward stroke ending in a held wrist tilt without needing a previous guard", () => {
     for (const rotation of [
       [[1, 0, 0], [0, 1, 0], [0, 0, 1]],

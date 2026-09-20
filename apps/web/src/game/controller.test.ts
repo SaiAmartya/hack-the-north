@@ -3,7 +3,7 @@ import { DuelController } from "./controller";
 import { SpeechClient, type SpeechDiscard, type SpeechOnset } from "../speech/client";
 import { WandClient } from "../wand/client";
 import { GameClient } from "./client";
-import { PresentationPhase } from "../wand/protocol";
+import { CueEffect, PresentationPhase, SpellCode } from "../wand/protocol";
 import { parseRules, parseSnapshot } from "./contracts";
 import welcome from "../../../host/tests/fixtures/game-welcome-v1.json";
 import { DuelTelemetry } from "./telemetry";
@@ -81,6 +81,188 @@ it("makes click casting explicitly opt-in while preserving wand, cooldown and tu
   controller.destroy();
 });
 
+it.each(["P1", "P2"] as const)("waits for the rival to connect before sending %s Ready", slot => {
+  const controller = new DuelController();
+  controller.setDevMode(true);
+  controller.renderingReady = true;
+  controller.motion.useDefaultProfile(0);
+  controller.wand = { getSnapshot: () => ({ phase: "streaming", info: {
+    deviceId: [1, 2, 3, 4, 5, 6], bootId: 7 } }), disconnect: vi.fn() } as unknown as WandClient;
+  controller.game.slot = slot;
+  const state = parseSnapshot(structuredClone(welcome.snapshot));
+  const own = { ...state.players.P1!, slot };
+  const rivalSlot = slot === "P1" ? "P2" : "P1";
+  state.players[slot] = own;
+  state.players[rivalSlot] = null;
+  controller.game.snapshot = state;
+  const send = vi.spyOn(controller.game, "send");
+  controller.ready();
+  expect(send).not.toHaveBeenCalled();
+  state.players[rivalSlot] = { ...own, slot: rivalSlot, connected: false };
+  controller.ready();
+  expect(send).not.toHaveBeenCalled();
+  state.players[rivalSlot]!.connected = true;
+  controller.ready();
+  expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "ready", ready: true,
+    deviceId: "010203040506", bootId: 7 }));
+  send.mockClear();
+  own.ready = true;
+  controller.ready();
+  own.ready = false;
+  controller.busy = true;
+  controller.ready();
+  controller.busy = false;
+  controller.renderingReady = false;
+  controller.ready();
+  controller.renderingReady = true;
+  state.phase = "playing";
+  controller.ready();
+  expect(send).not.toHaveBeenCalled();
+  state.phase = "result";
+  controller.ready();
+  expect(send).toHaveBeenCalledOnce();
+  controller.destroy();
+});
+
+it.each(["solo", "tutorial"] as const)("keeps %s Ready independent of another human connection", mode => {
+  const controller = new DuelController();
+  controller.setDevMode(true);
+  controller.renderingReady = true;
+  controller.motion.useDefaultProfile(0);
+  controller.wand = { getSnapshot: () => ({ phase: "streaming", info: {
+    deviceId: [1, 2, 3, 4, 5, 6], bootId: 7 } }), disconnect: vi.fn() } as unknown as WandClient;
+  controller.game.slot = "P1";
+  controller.game.snapshot = parseSnapshot(structuredClone({ ...welcome.snapshot, mode,
+    tutorial: mode === "tutorial" ? { step: 0, spell: "stupefy", stage: "instruction", paused: true } : null }));
+  const send = vi.spyOn(controller.game, "send");
+  controller.ready();
+  expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "ready", ready: true }));
+  controller.destroy();
+});
+
+function pendingCast(input: "click" | "fusion" = "click") {
+  let now = 1_000;
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  const controller = new DuelController();
+  controller.setDevMode(true);
+  controller.renderingReady = true;
+  controller.motion.useDefaultProfile(0);
+  const wandState = { phase: "streaming", generation: 0 };
+  const cue = vi.fn();
+  controller.wand = { getSnapshot: () => wandState, setState: vi.fn(), cue,
+    stopFeedback: vi.fn(), disconnect: vi.fn() } as unknown as WandClient;
+  controller.game.rules = parseRules(welcome.rules);
+  controller.game.slot = "P1";
+  controller.game.snapshot = parseSnapshot(structuredClone({ ...welcome.snapshot, roomId: "ACK123", phase: "playing", roundId: 7 }));
+  controller.roomCode = "ACK123";
+  vi.spyOn(controller.game, "now").mockImplementation(() => now);
+  controller.game.onChange();
+  const send = vi.spyOn(controller.game, "send");
+  if (input === "click") controller.castSpell("stupefy");
+  else {
+    controller.fusion.beginUtterance({ id: "word", generation: 0, startMs: 700 });
+    controller.fusion.pushUtterance({ id: "word", generation: 0, spell: "stupefy", startMs: 700, endMs: 850, finalAtMs: 950 });
+    controller.fusion.pushGesture({ id: "jab", generation: 0, spell: "stupefy", startMs: 750, endMs: 900, quality: 1 });
+  }
+  const cast = send.mock.calls.find(([message]) => message.type === "cast")![0];
+  const ack = { type: "ack", command: "cast", requestId: cast.attemptId, accepted: true, actionId: "action-1" };
+  const event = { id: "event-1", type: "castAccepted", atMs: 1_000, roundId: 7, stateVersion: 3,
+    actor: "P1" as const, spell: "stupefy" as const, actionId: "action-1" };
+  return { controller, cue, wandState, ack, event, send, at: (value: number) => { now = value; } };
+}
+
+it.each(["click", "fusion"] as const)("presents a 500ms delayed %s cast ACK once without optimistic combat changes", input => {
+  const { controller, cue, ack, event, at, send } = pendingCast(input);
+  const before = structuredClone(controller.game.snapshot);
+  expect(controller.lastSpell).toBeUndefined();
+  expect(cue).not.toHaveBeenCalled();
+  at(1_500);
+  controller.game.snapshot!.recentEvents = [event];
+  controller.game.onChange();
+  expect(cue).not.toHaveBeenCalled(); // The existing 300ms stale-event guard remains.
+  controller.game.onAck(ack);
+  expect(controller.lastSpell).toBe("stupefy");
+  expect(controller.lastSpellAt).toBe(1_500);
+  expect(cue).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ effect: CueEffect.AcceptedCast, spell: SpellCode.Stupefy }));
+  controller.game.onAck(ack);
+  controller.game.onChange();
+  expect(cue).toHaveBeenCalledOnce();
+  expect(controller.game.snapshot!.players).toEqual(before!.players);
+  expect(send.mock.calls.filter(([message]) => message.type === "cast")).toHaveLength(1);
+  controller.destroy();
+});
+
+it.each(["ack-first", "event-first"])("deduplicates a fresh accepted event and correlated ACK (%s)", order => {
+  const { controller, cue, ack, event, at } = pendingCast();
+  at(1_100);
+  if (order === "ack-first") controller.game.onAck(ack);
+  controller.game.snapshot!.recentEvents = [event];
+  controller.game.onChange();
+  controller.game.onAck(ack);
+  expect(controller.lastSpell).toBe("stupefy");
+  expect(cue).toHaveBeenCalledOnce();
+  controller.destroy();
+});
+
+it.each(["rejected", "expired", "generation", "round", "room", "hidden", "disconnect", "wand-lost", "leave"])("retires cast feedback after %s", invalidation => {
+  const { controller, cue, ack, at, wandState } = pendingCast();
+  if (invalidation === "rejected") controller.game.onAck({ ...ack, accepted: false, reason: "cooldown" });
+  if (invalidation === "expired") at(3_001);
+  if (invalidation === "generation") controller.generation++;
+  if (invalidation === "round") controller.game.snapshot!.roundId++;
+  if (invalidation === "room") controller.game.snapshot!.roomId = "NEW123";
+  if (invalidation === "hidden") Reflect.set(document, "hidden", true);
+  if (invalidation === "disconnect") controller.game.issue = "Game disconnected";
+  if (invalidation === "wand-lost") wandState.phase = "fault";
+  if (invalidation === "leave") controller.leaveRoom();
+  controller.game.onAck(ack);
+  expect(controller.lastSpell).toBeUndefined();
+  expect(cue).not.toHaveBeenCalled();
+  if (invalidation === "hidden") Reflect.set(document, "hidden", false);
+  controller.game.issue = "";
+  wandState.phase = "streaming";
+  controller.game.onAck(ack);
+  expect(cue).not.toHaveBeenCalled();
+  controller.destroy();
+});
+
+it("requires the local request ID and a server action ID before acknowledging a cast", () => {
+  const { controller, cue, ack } = pendingCast();
+  controller.game.onAck({ ...ack, requestId: "someone-else" });
+  controller.game.onAck({ ...ack, actionId: undefined });
+  expect(controller.lastSpell).toBeUndefined();
+  expect(cue).not.toHaveBeenCalled();
+  controller.game.onAck(ack);
+  expect(cue).toHaveBeenCalledOnce();
+  controller.destroy();
+});
+
+it("gates simple motion behind Dev mode and clears pending input whenever its policy changes", () => {
+  const controller = new DuelController();
+  controller.setSimpleMotion(true);
+  expect(controller.simpleMotion).toBe(false);
+  controller.setDevMode(true);
+  controller.fusion.beginUtterance({ id: "old", generation: controller.generation, startMs: 0 });
+  controller.setSimpleMotion(true);
+  expect(controller.simpleMotion).toBe(true);
+  expect(controller.fusion.getState().activeUtterance).toBeUndefined();
+  expect(JSON.parse(controller.exportTelemetry())).toMatchObject({
+    simpleMotionEnabled: true, gestureProfile: "acceleration-spike-v1",
+  });
+  const generation = controller.generation;
+  controller.roomCode = "ABCDEF";
+  controller.setSimpleMotion(false);
+  expect(controller.simpleMotion).toBe(true);
+  expect(controller.generation).toBe(generation);
+  controller.roomCode = "";
+  controller.setDevMode(false);
+  expect(controller.simpleMotion).toBe(false);
+  expect(controller.generation).toBeGreaterThan(generation);
+  controller.setDevMode(true);
+  expect(controller.simpleMotion).toBe(false);
+  controller.destroy();
+});
+
 it("keeps telemetry opt-in, ordered and bounded, including raw transcription text", () => {
   const log = new DuelTelemetry();
   log.record("speech.result", { transcript: "private" });
@@ -115,13 +297,14 @@ it("shows a local wrong-gesture fizzle without casting or changing combat state,
   controller.fusion.beginUtterance({ id: "wrong", generation: 0, startMs: 0 });
   controller.fusion.pushUtterance({ id: "wrong", generation: 0, spell: "protego", startMs: 0, endMs: 200, finalAtMs: 300 });
   controller.fusion.pushGesture({ id: "jab", generation: 0, spell: "stupefy", startMs: 100, endMs: 350, quality: 1 });
+  controller.fusion.advance(7_001);
   expect(controller.miscast).toMatchObject({ spell: "protego", message: "Protego fizzled. Raise your wand and hold briefly." });
   expect(send).not.toHaveBeenCalled();
   expect(controller.game.snapshot).toEqual(before);
   expect(controller.telemetry.snapshot().entries.some(entry => entry.kind === "cast.rejected_input")).toBe(true);
-  controller.fusion.beginUtterance({ id: "fresh", generation: 0, startMs: 1_000 });
-  controller.fusion.pushUtterance({ id: "fresh", generation: 0, spell: "protego", startMs: 1_000, endMs: 1_200, finalAtMs: 1_300 });
-  controller.fusion.pushGesture({ id: "raise", generation: 0, spell: "protego", startMs: 1_100, endMs: 1_350, quality: 1 });
+  controller.fusion.beginUtterance({ id: "fresh", generation: 0, startMs: 9_000 });
+  controller.fusion.pushUtterance({ id: "fresh", generation: 0, spell: "protego", startMs: 9_000, endMs: 9_200, finalAtMs: 9_300 });
+  controller.fusion.pushGesture({ id: "raise", generation: 0, spell: "protego", startMs: 9_100, endMs: 9_350, quality: 1 });
   expect(controller.miscast).toBeUndefined();
   expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "cast", spell: "protego" }));
   controller.destroy();
@@ -187,12 +370,12 @@ it("maps speech discard to the wand input generation without clearing newer utte
   });
   onset({ id: "discarded", generation: speechGeneration, startMs: 0 });
   expect(controller.fusion.getState().activeUtterance?.generation).toBe(7);
-  discard({ id: "discarded", generation: speechGeneration + 1 });
+  discard({ id: "discarded", generation: speechGeneration + 1, disposition: "ambiguous" });
   expect(controller.fusion.getState().activeUtterance?.id).toBe("discarded");
-  discard({ id: "discarded", generation: speechGeneration });
+  discard({ id: "discarded", generation: speechGeneration, disposition: "ambiguous" });
   expect(controller.fusion.getState().activeUtterance).toBeUndefined();
   onset({ id: "fresh", generation: speechGeneration, startMs: 10 });
-  discard({ id: "discarded", generation: speechGeneration });
+  discard({ id: "discarded", generation: speechGeneration, disposition: "ambiguous" });
   expect(controller.fusion.getState().activeUtterance?.id).toBe("fresh");
   controller.destroy();
 });
