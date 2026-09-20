@@ -63,7 +63,6 @@ Field f_phase{10, 68, 3, FG, 300, "", 0};
 Field f_hp{10, 100, 2, FG, 300, "", 0};
 Field f_cue{10, 130, 3, CYAN, 300, "", 0};
 Field f_hint{10, 164, 2, DIM, 300, "", 0};
-Field f_foot{10, 226, 1, DIM, 300, "", 0};
 int g_last_bar = -1, g_last_hp = -1;
 bool g_last_hp_shown = false;
 enum class Screen { None, Boot, Main } g_screen = Screen::None;
@@ -72,7 +71,7 @@ void clear_to(Screen s) {
   if (g_screen == s) return;
   g_screen = s;
   tft.fillScreen(BG);
-  Field *all[] = {&f_title, &f_link, &f_phase, &f_hp, &f_cue, &f_hint, &f_foot};
+  Field *all[] = {&f_title, &f_link, &f_phase, &f_hp, &f_cue, &f_hint};
   for (Field *f : all) f->reset();
   g_last_bar = -1;
   g_last_hp = -1;
@@ -154,13 +153,13 @@ void draw(const View &v) {
   char b[44];
   snprintf(b, sizeof(b), "WAND %s", v.id);
   f_title.draw(b);
-  snprintf(b, sizeof(b), "%s%s", v.link, v.sensor_ok ? "" : "  SENSOR FAULT");
-  f_link.draw(b, v.sensor_ok ? DIM : RED, true);
+  const bool advertising = strcmp(v.link, "advertising") == 0;
+  f_link.draw(v.sensor_ok ? advertising ? "Find me on your laptop" : "Wand linked" : "Restart your wand", v.sensor_ok ? DIM : RED, true);
 
   if (v.state_valid) {
     f_phase.draw(phase_text(v.phase), phase_color(v.phase), true);
   } else {
-    f_phase.draw(v.stale && strcmp(v.link, "advertising") != 0 ? "WAITING FOR GAME" : "SAY THE SPELL, MOVE", DIM, true);
+    f_phase.draw(v.stale && !advertising ? "WAITING FOR GAME" : "PAIR YOUR WAND", DIM, true);
   }
 
   const bool show_hp = v.state_valid && (v.phase == proto::PH_PLAYING || v.phase >= proto::PH_WON);
@@ -183,7 +182,7 @@ void draw(const View &v) {
   }
 
   f_cue.draw(v.cue, v.cue_color, true);
-  f_hint.draw(v.state_valid ? "Stupefy: jab   Protego: raise   Expelliarmus: sweep" : "Stupefy jab  Protego raise  Expelliarmus sweep");
+  f_hint.draw(v.state_valid ? "Speak + move your wand" : "Your magic starts here");
 
   int bar = (int)(v.activity * 300);
   if (bar < 0) bar = 0;
@@ -193,6 +192,5 @@ void draw(const View &v) {
     tft.fillRect(10 + bar, 196, 300 - bar, 12, GREY);
     g_last_bar = bar;
   }
-  f_foot.draw(v.foot);
 }
 }  // namespace display

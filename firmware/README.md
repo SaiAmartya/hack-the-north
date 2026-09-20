@@ -15,7 +15,20 @@ firmware route, and the organizers now publish an official
 **Teammate starting point:** build/backup/install instructions are in [Safe teammate setup](#safe-teammate-setup).
 For the laptop game and iPhone setup, start at the [repository README](../README.md).
 
-## 0.2.x — gameplay image (current source: 0.2.1)
+## 0.3.0 — five-spell duel (current source)
+
+Adds `Incendio` (cue ID 4, orange) and `Episkey` (cue ID 5, mint) to the badge's accepted-cast
+text and LED ring. Existing spell IDs, 20-byte packets, UUIDs, sensor sampling, power policy and
+session rules are unchanged. Damage, healing, effects and individual cooldowns remain authoritative
+on the laptop/referee; the badge displays the latest HP and status.
+
+The normal wand screen now shows short pairing/game instructions without a clipped spell list
+or technical footer. `id`, `status` and `trace` retain the diagnostic evidence on USB serial.
+Firmware before 0.3.0 rejects the two new cues; install this version for full five-spell feedback.
+The [0.3.0 verification record](../docs/qa/firmware-0.3.0.md) separates local checks from the final
+flash and physical QA contract.
+
+## 0.2.x — gameplay profile and battery startup
 
 **What changed from the 0.1.x diagnostic images.** The badge boots straight into the contract's
 gameplay profile and advertises after **every** kind of reset:
@@ -450,7 +463,7 @@ uv run --python 3.12 --with bleak python tools/wand_ble_check.py --name WAND-XXX
 
 Replace placeholders; close the monitor before another console command and disconnect Chrome
 before Bleak. Console opening can reset the badge; do not open it halfway through a timing run.
-`id` must report the built version (`fw=0.2.1` for current source); a cold 0.2.x boot reports
+`id` must report the built version (`fw=0.3.0` for current source); a cold gameplay boot reports
 `profile=range ble=on caps=0F` on the first `status` line and in the `HPDIAG` boot line.
 `wand_ble_check.py` must pass its INFO gate on this build; a `creator`/`rate` boot row is expected to
 fail it, and that is truthful rejection, not a reason to remove the gate.
@@ -489,7 +502,7 @@ A new source build is not proof that a connected badge has been flashed: check `
 
 ## Bring-up checklist (first time on hardware)
 
-1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.2.1|name=WAND-xxxx|boot=…|hz=50|range=8|profile=range|ble=on|caps=0F|axes=…|sensor=1` after a cold boot (0.2.1 is the current source version; an `HPDIAG|reset=…|profile=range|ble=on|caps=0F|…` line precedes it). The screen
+1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.3.0|name=WAND-xxxx|boot=…|hz=50|range=8|profile=range|ble=on|caps=0F|axes=…|sensor=1` after a cold boot (an `HPDIAG|reset=…|profile=range|ble=on|caps=0F|…` line precedes it). The screen
    shows boot diagnostics (accelerometer id 11, reset reason, `BLE WAND-xxxx starting`) then the wand screen;
    LEDs breathe blue once the staged start releases them (radio 1.2 s after boot, LEDs 2 s later). Fresh badges default to `rot 3`; use `rot 0`, `rot 1`, or `rot 2` if the panel differs. The selected rotation is saved in NVS.
 2. `selftest` runs the contract's golden vectors on the badge. Expect `selftest failures=0`.
@@ -512,11 +525,11 @@ A new source build is not proof that a connected badge has been flashed: check `
 
 | Situation | Screen | LEDs |
 | --- | --- | --- |
-| Advertising | `WAND xxxx`, "SAY THE SPELL, MOVE", gesture hints | slow blue breath |
+| Advertising | `WAND xxxx`, "PAIR YOUR WAND", "Find me on your laptop" | slow blue breath |
 | Connected, no state yet | "WAITING FOR GAME" | violet glow that brightens with movement (amber tint while state is stale) |
 | SET_STATE practice/countdown/playing | phase text, HP bar with SHIELD / DISARMED flags | violet glow; steady cyan while shield bit set |
-| CUE accepted cast | `STUPEFY!` etc. in the spell colour | colour sweeps around the ring |
-| CUE blocked / damage | `BLOCKED` / `HIT by ...` | cyan ripple / red strobe |
+| CUE accepted cast | `STUPEFY!`, `PROTEGO!`, `EXPELLIARMUS!`, `INCENDIO!` or `EPISKEY!` in the spell colour | colour sweeps around the ring |
+| CUE blocked / damage | `BLOCKED` / `HIT!` | cyan ripple / red strobe |
 | SET_STATE won/lost/draw + result CUE | `VICTORY` / `DEFEATED` / `DRAW`, `YOU WIN` ... | gold chase / red fade / white |
 | State lease expired or disconnect | back to neutral within the lease (≤1.5 s) | glow with amber tint |
 

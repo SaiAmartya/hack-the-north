@@ -13,7 +13,7 @@ enum Opcode : uint8_t { OP_OPEN = 1, OP_SYNC = 2, OP_SET_STATE = 3, OP_CUE = 4 }
 enum Result : uint32_t { RC_OK = 0, RC_MALFORMED = 1, RC_WRONG_SESSION = 2, RC_INVALID_ARG = 3, RC_EXPIRED = 4, RC_UNSUPPORTED = 5, RC_STALE_SEQ = 6 };
 enum Phase : uint8_t { PH_IDLE = 0, PH_PRACTICE, PH_COUNTDOWN, PH_PLAYING, PH_WON, PH_LOST, PH_DRAW, PH_ABORTED };
 enum Effect : uint8_t { FX_ACCEPTED_CAST = 1, FX_BLOCKED = 2, FX_DAMAGE = 3, FX_RESULT = 4 };
-enum Spell : uint8_t { SP_NONE = 0, SP_STUPEFY = 1, SP_PROTEGO = 2, SP_EXPELLIARMUS = 3 };
+enum Spell : uint8_t { SP_NONE = 0, SP_STUPEFY = 1, SP_PROTEGO = 2, SP_EXPELLIARMUS = 3, SP_INCENDIO = 4, SP_EPISKEY = 5 };
 enum StatusBits : uint8_t { ST_SHIELD = 1, ST_LOCKED = 2 };
 enum Health : uint32_t { H_SENSOR = 1, H_STREAM = 2, H_PRESENTATION = 4, H_STATE_STALE = 8 };
 enum Caps : uint8_t { CAP_MOTION = 1, CAP_STATE = 2, CAP_CUE = 4, CAP_SYNC = 8, CAP_ALL = 0x0F };

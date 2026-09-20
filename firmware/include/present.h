@@ -10,5 +10,5 @@ void link_changed();                                       // connect/disconnect
 void play_cue(const proto::Cue &c, uint8_t phase);        // one-shot effect
 bool healthy();                                            // presentation health bit
 // `state`/`stale` are copies taken under the session lock, so drawing never holds it.
-void tick(const proto::DisplayState &state, bool stale, uint32_t now_ms, bool connected, bool streaming, uint32_t rate_hz, uint32_t dropped);
+void tick(const proto::DisplayState &state, bool stale, uint32_t now_ms, bool connected, bool streaming);
 }  // namespace present

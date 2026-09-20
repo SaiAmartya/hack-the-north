@@ -35,7 +35,7 @@ bool g_health_dirty = false;           // guarded by g_lock
 uint32_t g_boot_id = 0;
 uint32_t g_session_gen = 0, g_seen_gen = 0, g_present_revision = 0;
 uint32_t g_next_health = 0, g_last_health_bits = 0xFFFFFFFF;
-uint32_t g_rate_window_start = 0, g_rate_hz = 0, g_last_acquired = 0, g_next_adv_check = 0;
+uint32_t g_next_adv_check = 0;
 bool g_streaming = false;
 // Battery soft start: the radio and LEDs come up in stages after the boost converter has settled.
 uint8_t g_device_id[6], g_info_rec[proto::REC], g_health_rec[proto::REC];
@@ -200,14 +200,6 @@ void loop() {
     while (g_session.take_cue(now, cue)) present::play_cue(cue, st.phase);
   }
 
-  // effective acquisition rate, for the footer
-  const wand::Stats &w = wand::stats();
-  if (now - g_rate_window_start >= 1000) {
-    g_rate_hz = (w.acquired - g_last_acquired) * 1000 / (now - g_rate_window_start);
-    g_last_acquired = w.acquired;
-    g_rate_window_start = now;
-  }
-
   // Staged battery load: radio after the boot inrush, LEDs after the radio, and the brownout
   // count is forgotten once the boot has proven stable.
   if (!g_radio_started && (int32_t)(now - g_radio_start_at) >= 0) {
@@ -231,6 +223,6 @@ void loop() {
   }
 
   publish_health(now, false);
-  present::tick(st, stale, now, ble::connected(), streaming, g_rate_hz, w.lost);
+  present::tick(st, stale, now, ble::connected(), streaming);
   delay(1);
 }

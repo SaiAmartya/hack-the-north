@@ -201,6 +201,26 @@ describe("wand protocol golden vectors", () => {
     expect(decodeStatus(bytes)).toEqual(expected);
     expect(encodeStatus(expected)).toEqual(bytes);
   });
+
+  it.each([
+    [SpellCode.Incendio, "01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00"],
+    [SpellCode.Episkey, "01 04 04 00 dd cc bb aa 01 05 2c 01 04 03 02 01 78 05 00 00"],
+  ] as const)("pins spell %i CUE bytes shared with firmware", (spell, vector) => {
+    const bytes = hex(vector);
+    const expected: ControlCommand = {
+      version: WAND_PROTOCOL_VERSION,
+      opcode: ControlOpcode.Cue,
+      commandSeq: spell - 1,
+      linkNonce: 0xaabb_ccdd,
+      effect: CueEffect.AcceptedCast,
+      spell,
+      durationMs: 300,
+      presentationEpoch: 0x0102_0304,
+      startBeforeMs: 1_400,
+    };
+    expect(decodeControl(bytes)).toEqual(expected);
+    expect(encodeControl(expected)).toEqual(bytes);
+  });
 });
 
 describe("wand protocol validation", () => {
@@ -246,6 +266,10 @@ describe("wand protocol validation", () => {
     const invalidAcceptedCast = GOLDEN_CUE.slice();
     invalidAcceptedCast[9] = SpellCode.None;
     expect(() => decodeControl(invalidAcceptedCast)).toThrow(/requires a spell/);
+
+    const unknownSpell = GOLDEN_CUE.slice();
+    unknownSpell[9] = 6;
+    expect(() => decodeControl(unknownSpell)).toThrow(/spell/);
 
     const health = encodeStatus({
       version: WAND_PROTOCOL_VERSION,

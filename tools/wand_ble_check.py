@@ -167,8 +167,10 @@ async def main() -> int:
         epoch = 7
         st, _ = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
         check(st is not None and st.detail1 == wp.R_OK, "SET_STATE playing accepted", f"{st}")
-        st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 700), epoch, link.device_now() + 300)
-        check(st is not None and st.detail1 == wp.R_OK, "CUE cast Stupefy accepted", f"{st}")
+        spells = ((wp.SP_STUPEFY, "Stupefy"), (wp.SP_PROTEGO, "Protego"), (wp.SP_EXPELLIARMUS, "Expelliarmus"), (wp.SP_INCENDIO, "Incendio"), (wp.SP_EPISKEY, "Episkey"))
+        for spell, name in spells:
+            st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, spell, 700), epoch, link.device_now() + 300)
+            check(st is not None and st.detail1 == wp.R_OK, f"CUE cast {name} accepted", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 700), epoch + 1, link.device_now() + 300)
         check(st is not None and st.detail1 == wp.R_INVALID_ARG, "CUE with wrong epoch rejected (3)", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_DAMAGE, wp.SP_NONE, 500), epoch, link.device_now() - 50)
@@ -181,6 +183,7 @@ async def main() -> int:
         load_rtts = []
         load_failures = 0
         load_commands = 0
+        load_casts = 0
         while time.monotonic() < t_end:
             await asyncio.sleep(0.45)
             st, rtt = await link.command(wp.OP_SET_STATE, wp.set_state_args(wp.PH_PLAYING, 100, 0, 100), epoch, link.device_now() + 1200)
@@ -189,7 +192,9 @@ async def main() -> int:
                 load_failures += 1
             if st is not None:
                 load_rtts.append(rtt)
-            st, rtt = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 180), epoch, link.device_now() + 300)
+            spell, _ = spells[load_casts % len(spells)]
+            load_casts += 1
+            st, rtt = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, spell, 180), epoch, link.device_now() + 300)
             load_commands += 1
             if st is None or st.detail1 != wp.R_OK:
                 load_failures += 1

@@ -119,7 +119,7 @@ describe("VirtualWandEndpoint", () => {
     ]);
   });
 
-  it("applies state and a cue once, then expires both without timers", () => {
+  it.each([SpellCode.Stupefy, SpellCode.Protego, SpellCode.Expelliarmus, SpellCode.Incendio, SpellCode.Episkey])("applies spell %i once, then expires state and cue without timers", (spell) => {
     const fixture = endpointAt(1_010);
     const statuses = collectStatuses(fixture.endpoint);
     fixture.endpoint.writeControl(open());
@@ -127,7 +127,7 @@ describe("VirtualWandEndpoint", () => {
     fixture.now.value = 1_100;
     fixture.endpoint.writeControl(state(1, 2_200));
     fixture.now.value = 1_150;
-    const cueBytes = cue(2, 1_400);
+    const cueBytes = cue(2, 1_400, CueEffect.AcceptedCast, spell);
     fixture.endpoint.writeControl(cueBytes);
     expect(fixture.endpoint.getPresentation()).toMatchObject({
       state: {
@@ -137,7 +137,7 @@ describe("VirtualWandEndpoint", () => {
       },
       cue: {
         effect: CueEffect.AcceptedCast,
-        spell: SpellCode.Stupefy,
+        spell,
         endsAtMs: 1_450,
       },
       cueRevision: 1,

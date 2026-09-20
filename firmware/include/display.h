@@ -12,8 +12,6 @@ struct View {
   const char *cue;         // one-shot text while a cue plays, else ""
   uint16_t cue_color;      // RGB565
   float activity;          // 0..1
-  int16_t x, y, z;         // mg, contract axes
-  const char *foot;        // small diagnostics line
 };
 
 bool begin(uint8_t rotation);

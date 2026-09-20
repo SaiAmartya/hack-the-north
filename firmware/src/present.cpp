@@ -20,6 +20,8 @@ const char *spell_name(uint8_t s) {
     case proto::SP_STUPEFY: return "STUPEFY";
     case proto::SP_PROTEGO: return "PROTEGO";
     case proto::SP_EXPELLIARMUS: return "EXPELLIARMUS";
+    case proto::SP_INCENDIO: return "INCENDIO";
+    case proto::SP_EPISKEY: return "EPISKEY";
     default: return "";
   }
 }
@@ -50,14 +52,20 @@ void play_cue(const proto::Cue &c, uint8_t phase) {
   switch (c.effect) {
     case proto::FX_ACCEPTED_CAST:
       snprintf(g_cue_text, sizeof(g_cue_text), "%s!", spell_name(c.spell));
-      g_cue_color = c.spell == proto::SP_PROTEGO ? 0x07FF : c.spell == proto::SP_EXPELLIARMUS ? 0xFD20 : 0xF80A;
+      switch (c.spell) {
+        case proto::SP_PROTEGO: g_cue_color = 0x07FF; break;
+        case proto::SP_EXPELLIARMUS: g_cue_color = 0xFD20; break;
+        case proto::SP_INCENDIO: g_cue_color = 0xF4A9; break;
+        case proto::SP_EPISKEY: g_cue_color = 0x6F15; break;
+        default: g_cue_color = 0xF80A; break;
+      }
       break;
     case proto::FX_BLOCKED:
       snprintf(g_cue_text, sizeof(g_cue_text), "BLOCKED");
       g_cue_color = 0x07FF;
       break;
     case proto::FX_DAMAGE:
-      snprintf(g_cue_text, sizeof(g_cue_text), "HIT%s%s", c.spell ? " by " : "", spell_name(c.spell));
+      snprintf(g_cue_text, sizeof(g_cue_text), "HIT!");
       g_cue_color = 0xF800;
       break;
     case proto::FX_RESULT:
@@ -68,7 +76,7 @@ void play_cue(const proto::Cue &c, uint8_t phase) {
   leds::cue(c.effect, c.spell, c.duration_ms, phase);
 }
 
-void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool connected, bool streaming, uint32_t rate_hz, uint32_t dropped) {
+void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool connected, bool streaming) {
   const wand::Stats &w = wand::stats();
   leds::set_base(!w.sensor_ok ? leds::Base::Error : connected ? leds::Base::Connected : leds::Base::Advertising);
   leds::set_activity(w.activity);
@@ -84,9 +92,6 @@ void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool conne
     display::force_redraw();
   }
 
-  char foot[64];
-  snprintf(foot, sizeof(foot), "fw %s  %s  %lu Hz  drop %lu  %s", FW_VERSION_STR, ble::name(), (unsigned long)rate_hz, (unsigned long)dropped,
-           w.saturated ? "SAT" : "");
   display::View v;
   v.id = ble::name() + 5;
   v.link = streaming ? "streaming" : connected ? "connected" : "advertising";
@@ -99,10 +104,6 @@ void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool conne
   v.cue = g_cue_text;
   v.cue_color = g_cue_color;
   v.activity = w.activity;
-  v.x = w.x;
-  v.y = w.y;
-  v.z = w.z;
-  v.foot = foot;
   display::draw(v);
 }
 }  // namespace present

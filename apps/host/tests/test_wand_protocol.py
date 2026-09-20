@@ -10,6 +10,8 @@ from phantom_host.wand_protocol import (
     OP_SYNC,
     PH_PLAYING,
     R_OK,
+    SP_EPISKEY,
+    SP_INCENDIO,
     SP_STUPEFY,
     Control,
     Info,
@@ -66,6 +68,13 @@ def test_control_and_status_golden_vectors():
     assert encode_control(state) == h("01 03 01 00 dd cc bb aa 03 64 64 00 04 03 02 01 98 08 00 00")
     cue = Control(4, 2, 0xAABBCCDD, cue_args(FX_ACCEPTED_CAST, SP_STUPEFY, 300), 0x01020304, 1400)
     assert encode_control(cue) == h("01 04 02 00 dd cc bb aa 01 01 2c 01 04 03 02 01 78 05 00 00")
+    for spell, vector in (
+        (SP_INCENDIO, "01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00"),
+        (SP_EPISKEY, "01 04 04 00 dd cc bb aa 01 05 2c 01 04 03 02 01 78 05 00 00"),
+    ):
+        cue = Control(4, spell - 1, 0xAABBCCDD, cue_args(FX_ACCEPTED_CAST, spell, 300), 0x01020304, 1400)
+        assert encode_control(cue) == h(vector)
+        assert decode_control(h(vector)) == cue
 
     wrap_sync = Control(OP_SYNC, 0, 0xAABBCCDD)
     assert encode_control(wrap_sync) == h("01 02 00 00 dd cc bb aa 00 00 00 00 00 00 00 00 00 00 00 00")

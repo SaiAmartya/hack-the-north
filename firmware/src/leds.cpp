@@ -28,6 +28,8 @@ uint32_t spell_color(uint8_t spell, float k) {
     case proto::SP_STUPEFY: return rgb(255, 20, 40, k);      // crimson bolt
     case proto::SP_PROTEGO: return rgb(0, 200, 255, k);      // cyan shield
     case proto::SP_EXPELLIARMUS: return rgb(255, 120, 0, k); // red-gold ribbon
+    case proto::SP_INCENDIO: return rgb(246, 148, 75, k);    // flame
+    case proto::SP_EPISKEY: return rgb(109, 224, 173, k);    // healing light
     default: return rgb(255, 255, 255, k);
   }
 }
