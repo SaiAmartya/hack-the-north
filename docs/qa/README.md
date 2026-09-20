@@ -2,6 +2,7 @@
 
 Current evidence, read these first:
 
+- [motion-recognition-debugging.md](motion-recognition-debugging.md) — active investigation of inaccurate spell detection: confirmed classifier/test defects, transport-vs-classifier diagnosis, experiment log, and remaining physical gates.
 - [multiplayer-entry.md](multiplayer-entry.md) — join codes, quick play and the battle lobby: enter a duel with only a paired wand, keep the badge across a laptop tab switch, recover microphone/battle from the lobby; automated evidence and the physical card.
 - [input-rebuild.md](input-rebuild.md) — phone sessions, recognizer v3, badge auto-reconnect, repeatable checks and the next physical card.
 - [firmware-0.2.0.md](firmware-0.2.0.md) — firmware 0.2.x change record: why the badge was invisible and why every sample was rejected, the flash record, the 0.2.1 brownout soft start, and the physical QA card.

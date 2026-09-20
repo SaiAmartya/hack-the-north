@@ -69,6 +69,12 @@ now on WAND-B602.
 
 ## Repeatable software checks
 
+### Unqualified hybrid DTW impulse experiment — September 19, 2026
+
+The feature branch `codex/motion-recognition-debug-readme` now evaluates Stupefy and Expelliarmus as complete rest-relative three-axis waveforms using constrained DTW and keeps Protego on the existing gravity-relative raise/hold path. The deterministic regression covers a strong-braking forward jab, true reverse and wrong-axis rejection, ambiguity rejection, recorded iPhone-jab replay, Protego, continuity, fusion, and controller behavior. The full frontend result is **21 files / 160 tests passed**, and the production typecheck/build passed.
+
+This is an uncommitted software experiment, not an iPhone or badge qualification. Its initial absolute score limits and ambiguity margin must be evaluated with held-out human positives and realistic negatives before adoption. See [the motion-recognition debugging record](motion-recognition-debugging.md) for the implementation boundary, exact thresholds, evidence log, and next physical card.
+
 Publication verification reran the full local suite: **253 host tests passed, 4 skipped; 25 tooling tests;
 158 frontend tests; 27 Playwright browser tests; frontend typecheck/build.** The Worker
 separately passed **33 tests and typecheck**. The browser tests include landscape startup,

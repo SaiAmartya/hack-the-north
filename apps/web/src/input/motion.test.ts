@@ -210,6 +210,21 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     expect(h.spells()).toEqual(["stupefy"]);
   });
 
+  it("recognizes a calibrated forward jab when braking is stronger than launch", () => {
+    const h = new MotionHarness();
+    h.ready();
+    h.feed(h.builder.jab(900, 0, undefined, 2.5));
+    expect(h.spells()).toEqual(["stupefy"]);
+  });
+
+  it("rejects a true reverse jab after forward calibration", () => {
+    const h = new MotionHarness();
+    h.ready();
+    h.feed(h.builder.jab(900, 0, [-1, 0, 0], 0.8));
+    expect(h.evidence).toHaveLength(0);
+    expect(h.recognizer.getState().reason).toBe("no-match");
+  });
+
   it("needs a distinct sweep direction for Expelliarmus and reports ambiguity", () => {
     const h = new MotionHarness();
     h.ready();
@@ -468,13 +483,12 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
   });
 
   it("stays silent on the recorded resting hold", () => {
-    const evidence: GestureEvidence[] = [];
     const h = new MotionHarness();
     h.ready();
     const quiet = realTrace(phoneJabs.quiet, 0, true);
     const generation = h.generation;
     quiet.forEach((sample) => h.recognizer.push({ ...sample, bootId: 11 }, generation));
-    expect(evidence).toHaveLength(0);
+    expect(h.evidence).toHaveLength(0);
     expect(h.recognizer.getState().phase).toBe("ready");
   });
 });
