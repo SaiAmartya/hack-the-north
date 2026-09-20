@@ -34,6 +34,19 @@ class Spell(str, Enum):
     STUPEFY = "stupefy"
     PROTEGO = "protego"
     EXPELLIARMUS = "expelliarmus"
+    INCENDIO = "incendio"
+    SECTUMSEMPRA = "sectumsempra"
+    PETRIFICUS_TOTALUS = "petrificus-totalus"
+    EXPECTO_PATRONUM = "expecto-patronum"
+
+
+OFFENSIVE_SPELLS = (
+    Spell.STUPEFY,
+    Spell.EXPELLIARMUS,
+    Spell.INCENDIO,
+    Spell.SECTUMSEMPRA,
+    Spell.PETRIFICUS_TOTALUS,
+)
 
 
 class Phase(str, Enum):
@@ -107,17 +120,22 @@ class SpellRuleWire(WireModel):
     flight_ms: int = Field(ge=0)
     shield_ms: int = Field(ge=0)
     offense_lock_ms: int = Field(ge=0)
+    bind_ms: int = Field(ge=0)
+    burn_damage: int = Field(ge=0)
+    burn_ticks: int = Field(ge=0)
+    burn_interval_ms: int = Field(ge=0)
+    barrier_ms: int = Field(ge=0)
 
 
 class RulesetWire(WireModel):
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     tick_ms: Literal[50] = 50
     countdown_ms: Literal[3000] = 3000
     round_ms: Literal[60000] = 60_000
     heartbeat_ms: Literal[500] = 500
     heartbeat_timeout_ms: Literal[1500] = 1500
     max_hp: Literal[100] = 100
-    offensive_recovery_ms: Literal[600] = 600
+    cast_recovery_ms: Literal[500] = 500
     spells: tuple[SpellRuleWire, ...]
 
 
@@ -203,15 +221,24 @@ class PlayerSnapshot(WireModel):
     hp: int = Field(ge=0, le=100)
     max_hp: Literal[100] = 100
     shield_until_ms: int
+    barrier_until_ms: int
     offense_locked_until_ms: int
-    offensive_recovery_until_ms: int
+    bound_until_ms: int
+    burning_until_ms: int
+    cast_recovery_until_ms: int
     cooldown_until_ms: dict[str, int]
 
 
 class ProjectileSnapshot(WireModel):
     id: str
     action_id: str
-    spell: Literal[Spell.STUPEFY, Spell.EXPELLIARMUS]
+    spell: Literal[
+        Spell.STUPEFY,
+        Spell.EXPELLIARMUS,
+        Spell.INCENDIO,
+        Spell.SECTUMSEMPRA,
+        Spell.PETRIFICUS_TOTALUS,
+    ]
     caster: Slot
     target: Slot
     launch_at_ms: int
@@ -228,10 +255,14 @@ EventType = Literal[
     "roundStarted",
     "castAccepted",
     "shieldRaised",
+    "barrierRaised",
     "projectileLaunched",
     "impactBlocked",
     "damage",
     "offenseLocked",
+    "bodyBound",
+    "burning",
+    "burnDamage",
     "roundEnded",
     "roundAborted",
 ]

@@ -28,6 +28,15 @@ const SHIELD = `varying vec2 vUv; uniform vec3 color; uniform float opacity; uni
 const RIPPLE = `varying vec2 vUv; uniform vec3 color; uniform float opacity; uniform float time; void main(){float r=length(vUv-.5)*2.;float a=1.-smoothstep(0.,.08,abs(r-time));gl_FragColor=vec4(color,a*opacity);}`;
 const point = (x: number, y: number) =>
   new THREE.Vector3(x * 2 - 1, 1 - y * 2, 0);
+const BOLT_COLORS: Record<string, number> = {
+  stupefy: 0xff335d,               // crimson bolt
+  expelliarmus: 0xffca60,          // red-gold ribbon
+  incendio: 0xff7a1f,              // fire
+  sectumsempra: 0xe6e6ff,          // steel-white slash
+  "petrificus-totalus": 0x9fb7ff,  // pale binding light
+};
+const SHIELD_COLOR = 0x85cfff;
+const PATRONUS_COLOR = 0xdff4ff;
 
 /** Fixed pooled geometry; no physics, lights, video textures or React-frame state. */
 export class DuelEffects {
@@ -199,7 +208,13 @@ export class DuelEffects {
       ripple.at = event.atMs;
       ripple.mesh.position.copy(point(x, y));
     }
-    if (event.type === "damage" || event.type === "impactBlocked")
+    if (event.type === "barrierRaised") {
+      const ripple =
+        this.ripples.find((r) => this.now() - r.at > 500) ?? this.ripples[0];
+      ripple.at = event.atMs;
+      ripple.mesh.position.copy(point(x, event.actor === this.slot ? 0.55 : 0.46));
+    }
+    if (["damage", "impactBlocked", "burnDamage", "bodyBound"].includes(event.type))
       this.bursts.push({
         at: event.atMs,
         x,
@@ -217,7 +232,7 @@ export class DuelEffects {
       const outgoing = p.caster === this.slot;
       const at = flightPosition(p.launchAtMs, p.impactAtMs, now, outgoing);
       head.position.copy(point(at.x, at.y));
-      const color = p.spell === "expelliarmus" ? 0xffca60 : 0xff335d;
+      const color = BOLT_COLORS[p.spell] ?? 0xff335d;
       (head.material as THREE.ShaderMaterial).uniforms.color.value.setHex(
         color,
       );
@@ -267,8 +282,10 @@ export class DuelEffects {
     this.shields.forEach((mesh, i) => {
       const p =
         state?.players[i === 0 ? this.slot : this.slot === "P1" ? "P2" : "P1"];
-      mesh.visible = !!p && p.shieldUntilMs > now && state?.phase === "playing";
+      const barrier = !!p && p.barrierUntilMs > now;
+      mesh.visible = !!p && (barrier || p.shieldUntilMs > now) && state?.phase === "playing";
       mesh.position.copy(point(0.5, i === 0 ? 0.55 : 0.46));
+      (mesh.material as THREE.ShaderMaterial).uniforms.color.value.setHex(barrier ? PATRONUS_COLOR : SHIELD_COLOR);
       (mesh.material as THREE.ShaderMaterial).uniforms.time.value = this.reduce
         ? 0
         : now / 1000;

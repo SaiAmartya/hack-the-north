@@ -10,6 +10,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable
 
+from phantom_host.duel_models import Spell
 from phantom_host.duel_room import DuelRoom, GamePeer, PlayerSession, RoomError
 
 ROOM_CODE_LENGTH = 6
@@ -25,12 +26,12 @@ class RoomRegistry:
         clock_ms: Callable[[], int],
         allow_phone: bool = False,
         allow_replay: bool = False,
-        expelliarmus_enabled: bool = False,
+        enabled_spells: frozenset[Spell] | None = None,
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
-        self.expelliarmus_enabled = expelliarmus_enabled
+        self.enabled_spells = enabled_spells
         self._rooms: dict[str, DuelRoom] = {}
         self._empty_since_ms: dict[str, int] = {}
 
@@ -48,7 +49,7 @@ class RoomRegistry:
             clock_ms=self.clock_ms,
             allow_phone=self.allow_phone,
             allow_replay=self.allow_replay,
-            expelliarmus_enabled=self.expelliarmus_enabled,
+            enabled_spells=self.enabled_spells,
             room_id=code,
         )
         self._empty_since_ms[code] = self.clock_ms()

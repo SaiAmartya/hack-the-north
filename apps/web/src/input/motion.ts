@@ -5,8 +5,9 @@ import {
   prepareImpulseTrace,
   type PreparedImpulseTrace,
 } from "./dtw";
+import { CORE_SPELL_NAMES, SPELL_NAMES, SPELLS as SPELL_INFO, type GestureKind, type SpellName } from "../game/spells";
 
-export type SpellName = "stupefy" | "protego" | "expelliarmus";
+export type { SpellName };
 
 export type GestureEvidence = {
   id: string;
@@ -101,9 +102,10 @@ type ImpulseTemplate = {
 type GuardTemplate = { kind: "guard"; direction: Vector; tiltDeg: number; peak: number };
 type GestureTemplate = ImpulseTemplate | GuardTemplate;
 
-const SPELLS: readonly SpellName[] = ["stupefy", "protego", "expelliarmus"];
-const CORE_SPELLS: readonly SpellName[] = ["stupefy", "protego"];
+const SPELLS: readonly SpellName[] = SPELL_NAMES;
+const CORE_SPELLS: readonly SpellName[] = CORE_SPELL_NAMES;
 const EXAMPLES_PER_SPELL = 3;
+const kindOf = (spell: SpellName | undefined): GestureKind | undefined => (spell ? SPELL_INFO[spell].gesture : undefined);
 
 // Wii-remote style segmentation: a movement starts on a sharp change, continues through any number of
 // strokes, and ends when the wand is held still again in whatever pose it ended up. Nothing requires
@@ -142,6 +144,8 @@ const DTW_AMBIGUITY_MARGIN = 0.12;
 const DTW_MIN_ACCEPTANCE_DISTANCE = 0.3;
 const DTW_MAX_ACCEPTANCE_DISTANCE = 0.55;
 const DTW_COHESION_SCALE = 2.5;
+const DTW_ARC_CONSISTENCY = 0.55;   // a circle example may differ from the earlier ones by at most this trace distance
+const IMPULSE_EARLY_DECAY = 0.8;    // the fast path needs the pull to have died away; a circle keeps pulling
 const REST_TAU_MS = 500;
 const LOBE_FRACTION = 0.5;
 
@@ -171,7 +175,9 @@ function median(values: readonly number[]): number {
 }
 function clamp01(value: number): number { return Math.max(0, Math.min(1, value)); }
 function stopEvidence(how: "early" | "quiet"): MotionStopEvidence { return how === "early" ? "opposite" : "release"; }
-function spellCounts(): Record<SpellName, number> { return { stupefy: 0, protego: 0, expelliarmus: 0 }; }
+function spellCounts(): Record<SpellName, number> {
+  return Object.fromEntries(SPELLS.map((spell) => [spell, 0])) as Record<SpellName, number>;
+}
 
 export class MotionRecognizer {
   private phase: MotionRecognizerPhase = "uncalibrated";
@@ -225,7 +231,7 @@ export class MotionRecognizer {
     this.examples.set(spell, []);
     this.templates.delete(spell);
     this.phase = "gesture-calibration";
-    this.lastIssue = spell === "protego" ? "Raise your wand into a guard and hold it" : spell === "stupefy" ? "Jab forward" : "Sweep sideways";
+    this.lastIssue = SPELL_INFO[spell].calibration;
     this.reason = undefined;
     this.lastCandidate = undefined;
     this.clearSegmenter();
@@ -236,8 +242,8 @@ export class MotionRecognizer {
     const next = new Set(spells);
     if (next.size !== spells.length || spells.some((spell) => !SPELLS.includes(spell)))
       throw new Error("Enabled spells must be unique supported spell names");
-    if (next.has("expelliarmus") && !this.templates.has("expelliarmus"))
-      throw new Error("Calibrate Expelliarmus before enabling it");
+    for (const spell of next)
+      if (!this.templates.has(spell)) throw new Error(`Calibrate ${SPELL_INFO[spell].title} before enabling it`);
     this.enabledSpells = next;
     this.updateReadyPhase();
   }
@@ -477,7 +483,8 @@ export class MotionRecognizer {
     if (quiet) this.setProgress("settling", QUIET_WINDOW_MS, QUIET_WINDOW_MS);
     else this.setProgress("moving", elapsed, MOVEMENT_MAX_MS);
 
-    if (!burst.earlyEvaluated && this.calibratingSpell !== "protego" && this.impulseComplete(burst, current)) {
+    const calibratingKind = kindOf(this.calibratingSpell);
+    if (!burst.earlyEvaluated && calibratingKind !== "guard" && calibratingKind !== "arc" && this.impulseComplete(burst, current)) {
       // Fast path for strong strokes. A stroke that is not a spell yet (e.g. a brisk guard raise) is
       // left for the still end, where tilt and hold can be judged.
       burst.earlyEvaluated = true;
@@ -529,7 +536,9 @@ export class MotionRecognizer {
     // Pose-independent: the hand may still be rotated; the stroke is over when sharp acceleration is.
     const since = current.t - 100;
     const tail = burst.samples.filter((sample) => sample.t >= since);
-    return tail.length >= 3 && tail.every((sample) => sample.jerk < IMPULSE_SETTLE_JERK_MG);
+    if (tail.length < 3 || !tail.every((sample) => sample.jerk < IMPULSE_SETTLE_JERK_MG)) return false;
+    // A stroke's acceleration dies away after its brake; a circle keeps pulling the whole way round.
+    return magnitude(subtract(current.a, burst.rest)) <= burst.peak * IMPULSE_EARLY_DECAY;
   }
 
   private features(burst: Burst, endMs: number, endQuiet: boolean): Features {
@@ -626,7 +635,7 @@ export class MotionRecognizer {
       this.reason = issue.reason;
       this.recordCandidate(features, stopEvidence(how), issue.reason);
       this.setProgress("armed", 0, ARM_MS);
-      if (spell === "protego" && features.tiltDeg >= ONSET_TILT_DEG)
+      if (kindOf(spell) === "guard" && features.tiltDeg >= ONSET_TILT_DEG)
         this.rejectedGuardReturn = scale(features.tiltDirection, -1);
       return;
     }
@@ -638,10 +647,10 @@ export class MotionRecognizer {
     this.recordCandidate(features, stopEvidence(how), "accepted");
     this.setProgress("ready", ARM_MS, ARM_MS);
     if (examples.length < EXAMPLES_PER_SPELL) {
-      this.lastIssue = `${examples.length} of ${EXAMPLES_PER_SPELL}. ${spell === "protego" ? "Lower, then raise again." : "Again."}`;
+      this.lastIssue = `${examples.length} of ${EXAMPLES_PER_SPELL}. ${SPELL_INFO[spell].again}`;
       return;
     }
-    if (spell === "protego") {
+    if (kindOf(spell) === "guard") {
       // Three "raises" that on average bring the hand back toward the resting grip were lowerings
       // (the wand was already up when calibration started): start again from the grip.
       const neutral = this.neutral;
@@ -680,15 +689,18 @@ export class MotionRecognizer {
         ),
       });
     }
+    // A learned spell is a playable spell; Reset grip or a new stream clears it again.
+    this.enabledSpells.add(spell);
     this.calibratingSpell = undefined;
     this.updateReadyPhase();
-    this.lastIssue = this.phase === "ready" ? "" : `${spell} learned`;
+    this.lastIssue = this.phase === "ready" ? "" : `${SPELL_INFO[spell].title} learned`;
   }
 
   private calibrationIssue(spell: SpellName, features: Features, how: "early" | "quiet"):
     { message: string; reason: MotionRejectionReason } | "ignore" | undefined {
+    const info = SPELL_INFO[spell];
     const prior = this.examples.get(spell) ?? [];
-    if (spell === "protego") {
+    if (info.gesture === "guard") {
       if (how === "early" || !features.endQuiet) return "ignore";
       // The first held tilt defines the raise, wherever the hand happens to rest; each lowering
       // afterwards points the opposite way and is ignored rather than coached. The lowering that
@@ -699,32 +711,57 @@ export class MotionRecognizer {
       }
       if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > LOWERING_DEG)
         return "ignore";
-      const stupefy = this.templates.get("stupefy");
-      if (stupefy?.kind === "impulse" && angleDegrees(features.direction, stupefy.direction) <= DIRECTION_TOLERANCE_DEG && features.peak >= stupefy.peak * 0.5)
-        return { message: "That looked like a jab. Raise your wand into a guard and hold it.", reason: "unclear-direction" };
+      for (const other of this.calibratedImpulses())
+        if (other.template.kind === "impulse" && kindOf(other.spell) === "impulse" &&
+          angleDegrees(features.direction, other.template.direction) <= DIRECTION_TOLERANCE_DEG && features.peak >= other.template.peak * 0.5)
+          return { message: `That looked like ${SPELL_INFO[other.spell].title}. Raise your wand into a guard and hold it.`, reason: "unclear-direction" };
       if (features.peak < GUARD_MIN_PEAK_MG) {
         if (features.tiltDeg < GUARD_MIN_TILT_DEG) return "ignore";  // the hand drifting, not an attempt
-        return { message: "Raise a little quicker, then hold it still.", reason: "too-small" };
+        return { message: info.harder, reason: "too-small" };
       }
       if (features.tiltDeg < GUARD_MIN_TILT_DEG)
         return { message: "Raise your wand higher, then hold it still.", reason: "guard-tilt" };
       if (prior.length && angleDegrees(features.tiltDirection, mean(prior.map((example) => example.tiltDirection))) > CONSISTENCY_DEG)
-        return { message: "Raise the same way each time.", reason: "inconsistent-direction" };
+        return { message: info.sameWay, reason: "inconsistent-direction" };
       return undefined;
     }
     if (features.durationMs > MOVEMENT_MAX_MS) return { message: "One movement, then pause.", reason: "too-long" };
     if (features.peak < IMPULSE_MIN_PEAK_MG || features.lobeMs < IMPULSE_MIN_LOBE_MS) {
-      if (features.durationMs < COACH_MIN_MS && features.peak < IMPULSE_MIN_PEAK_MG) return "ignore";  // a twitch before the real jab
-      return { message: spell === "stupefy" ? "Jab a little harder." : "Sweep a little harder.", reason: "too-small" };
+      if (features.durationMs < COACH_MIN_MS && features.peak < IMPULSE_MIN_PEAK_MG) return "ignore";  // a twitch before the real stroke
+      return { message: info.harder, reason: "too-small" };
+    }
+    if (info.gesture === "arc") {
+      // A circle has no single direction: it is held together and kept apart by trace distance,
+      // exactly the measure that recognizes it in play.
+      if (how === "early" || !features.endQuiet) return "ignore";
+      if (prior.length && median(prior.map((example) => dtwDistance(features.impulseTrace, example.impulseTrace))) > DTW_ARC_CONSISTENCY)
+        return { message: info.sameWay, reason: "inconsistent-direction" };
+      for (const other of this.calibratedImpulses(spell))
+        if (median(other.template.traces.map((trace) => dtwDistance(features.impulseTrace, trace))) <= other.template.acceptanceDistance)
+          return { message: `Too close to your ${SPELL_INFO[other.spell].title}. Draw a full round circle.`, reason: "inconsistent-direction" };
+      return undefined;
     }
     if (features.dominantRatio < 0.35)
       return { message: "Make one clear stroke.", reason: "unclear-direction" };
     if (prior.length && angleDegrees(features.direction, mean(prior.map((example) => example.direction))) > CONSISTENCY_DEG)
-      return { message: spell === "stupefy" ? "Jab the same way each time." : "Sweep the same way each time.", reason: "inconsistent-direction" };
-    const stupefy = this.templates.get("stupefy");
-    if (spell === "expelliarmus" && stupefy?.kind === "impulse" && angleDegrees(stupefy.direction, features.direction) < SEPARATION_DEG)
-      return { message: "Sweep sideways, away from your jab direction.", reason: "inconsistent-direction" };
+      return { message: info.sameWay, reason: "inconsistent-direction" };
+    for (const other of this.calibratedImpulses(spell)) {
+      // Strokes stay apart by direction; a circle by trace distance, since its mean direction is
+      // an accident of where it started.
+      const apart = kindOf(other.spell) === "arc"
+        ? median(other.template.traces.map((trace) => dtwDistance(features.impulseTrace, trace))) > other.template.acceptanceDistance
+        : angleDegrees(other.template.direction, features.direction) >= SEPARATION_DEG;
+      if (!apart)
+        return { message: `Too close to your ${SPELL_INFO[other.spell].title}. Move in a clearly different direction.`, reason: "inconsistent-direction" };
+    }
     return undefined;
+  }
+
+  private calibratedImpulses(except?: SpellName): { spell: SpellName; template: ImpulseTemplate }[] {
+    const result: { spell: SpellName; template: ImpulseTemplate }[] = [];
+    for (const [spell, template] of this.templates)
+      if (spell !== except && template.kind === "impulse") result.push({ spell, template });
+    return result;
   }
 
   private classify(features: Features): { spell?: SpellName; quality: number; reason?: MotionRejectionReason; message: string } {

@@ -28,6 +28,10 @@ uint32_t spell_color(uint8_t spell, float k) {
     case proto::SP_STUPEFY: return rgb(255, 20, 40, k);      // crimson bolt
     case proto::SP_PROTEGO: return rgb(0, 200, 255, k);      // cyan shield
     case proto::SP_EXPELLIARMUS: return rgb(255, 120, 0, k); // red-gold ribbon
+    case proto::SP_INCENDIO: return rgb(255, 70, 0, k);      // fire
+    case proto::SP_SECTUMSEMPRA: return rgb(200, 200, 255, k); // steel white
+    case proto::SP_PETRIFICUS_TOTALUS: return rgb(90, 120, 255, k); // binding blue
+    case proto::SP_EXPECTO_PATRONUM: return rgb(160, 220, 255, k); // silver-blue patronus
     default: return rgb(255, 255, 255, k);
   }
 }

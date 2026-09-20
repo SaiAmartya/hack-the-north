@@ -28,56 +28,90 @@ COUNTDOWN_MS = 3_000
 ROUND_MS = 60_000
 HEARTBEAT_TIMEOUT_MS = 1_500
 MAX_HP = 100
-OFFENSIVE_RECOVERY_MS = 600
+CAST_RECOVERY_MS = 500
 RECENT_EVENT_LIMIT = 64
 EVIDENCE_LIMIT = 256
 
 
 @dataclass(frozen=True)
 class SpellRule:
-    enabled: bool
+    """Starting values; every number is a physical-play tuning candidate."""
+
     damage: int
     cooldown_ms: int
     flight_ms: int = 0
     shield_ms: int = 0
     offense_lock_ms: int = 0
+    bind_ms: int = 0
+    burn_damage: int = 0
+    burn_ticks: int = 0
+    burn_interval_ms: int = 0
+    barrier_ms: int = 0
+
+    @property
+    def offensive(self) -> bool:
+        return self.flight_ms > 0
 
 
 SPELL_RULES: dict[Spell, SpellRule] = {
-    Spell.STUPEFY: SpellRule(
-        enabled=True, damage=20, cooldown_ms=2_000, flight_ms=2_000
-    ),
-    Spell.PROTEGO: SpellRule(
-        enabled=True, damage=0, cooldown_ms=3_000, shield_ms=1_200
-    ),
+    # Stunning Spell: the basic bolt.
+    Spell.STUPEFY: SpellRule(damage=20, cooldown_ms=2_000, flight_ms=2_000),
+    # Shield Charm: one incoming spell is caught, then the shield breaks.
+    Spell.PROTEGO: SpellRule(damage=0, cooldown_ms=3_000, shield_ms=1_200),
+    # Disarming Charm: light hit plus a short disarm (no offensive casts).
     Spell.EXPELLIARMUS: SpellRule(
-        enabled=False,
-        damage=10,
-        cooldown_ms=6_000,
-        flight_ms=2_200,
-        offense_lock_ms=1_000,
+        damage=10, cooldown_ms=6_000, flight_ms=2_200, offense_lock_ms=1_000
     ),
+    # Fire-Making Spell: impact plus a burn that keeps ticking through later shields.
+    Spell.INCENDIO: SpellRule(
+        damage=8,
+        cooldown_ms=6_000,
+        flight_ms=2_000,
+        burn_damage=4,
+        burn_ticks=3,
+        burn_interval_ms=1_000,
+    ),
+    # Slashing curse: the heavy hit, telegraphed by a long flight.
+    Spell.SECTUMSEMPRA: SpellRule(damage=35, cooldown_ms=9_000, flight_ms=2_800),
+    # Full Body-Bind: no damage; the target cannot cast anything for a moment.
+    Spell.PETRIFICUS_TOTALUS: SpellRule(
+        damage=0, cooldown_ms=10_000, flight_ms=2_400, bind_ms=1_500
+    ),
+    # Patronus Charm: a barrier that repels every incoming spell without breaking.
+    Spell.EXPECTO_PATRONUM: SpellRule(damage=0, cooldown_ms=15_000, barrier_ms=3_000),
 }
+ALL_SPELLS: frozenset[Spell] = frozenset(SPELL_RULES)
+CORE_SPELLS: frozenset[Spell] = frozenset({Spell.STUPEFY})  # Protego is optional since 2026-09-19
 
 
-def ruleset(*, expelliarmus_enabled: bool = False) -> RulesetWire:
+def ruleset(*, enabled_spells: frozenset[Spell] = ALL_SPELLS) -> RulesetWire:
     spells = tuple(
         SpellRuleWire(
             spell=spell,
-            enabled=(
-                expelliarmus_enabled
-                if spell is Spell.EXPELLIARMUS
-                else rule.enabled
-            ),
+            enabled=spell in enabled_spells,
             damage=rule.damage,
             cooldown_ms=rule.cooldown_ms,
             flight_ms=rule.flight_ms,
             shield_ms=rule.shield_ms,
             offense_lock_ms=rule.offense_lock_ms,
+            bind_ms=rule.bind_ms,
+            burn_damage=rule.burn_damage,
+            burn_ticks=rule.burn_ticks,
+            burn_interval_ms=rule.burn_interval_ms,
+            barrier_ms=rule.barrier_ms,
         )
         for spell, rule in SPELL_RULES.items()
     )
     return RulesetWire(spells=spells)
+
+
+@dataclass(frozen=True)
+class BurnTick:
+    at_ms: int
+    amount: int
+    caster: Slot
+    spell: Spell
+    action_id: str
 
 
 @dataclass
@@ -85,28 +119,47 @@ class CombatPlayer:
     hp: int = MAX_HP
     ready: bool = False
     shield_until_ms: int = 0
+    barrier_until_ms: int = 0
     offense_locked_until_ms: int = 0
-    offensive_recovery_until_ms: int = 0
+    bound_until_ms: int = 0
+    cast_recovery_until_ms: int = 0
     cooldown_until_ms: dict[Spell, int] = field(default_factory=dict)
+    burns: list[BurnTick] = field(default_factory=list)
+
+    @property
+    def burning_until_ms(self) -> int:
+        return max((tick.at_ms for tick in self.burns), default=0)
+
+    def clear_status(self) -> None:
+        self.shield_until_ms = 0
+        self.barrier_until_ms = 0
+        self.offense_locked_until_ms = 0
+        self.bound_until_ms = 0
+        self.cast_recovery_until_ms = 0
+        self.burns.clear()
 
 
 @dataclass(frozen=True)
 class Projectile:
     id: str
     action_id: str
-    spell: Literal[Spell.STUPEFY, Spell.EXPELLIARMUS]
+    spell: Spell
     caster: Slot
     target: Slot
     launch_at_ms: int
     impact_at_ms: int
     damage: int
     offense_lock_ms: int
+    bind_ms: int = 0
+    burn_damage: int = 0
+    burn_ticks: int = 0
+    burn_interval_ms: int = 0
 
     def snapshot(self) -> ProjectileSnapshot:
         return ProjectileSnapshot(
             id=self.id,
             action_id=self.action_id,
-            spell=self.spell,
+            spell=self.spell,  # type: ignore[arg-type]
             caster=self.caster,
             target=self.target,
             launch_at_ms=self.launch_at_ms,
@@ -161,8 +214,8 @@ class CommandDecision:
 class DuelEngine:
     """One-room state machine with deterministic IDs and explicit time."""
 
-    def __init__(self, *, expelliarmus_enabled: bool = False) -> None:
-        self.expelliarmus_enabled = expelliarmus_enabled
+    def __init__(self, *, enabled_spells: frozenset[Spell] | None = None) -> None:
+        self.enabled_spells = ALL_SPELLS if enabled_spells is None else enabled_spells
         self.room_generation = 1
         self.round_id = 0
         self.state_version = 0
@@ -252,6 +305,14 @@ class DuelEngine:
                 ]
                 if due_impacts:
                     candidates.append(min(due_impacts))
+                due_burns = [
+                    tick.at_ms
+                    for player in self.players.values()
+                    for tick in player.burns
+                    if tick.at_ms <= now_ms
+                ]
+                if due_burns:
+                    candidates.append(min(due_burns))
                 if self.round_ends_at_ms <= now_ms:
                     candidates.append(self.round_ends_at_ms)
             if not candidates:
@@ -282,6 +343,7 @@ class DuelEngine:
 
             if self.phase is Phase.PLAYING:
                 self._resolve_impacts_at(at_ms)
+                self._resolve_burns_at(at_ms)
 
             if self.phase is Phase.PLAYING and self.round_ends_at_ms == at_ms:
                 if self._has_lethal_player():
@@ -336,7 +398,7 @@ class DuelEngine:
         self.projectiles.clear()
         for player in self.players.values():
             player.ready = False
-            player.shield_until_ms = 0
+            player.clear_status()
         self.result = ResultSnapshot(
             outcome=Outcome.ABORTED,
             winner=None,
@@ -423,9 +485,7 @@ class DuelEngine:
         for slot, player in self.players.items():
             player.hp = MAX_HP
             player.ready = True
-            player.shield_until_ms = 0
-            player.offense_locked_until_ms = 0
-            player.offensive_recovery_until_ms = 0
+            player.clear_status()
             player.cooldown_until_ms.clear()
             self._seen_evidence[slot].clear()
             self._evidence_order[slot].clear()
@@ -446,27 +506,20 @@ class DuelEngine:
         self._remember_evidence(command)
 
         rule = SPELL_RULES[command.spell]
-        enabled = (
-            self.expelliarmus_enabled
-            if command.spell is Spell.EXPELLIARMUS
-            else rule.enabled
-        )
-        if not enabled:
+        if command.spell not in self.enabled_spells:
             return self._cast_reject(command, "spell_disabled")
+        if command.at_ms < player.bound_until_ms:
+            return self._cast_reject(command, "bound")
         if command.at_ms < player.cooldown_until_ms.get(command.spell, 0):
             return self._cast_reject(command, "cooldown")
-        if command.spell is not Spell.PROTEGO:
-            if command.at_ms < player.offense_locked_until_ms:
-                return self._cast_reject(command, "offense_locked")
-            if command.at_ms < player.offensive_recovery_until_ms:
-                return self._cast_reject(command, "offensive_recovery")
+        if command.at_ms < player.cast_recovery_until_ms:
+            return self._cast_reject(command, "cast_recovery")
+        if rule.offensive and command.at_ms < player.offense_locked_until_ms:
+            return self._cast_reject(command, "offense_locked")
 
         action_id = self._next_action_id()
         player.cooldown_until_ms[command.spell] = command.at_ms + rule.cooldown_ms
-        if command.spell is not Spell.PROTEGO:
-            player.offensive_recovery_until_ms = (
-                command.at_ms + OFFENSIVE_RECOVERY_MS
-            )
+        player.cast_recovery_until_ms = command.at_ms + CAST_RECOVERY_MS
 
         self._event(
             "castAccepted",
@@ -477,10 +530,26 @@ class DuelEngine:
             effect_id=self._next_effect_id(),
         )
 
-        if command.spell is Spell.PROTEGO:
+        if rule.shield_ms:
             player.shield_until_ms = command.at_ms + rule.shield_ms
             self._event(
                 "shieldRaised",
+                command.at_ms,
+                actor=command.slot,
+                spell=command.spell,
+                action_id=action_id,
+                effect_id=self._next_effect_id(),
+            )
+            return CommandDecision(
+                command_id=command.command_id,
+                command="cast",
+                accepted=True,
+                action_id=action_id,
+            )
+        if rule.barrier_ms:
+            player.barrier_until_ms = command.at_ms + rule.barrier_ms
+            self._event(
+                "barrierRaised",
                 command.at_ms,
                 actor=command.slot,
                 spell=command.spell,
@@ -499,13 +568,17 @@ class DuelEngine:
         projectile = Projectile(
             id=projectile_id,
             action_id=action_id,
-            spell=command.spell,  # type: ignore[arg-type]
+            spell=command.spell,
             caster=command.slot,
             target=target,
             launch_at_ms=command.at_ms,
             impact_at_ms=command.at_ms + rule.flight_ms,
             damage=rule.damage,
             offense_lock_ms=rule.offense_lock_ms,
+            bind_ms=rule.bind_ms,
+            burn_damage=rule.burn_damage,
+            burn_ticks=rule.burn_ticks,
+            burn_interval_ms=rule.burn_interval_ms,
         )
         self.projectiles.append(projectile)
         self._event(
@@ -552,8 +625,16 @@ class DuelEngine:
         ]
         for projectile in due:
             target = self.players[projectile.target]
-            if at_ms < target.shield_until_ms:
-                target.shield_until_ms = 0
+            blocked_by = (
+                "barrier"
+                if at_ms < target.barrier_until_ms
+                else "shield"
+                if at_ms < target.shield_until_ms
+                else None
+            )
+            if blocked_by is not None:
+                if blocked_by == "shield":
+                    target.shield_until_ms = 0
                 self._event(
                     "impactBlocked",
                     at_ms,
@@ -563,23 +644,27 @@ class DuelEngine:
                     action_id=projectile.action_id,
                     projectile_id=projectile.id,
                     effect_id=self._next_effect_id(),
+                    reason=blocked_by,
                 )
                 continue
 
-            amount = min(target.hp, projectile.damage)
-            target.hp -= amount
-            self._event(
-                "damage",
-                at_ms,
-                actor=projectile.caster,
-                target=projectile.target,
-                spell=projectile.spell,
-                action_id=projectile.action_id,
-                projectile_id=projectile.id,
-                effect_id=self._next_effect_id(),
-                amount=amount,
-            )
-            if projectile.offense_lock_ms and target.hp > 0:
+            if projectile.damage:
+                amount = min(target.hp, projectile.damage)
+                target.hp -= amount
+                self._event(
+                    "damage",
+                    at_ms,
+                    actor=projectile.caster,
+                    target=projectile.target,
+                    spell=projectile.spell,
+                    action_id=projectile.action_id,
+                    projectile_id=projectile.id,
+                    effect_id=self._next_effect_id(),
+                    amount=amount,
+                )
+            if target.hp == 0:
+                continue
+            if projectile.offense_lock_ms:
                 target.offense_locked_until_ms = max(
                     target.offense_locked_until_ms,
                     at_ms + projectile.offense_lock_ms,
@@ -593,6 +678,67 @@ class DuelEngine:
                     action_id=projectile.action_id,
                     projectile_id=projectile.id,
                     effect_id=self._next_effect_id(),
+                )
+            if projectile.bind_ms:
+                target.bound_until_ms = max(
+                    target.bound_until_ms, at_ms + projectile.bind_ms
+                )
+                self._event(
+                    "bodyBound",
+                    at_ms,
+                    actor=projectile.caster,
+                    target=projectile.target,
+                    spell=projectile.spell,
+                    action_id=projectile.action_id,
+                    projectile_id=projectile.id,
+                    effect_id=self._next_effect_id(),
+                    amount=projectile.bind_ms,
+                )
+            if projectile.burn_ticks and projectile.burn_damage:
+                # A fresh fire replaces an older one: burns never stack.
+                target.burns = [
+                    BurnTick(
+                        at_ms=at_ms + index * projectile.burn_interval_ms,
+                        amount=projectile.burn_damage,
+                        caster=projectile.caster,
+                        spell=projectile.spell,
+                        action_id=projectile.action_id,
+                    )
+                    for index in range(1, projectile.burn_ticks + 1)
+                ]
+                self._event(
+                    "burning",
+                    at_ms,
+                    actor=projectile.caster,
+                    target=projectile.target,
+                    spell=projectile.spell,
+                    action_id=projectile.action_id,
+                    projectile_id=projectile.id,
+                    effect_id=self._next_effect_id(),
+                    amount=projectile.burn_damage * projectile.burn_ticks,
+                )
+
+    def _resolve_burns_at(self, at_ms: int) -> None:
+        for slot in sorted(self.players, key=lambda item: item.value):
+            player = self.players[slot]
+            due = [tick for tick in player.burns if tick.at_ms == at_ms]
+            if not due:
+                continue
+            player.burns = [tick for tick in player.burns if tick.at_ms != at_ms]
+            for tick in due:
+                if player.hp == 0:
+                    continue
+                amount = min(player.hp, tick.amount)
+                player.hp -= amount
+                self._event(
+                    "burnDamage",
+                    at_ms,
+                    actor=tick.caster,
+                    target=slot,
+                    spell=tick.spell,
+                    action_id=tick.action_id,
+                    effect_id=self._next_effect_id(),
+                    amount=amount,
                 )
 
     def _finish_knockout(self, at_ms: int) -> None:
@@ -622,7 +768,7 @@ class DuelEngine:
         self.projectiles.clear()
         for player in self.players.values():
             player.ready = False
-            player.shield_until_ms = 0
+            player.clear_status()
         self.result = ResultSnapshot(
             outcome=outcome,
             winner=winner,

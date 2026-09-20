@@ -97,6 +97,9 @@ def test_health_requires_the_proxy_secret_and_reports_fixed_settings(
         "issue": "",
         "warmupMs": body["warmupMs"],
         "loadWarmMs": body["loadWarmMs"],
+        "deadlineMisses": 0,
+        "deadlineMissLimit": 3,
+        "lastInferenceMs": None,
     }
     assert isinstance(body["warmupMs"], int)
     assert isinstance(body["loadWarmMs"], int)
@@ -137,6 +140,33 @@ def test_noncanonical_words_never_become_a_spell() -> None:
     assert response.json()["spell"] is None
 
 
+@pytest.mark.parametrize(
+    ("heard", "text", "spell"),
+    [
+        ("Petrificus, Totalus!", "petrificus totalus", "petrificus-totalus"),
+        ("  Expecto   Patronum.", "expecto patronum", "expecto-patronum"),
+        ("Sectumsempra", "sectumsempra", "sectumsempra"),
+        ("Incendio!", "incendio", "incendio"),
+        ("Expelliarmus?", "expelliarmus", "expelliarmus"),
+        ("Petrificus", "petrificus", None),
+        ("Expecto Patronum Stupefy", "expecto patronum stupefy", None),
+        ("Stupify", "stupify", None),
+    ],
+)
+def test_two_word_incantations_are_exact_after_normalization(
+    heard: str, text: str, spell: str | None
+) -> None:
+    engine = FakeEngine(heard)
+    runtime = SpeechRuntime(loader=lambda: engine)
+    with TestClient(create_app(runtime=runtime, secret=SECRET)) as client:
+        response = client.post(
+            "/transcribe", headers=headers(), content=b"\x00\x00" * 1600
+        )
+    assert response.status_code == 200
+    assert response.json()["text"] == text
+    assert response.json()["spell"] == spell
+
+
 def test_single_worker_rejects_a_second_request_without_queueing() -> None:
     engine = BlockingEngine()
     runtime = SpeechRuntime(loader=lambda: engine)
@@ -165,20 +195,44 @@ def test_single_worker_rejects_a_second_request_without_queueing() -> None:
         assert engine.calls == 2
 
 
-def test_deadline_miss_makes_the_worker_unhealthy() -> None:
+def test_single_deadline_miss_is_a_504_but_the_worker_stays_healthy() -> None:
     runtime = SpeechRuntime(loader=lambda: SlowEngine(), generation=17)
-    request_headers = {**headers(), "X-Wand-Deadline-Budget-Ms": "1"}
+    slow = {**headers(), "X-Wand-Deadline-Budget-Ms": "1"}
     with TestClient(create_app(runtime=runtime, secret=SECRET)) as client:
-        response = client.post(
-            "/transcribe", headers=request_headers, content=b"\x00\x00" * 1600
-        )
+        response = client.post("/transcribe", headers=slow, content=b"\x00\x00" * 1600)
         assert response.status_code == 504
+        health = client.get(
+            "/health", headers={"X-Wand-Speech-Secret": SECRET}
+        ).json()
+        assert health["status"] == "ok"
+        assert health["workerAvailable"] is True
+        assert health["deadlineMisses"] == 1
+        assert health["lastInferenceMs"] >= 20
+        # A pass inside budget clears the streak.
+        ok = client.post("/transcribe", headers=headers(), content=b"\x00\x00" * 1600)
+        assert ok.status_code == 200
+        health = client.get(
+            "/health", headers={"X-Wand-Speech-Secret": SECRET}
+        ).json()
+        assert health["deadlineMisses"] == 0
+
+
+def test_three_consecutive_deadline_misses_make_the_worker_unhealthy() -> None:
+    runtime = SpeechRuntime(loader=lambda: SlowEngine(), generation=17)
+    slow = {**headers(), "X-Wand-Deadline-Budget-Ms": "1"}
+    with TestClient(create_app(runtime=runtime, secret=SECRET)) as client:
+        for _ in range(3):
+            response = client.post("/transcribe", headers=slow, content=b"\x00\x00" * 1600)
+            assert response.status_code == 504
         health = client.get(
             "/health", headers={"X-Wand-Speech-Secret": SECRET}
         ).json()
         assert health["status"] == "unhealthy"
         assert health["workerAvailable"] is False
+        assert health["deadlineMisses"] == 3
         assert health["issue"] == "Speech inference missed its caller deadline"
+        rejected = client.post("/transcribe", headers=headers(), content=b"\x00\x00" * 1600)
+        assert rejected.status_code == 503
 
 
 def test_request_limits_are_enforced_before_inference(client: TestClient) -> None:

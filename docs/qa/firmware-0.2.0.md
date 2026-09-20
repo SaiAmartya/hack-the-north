@@ -130,3 +130,29 @@ Then, in order, and please report each line's result verbatim:
 What I am looking for: (1) proves the discoverability fix; (2) and (3) prove the profile and the
 discontinuity fix on real radio; (4) validates the v3 recognizer on the badge's sensor (its noise and
 quantization differ from the iPhone); (5) proves auto-reconnect; (6) surfaces heap or link drift.
+
+## 0.2.2 — seven-spell cue codes (flashed)
+
+September 19, 2026 (late evening). Source change only in the presentation path: `proto.h` adds cue
+spell codes 4 Incendio, 5 Sectumsempra, 6 Petrificus Totalus, 7 Expecto Patronum (`SP_LAST`),
+`proto.cpp` validates `spell <= SP_LAST`, `present.cpp`/`leds.cpp` give each its display name and
+colour, and the TFT hint reads "Say the spell, make its move". Nothing changed in acquisition, the
+motion record, timing or power policy. Image 658,009 bytes flash / 26,384 bytes static RAM, app image
+688,032 bytes, SHA-256 `59ca598da2f4a3d8143e6d8f08a0465ced3c9d235ef4f6659798aa208150d630`.
+
+**Flashed to WAND-46BA** (device `e83dc12c46b8`): that badge had run a full-image 0.1.8 flash with the
+PlatformIO bootloader, so the guarded app-only `flash` refused; `restore-boot` rewrote the stock
+bootloader region (partition table already identical), then `flash` wrote and read back the app slot.
+Evidence: on-device `selftest` 0 failures (golden vectors, "CUE spell 7 accepted", "CUE spell 8
+invalid"); `wand_ble_check.py --name WAND-46BA --seconds 5` all pass: INFO 0.2.2, capabilities 0x0F,
+50 Hz/±8 g, spell 7 cue accepted, spell 8 rejected as invalid argument, 259 MOTION frames in 5.2 s
+(49.5 Hz, 0 sequence gaps, 0 discontinuity flags, 0 saturated), command RTT under load min 0 /
+median 47 / p95 109 ms, resting reading x=−31 y=155 z=1042 mg, health bits 0x0F. The physical QA card
+(six faces, clipping, load, reconnects, battery) remains open for this badge as for WAND-B602.
+
+**Axis note (teammate question, same evening):** the wire carries signed x, y, z per sample. The
+sensor's 12-bit two's-complement counts are converted in `accel.h::signed_counts`, remapped with the
+±1 sign map, encoded as little-endian int16 at MOTION bytes 12–17 and decoded with `getInt16` in the
+browser; the recognizer's stroke direction is the signed vector weighted by a positive scalar, so
+forward/back and up/down stay distinct (a synthetic +x template rejects −x, ±y and ±z strokes).
+The only magnitude-only quantity is the badge's local activity glow, which is never sent.

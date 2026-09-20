@@ -1,5 +1,16 @@
+import {
+  OFFENSIVE_SPELL_NAMES,
+  SPELL_NAMES,
+  isSpellName,
+  type SpellName,
+} from "./spells";
+
 export type Slot = "P1" | "P2";
-export type Spell = "stupefy" | "protego" | "expelliarmus";
+export type Spell = SpellName;
+export type OffensiveSpell = Extract<
+  Spell,
+  "stupefy" | "expelliarmus" | "incendio" | "sectumsempra" | "petrificus-totalus"
+>;
 export type Source = "phone" | "ble" | "replay";
 export type SpellRule = {
   spell: Spell;
@@ -9,12 +20,17 @@ export type SpellRule = {
   flightMs: number;
   shieldMs: number;
   offenseLockMs: number;
+  bindMs: number;
+  burnDamage: number;
+  burnTicks: number;
+  burnIntervalMs: number;
+  barrierMs: number;
 };
 export type Rules = {
   version: number;
   roundMs: number;
   maxHp: number;
-  offensiveRecoveryMs: number;
+  castRecoveryMs: number;
   spells: SpellRule[];
 };
 export type Player = {
@@ -30,14 +46,17 @@ export type Player = {
   hp: number;
   maxHp: number;
   shieldUntilMs: number;
+  barrierUntilMs: number;
   offenseLockedUntilMs: number;
-  offensiveRecoveryUntilMs: number;
+  boundUntilMs: number;
+  burningUntilMs: number;
+  castRecoveryUntilMs: number;
   cooldownUntilMs: Record<Spell, number>;
 };
 export type Projectile = {
   id: string;
   actionId: string;
-  spell: "stupefy" | "expelliarmus";
+  spell: OffensiveSpell;
   caster: Slot;
   target: Slot;
   launchAtMs: number;
@@ -79,32 +98,55 @@ export type Snapshot = {
   projectiles: Projectile[];
   recentEvents: GameEvent[];
 };
+const RULE_NUMBERS = [
+  "damage",
+  "cooldownMs",
+  "flightMs",
+  "shieldMs",
+  "offenseLockMs",
+  "bindMs",
+  "burnDamage",
+  "burnTicks",
+  "burnIntervalMs",
+  "barrierMs",
+] as const;
+const PLAYER_NUMBERS = [
+  "hp",
+  "maxHp",
+  "shieldUntilMs",
+  "barrierUntilMs",
+  "offenseLockedUntilMs",
+  "boundUntilMs",
+  "burningUntilMs",
+  "castRecoveryUntilMs",
+] as const;
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
 const finite = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v);
 const slot = (v: unknown): v is Slot => v === "P1" || v === "P2";
-const spell = (v: unknown): v is Spell =>
-  ["stupefy", "protego", "expelliarmus"].includes(String(v));
+const spell = (v: unknown): v is Spell => isSpellName(v);
+const offensive = (v: unknown): v is OffensiveSpell =>
+  isSpellName(v) && OFFENSIVE_SPELL_NAMES.includes(v);
 const deadline = (v: unknown) => v === null || finite(v);
 export function parseRules(value: unknown): Rules {
   if (
     !object(value) ||
-    value.version !== 1 ||
+    value.version !== 2 ||
     !finite(value.roundMs) ||
     !finite(value.maxHp) ||
-    !finite(value.offensiveRecoveryMs) ||
+    !finite(value.castRecoveryMs) ||
     !Array.isArray(value.spells) ||
-    value.spells.length > 3 ||
+    value.spells.length > SPELL_NAMES.length ||
     !value.spells.every(
       (r) =>
         object(r) &&
         spell(r.spell) &&
         typeof r.enabled === "boolean" &&
-        ["damage", "cooldownMs", "flightMs", "shieldMs", "offenseLockMs"].every(
-          (k) => finite(r[k]) && (r[k] as number) >= 0,
-        ),
-    )
+        RULE_NUMBERS.every((k) => finite(r[k]) && (r[k] as number) >= 0),
+    ) ||
+    new Set(value.spells.map((r) => (r as { spell: string }).spell)).size !==
+      value.spells.length
   )
     throw new Error("Unsupported game rules");
   return value as Rules;
@@ -167,13 +209,7 @@ export function parseSnapshot(value: unknown): Snapshot {
       ) ||
       !["inputGeneration", "bootId"].every((k) => deadline(p[k])) ||
       !(p.deviceId === null || typeof p.deviceId === "string") ||
-      ![
-        "hp",
-        "maxHp",
-        "shieldUntilMs",
-        "offenseLockedUntilMs",
-        "offensiveRecoveryUntilMs",
-      ].every((k) => finite(p[k])) ||
+      !PLAYER_NUMBERS.every((k) => finite(p[k])) ||
       !object(p.cooldownUntilMs) ||
       !Object.values(p.cooldownUntilMs).every(finite)
     )
@@ -187,7 +223,7 @@ export function parseSnapshot(value: unknown): Snapshot {
         object(p) &&
         typeof p.id === "string" &&
         typeof p.actionId === "string" &&
-        ["stupefy", "expelliarmus"].includes(String(p.spell)) &&
+        offensive(p.spell) &&
         slot(p.caster) &&
         slot(p.target) &&
         ["launchAtMs", "impactAtMs", "damage", "offenseLockMs"].every((k) =>

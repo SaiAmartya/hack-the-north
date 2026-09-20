@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { CapturedMotion } from "../wand/client";
 import { MotionFlag } from "../wand/protocol";
 import { MotionRecognizer, type GestureEvidence, type SpellName } from "./motion";
-import { RawMotionTraceBuilder, createCoreMotionFixtures, type CoreMotionFixtures } from "./traceFixtures";
+import { RawMotionTraceBuilder, STROKE_DIRECTIONS, createCoreMotionFixtures, createSevenSpellFixtures, type CoreMotionFixtures } from "./traceFixtures";
+import { SPELL_NAMES } from "../game/spells";
 import phoneJabs from "./fixtures/phone-jabs-2026-09-19.json";
 
 type Pose = readonly [number, number, number];
@@ -475,5 +476,83 @@ describe("fixture builder", () => {
       expect(all[index].browserMs - all[index - 1].browserMs).toBe(20);
       expect(all[index].flags & MotionFlag.Valid).toBe(MotionFlag.Valid);
     }
+  });
+});
+
+describe("seven spells on the DTW recognizer", () => {
+  it("learns all seven and recognizes each held-out movement exactly once", () => {
+    const fixtures = createSevenSpellFixtures();
+    const evidence: GestureEvidence[] = [];
+    const recognizer = new MotionRecognizer((item) => evidence.push(item));
+    const feed = (samples: readonly CapturedMotion[]) => samples.forEach((sample) => recognizer.push(sample, 3));
+    recognizer.beginCalibration();
+    feed(fixtures.stillness);
+    for (const spell of SPELL_NAMES) {
+      recognizer.beginGestureCalibration(spell);
+      fixtures.calibration[spell].forEach(feed);
+      expect(recognizer.getState().examplesBySpell[spell], `${spell}: ${recognizer.getState().lastIssue}`).toBe(3);
+    }
+    expect(recognizer.getState()).toMatchObject({ phase: "ready", enabledSpells: [...SPELL_NAMES], calibratedSpells: [...SPELL_NAMES] });
+    for (const spell of SPELL_NAMES) {
+      const before = evidence.length;
+      feed(fixtures.heldOut[spell]);
+      expect(evidence.slice(before).map((item) => item.spell), `${spell}: ${recognizer.getState().lastIssue} ${recognizer.getState().reason ?? ""}`).toEqual([spell]);
+    }
+    expect(evidence.every((item) => item.quality > 0 && item.quality <= 1)).toBe(true);
+  });
+
+  it("keeps stroke spells apart and refuses a stroke halfway between two of them", () => {
+    const fixtures = createSevenSpellFixtures();
+    const evidence: GestureEvidence[] = [];
+    const recognizer = new MotionRecognizer((item) => evidence.push(item));
+    const feed = (samples: readonly CapturedMotion[]) => samples.forEach((sample) => recognizer.push(sample, 3));
+    recognizer.beginCalibration();
+    feed(fixtures.stillness);
+    for (const spell of SPELL_NAMES) {
+      recognizer.beginGestureCalibration(spell);
+      fixtures.calibration[spell].forEach(feed);
+    }
+    expect(recognizer.getState().phase).toBe("ready");
+    const builder = new RawMotionTraceBuilder();
+    // Continue the same builder timeline: the fixtures' builder ended after the held-out circle.
+    const last = fixtures.heldOut["expecto-patronum"];
+    const offset = last[last.length - 1].browserMs + 400;
+    const shift = (samples: readonly CapturedMotion[]) => samples.map((sample, index) => ({ ...sample, browserMs: sample.browserMs + offset, captureMs: sample.captureMs + offset, breaksGesture: index === 0 }));
+    feed(shift(builder.stillness(600)));
+    const results: Record<string, string[]> = {};
+    for (const [spell, direction] of Object.entries(STROKE_DIRECTIONS)) {
+      const before = evidence.length;
+      feed(shift(builder.jab(900, 0, direction)));
+      results[spell] = evidence.slice(before).map((item) => item.spell);
+    }
+    expect(results).toEqual({
+      stupefy: ["stupefy"],
+      expelliarmus: ["expelliarmus"],
+      sectumsempra: ["sectumsempra"],
+      incendio: ["incendio"],
+      "petrificus-totalus": ["petrificus-totalus"],
+    });
+    const before = evidence.length;
+    feed(shift(builder.jab(900, 0, [0.7071, 0, 0.7071])));
+    expect(evidence.slice(before)).toEqual([]);
+  });
+
+  it("only offers learned spells and forgets an optional one when the grip is reset", () => {
+    const fixtures = createCoreMotionFixtures();
+    const recognizer = new MotionRecognizer(() => undefined);
+    const feed = (samples: readonly CapturedMotion[]) => samples.forEach((sample) => recognizer.push(sample, 3));
+    recognizer.beginCalibration();
+    feed(fixtures.stillness);
+    recognizer.beginGestureCalibration("stupefy");
+    fixtures.calibration.stupefy.forEach(feed);
+    recognizer.beginGestureCalibration("protego");
+    fixtures.calibration.protego.forEach(feed);
+    expect(recognizer.getState()).toMatchObject({ phase: "ready", enabledSpells: ["stupefy", "protego"] });
+    expect(() => recognizer.setEnabledSpells(["stupefy", "protego", "incendio"])).toThrow(/Calibrate Incendio/);
+    recognizer.beginGestureCalibration("expelliarmus");
+    fixtures.calibration.expelliarmus.forEach(feed);
+    expect(recognizer.getState().enabledSpells).toEqual(["stupefy", "protego", "expelliarmus"]);
+    recognizer.reset();
+    expect(recognizer.getState().enabledSpells).toEqual(["stupefy", "protego"]);
   });
 });

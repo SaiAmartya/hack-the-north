@@ -4,11 +4,20 @@ import { parseIceServers, parseRules, parseSnapshot } from "./contracts";
 
 describe("Python/TypeScript wire fixture", () => {
   it("accepts the exact Pydantic welcome, including not-yet-ready null fields", () => {
-    expect(
-      parseRules(fixture.rules)
-        .spells.filter((s) => s.enabled)
-        .map((s) => s.spell),
-    ).toEqual(["stupefy", "protego"]);
+    const rules = parseRules(fixture.rules);
+    expect(rules.version).toBe(2);
+    expect(rules.castRecoveryMs).toBe(500);
+    expect(rules.spells.filter((s) => s.enabled).map((s) => s.spell)).toEqual([
+      "stupefy",
+      "protego",
+      "expelliarmus",
+      "incendio",
+      "sectumsempra",
+      "petrificus-totalus",
+      "expecto-patronum",
+    ]);
+    expect(() => parseRules({ ...fixture.rules, version: 1 })).toThrow();
+    expect(parseSnapshot(fixture.snapshot).players.P1?.boundUntilMs).toBe(0);
     expect(parseSnapshot(fixture.snapshot).players.P1?.bootId).toBeNull();
     expect(
       parseSnapshot(fixture.snapshot).recentEvents[0].stateVersion,

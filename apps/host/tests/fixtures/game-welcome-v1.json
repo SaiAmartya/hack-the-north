@@ -5,14 +5,14 @@
   "roomId": "main",
   "connectionGeneration": 1,
   "rules": {
-    "version": 1,
+    "version": 2,
     "tickMs": 50,
     "countdownMs": 3000,
     "roundMs": 60000,
     "heartbeatMs": 500,
     "heartbeatTimeoutMs": 1500,
     "maxHp": 100,
-    "offensiveRecoveryMs": 600,
+    "castRecoveryMs": 500,
     "spells": [
       {
         "spell": "stupefy",
@@ -21,7 +21,12 @@
         "cooldownMs": 2000,
         "flightMs": 2000,
         "shieldMs": 0,
-        "offenseLockMs": 0
+        "offenseLockMs": 0,
+        "bindMs": 0,
+        "burnDamage": 0,
+        "burnTicks": 0,
+        "burnIntervalMs": 0,
+        "barrierMs": 0
       },
       {
         "spell": "protego",
@@ -30,16 +35,82 @@
         "cooldownMs": 3000,
         "flightMs": 0,
         "shieldMs": 1200,
-        "offenseLockMs": 0
+        "offenseLockMs": 0,
+        "bindMs": 0,
+        "burnDamage": 0,
+        "burnTicks": 0,
+        "burnIntervalMs": 0,
+        "barrierMs": 0
       },
       {
         "spell": "expelliarmus",
-        "enabled": false,
+        "enabled": true,
         "damage": 10,
         "cooldownMs": 6000,
         "flightMs": 2200,
         "shieldMs": 0,
-        "offenseLockMs": 1000
+        "offenseLockMs": 1000,
+        "bindMs": 0,
+        "burnDamage": 0,
+        "burnTicks": 0,
+        "burnIntervalMs": 0,
+        "barrierMs": 0
+      },
+      {
+        "spell": "incendio",
+        "enabled": true,
+        "damage": 8,
+        "cooldownMs": 6000,
+        "flightMs": 2000,
+        "shieldMs": 0,
+        "offenseLockMs": 0,
+        "bindMs": 0,
+        "burnDamage": 4,
+        "burnTicks": 3,
+        "burnIntervalMs": 1000,
+        "barrierMs": 0
+      },
+      {
+        "spell": "sectumsempra",
+        "enabled": true,
+        "damage": 35,
+        "cooldownMs": 9000,
+        "flightMs": 2800,
+        "shieldMs": 0,
+        "offenseLockMs": 0,
+        "bindMs": 0,
+        "burnDamage": 0,
+        "burnTicks": 0,
+        "burnIntervalMs": 0,
+        "barrierMs": 0
+      },
+      {
+        "spell": "petrificus-totalus",
+        "enabled": true,
+        "damage": 0,
+        "cooldownMs": 10000,
+        "flightMs": 2400,
+        "shieldMs": 0,
+        "offenseLockMs": 0,
+        "bindMs": 1500,
+        "burnDamage": 0,
+        "burnTicks": 0,
+        "burnIntervalMs": 0,
+        "barrierMs": 0
+      },
+      {
+        "spell": "expecto-patronum",
+        "enabled": true,
+        "damage": 0,
+        "cooldownMs": 15000,
+        "flightMs": 0,
+        "shieldMs": 0,
+        "offenseLockMs": 0,
+        "bindMs": 0,
+        "burnDamage": 0,
+        "burnTicks": 0,
+        "burnIntervalMs": 0,
+        "barrierMs": 3000
       }
     ]
   },
@@ -67,12 +138,19 @@
         "hp": 100,
         "maxHp": 100,
         "shieldUntilMs": 0,
+        "barrierUntilMs": 0,
         "offenseLockedUntilMs": 0,
-        "offensiveRecoveryUntilMs": 0,
+        "boundUntilMs": 0,
+        "burningUntilMs": 0,
+        "castRecoveryUntilMs": 0,
         "cooldownUntilMs": {
           "stupefy": 0,
           "protego": 0,
-          "expelliarmus": 0
+          "expelliarmus": 0,
+          "incendio": 0,
+          "sectumsempra": 0,
+          "petrificus-totalus": 0,
+          "expecto-patronum": 0
         }
       },
       "P2": null

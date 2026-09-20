@@ -73,6 +73,10 @@ export enum SpellCode {
   Stupefy = 1,
   Protego = 2,
   Expelliarmus = 3,
+  Incendio = 4,
+  Sectumsempra = 5,
+  PetrificusTotalus = 6,
+  ExpectoPatronum = 7,
 }
 
 export enum StatusKind {
@@ -599,7 +603,7 @@ function validateCue(command: CueCommand): void {
     CueEffect.AcceptedCast,
     CueEffect.RoundResult,
   );
-  assertEnumValue("spell", command.spell, SpellCode.None, SpellCode.Expelliarmus);
+  assertEnumValue("spell", command.spell, SpellCode.None, SpellCode.ExpectoPatronum);
   assertInteger("durationMs", command.durationMs, 1, MAX_CUE_DURATION_MS);
   assertNonzeroUint32("presentationEpoch", command.presentationEpoch);
   assertInteger("startBeforeMs", command.startBeforeMs, 0, 0xffff_ffff);

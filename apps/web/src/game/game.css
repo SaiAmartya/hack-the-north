@@ -482,7 +482,10 @@ progress {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  gap: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100% - 420px);
+  gap: 14px;
   padding: 12px 22px;
   border: 1px solid #c5a87255;
   border-radius: 22px;
@@ -499,6 +502,96 @@ progress {
 }
 .spell-slot.protego {
   color: #a4daff;
+}
+.spell-slot.expelliarmus {
+  color: #ffd98a;
+}
+.spell-slot.incendio {
+  color: #ffb27a;
+}
+.spell-slot.sectumsempra {
+  color: #e9e9ff;
+}
+.spell-slot.petrificus-totalus {
+  color: #b8c8ff;
+}
+.spell-slot.expecto-patronum {
+  color: #dff4ff;
+}
+.status-label,
+.opponent-status {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  font-size: 12px;
+  z-index: 5;
+  padding: 4px 12px;
+  border-radius: 12px;
+  background: #201929c8;
+}
+.status-label {
+  top: 72%;
+  color: #ffc7a1;
+}
+.opponent-status {
+  top: 12%;
+  color: #cbbdff;
+}
+.more-spells {
+  width: min(560px, 100%);
+  text-align: left;
+  border: 1px solid #d8cdb7;
+  border-radius: 16px;
+  padding: 8px 14px;
+  background: #fffdf8;
+}
+.more-spells summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: #4a3f6b;
+}
+.more-spells ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.more-spells li {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  color: #776e8c;
+}
+.more-spells li.learned {
+  color: #4b826b;
+}
+.more-spells li svg {
+  width: 40px;
+  height: 40px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.more-spells li b {
+  color: #29243d;
+}
+.more-spells li small {
+  display: block;
+  font-size: 12px;
+}
+.more-spells li button {
+  padding: 6px 14px;
+  font-size: 13px;
+}
+.more-spells-note {
+  font-size: 12px;
+  color: #776e8c;
+  margin: 10px 0 4px;
 }
 .spell-slot svg {
   width: 44px;

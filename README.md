@@ -2,7 +2,10 @@
 
 A two-player, motion-and-voice duel: React/Three.js presentation, a Python referee,
 video-only WebRTC and local speech recognition on each laptop. No button casting,
-cloud ASR, serial gameplay gateway or badge IDE dependency.
+cloud ASR, serial gameplay gateway or badge IDE dependency. Seven spells: Stupefy (jab), Protego
+(raise and hold), Expelliarmus (pull back), Incendio (flick up), Sectumsempra (slash), Petrificus
+Totalus (chop down) and Expecto Patronum (full circle); every player learns the first two, the rest
+are optional. Rules and numbers: [MVP section 3](MVP-OUTLINE.md#3-seven-spells-and-a-small-combat-engine).
 
 **This is an incomplete development checkpoint, not a qualified demo release.**
 The iPhone path has direct-first Wi-Fi, explicit Internet fallback, visible sensing and
@@ -57,8 +60,8 @@ in the guide, or for scripted QA. The stable build does not hot-reload; restart 
 source. **Ctrl+C** stops the stack. Phone setup, the LAN alternative, Render's limits and the
 demo checklist are in [the setup guide](docs/TEAM-SETUP.md).
 
-Badge firmware 0.2.1 is flashed on WAND-B602 and awaiting its physical QA card; the iPhone
-path is the parallel physical option. Neither physical path is qualified for a demo yet.
+Badge firmware 0.2.2 (seven-spell cue codes) is flashed on WAND-46BA, 0.2.1 on WAND-B602; both await
+their physical QA cards. The iPhone path is the parallel physical option. Neither physical path is qualified for a demo yet.
 
 ## Scripted QA
 

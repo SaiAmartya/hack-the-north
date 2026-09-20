@@ -336,18 +336,38 @@ describe("speech client lifecycle", () => {
     expect(platform.stopped).toBe(true);
   });
 
-  it("faults and clears the graph when the helper misses the final deadline", async () => {
+  it("drops the utterance but keeps listening when the helper misses the final deadline", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const evidence: SpeechEvidence[] = [];
+    client.onSpeech((item) => evidence.push(item));
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    expect(client.getSnapshot().phase).toBe("busy");
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(client.getSnapshot()).toMatchObject({
+      phase: "listening",
+      issue: "Speech result arrived too late; say it again",
+    });
+    expect(platform.stopped).toBe(false);
+    expect(platform.requests.at(-1)!.init?.signal?.aborted).toBe(true);
+    expect(evidence).toEqual([]);
+  });
+
+  it("treats a helper 504 as one late utterance, not a fault", async () => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
     await client.start();
     platform.calibrate();
     platform.utterance();
-    await vi.advanceTimersByTimeAsync(1000);
+    platform.transcriptions[0].resolve(new Response("late", { status: 504 }));
+    await flush();
     expect(client.getSnapshot()).toMatchObject({
-      phase: "fault",
-      issue: "Speech result missed the voice-end plus one-second deadline",
+      phase: "listening",
+      issue: "Speech result arrived too late; say it again",
     });
-    expect(platform.stopped).toBe(true);
+    expect(platform.stopped).toBe(false);
   });
 
   it("rejects stale callbacks after stop and invalidates immediately when hidden", async () => {

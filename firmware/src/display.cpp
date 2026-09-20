@@ -183,7 +183,7 @@ void draw(const View &v) {
   }
 
   f_cue.draw(v.cue, v.cue_color, true);
-  f_hint.draw(v.state_valid ? "Stupefy: jab   Protego: raise   Expelliarmus: sweep" : "Stupefy jab  Protego raise  Expelliarmus sweep");
+  f_hint.draw(v.state_valid ? "Say the spell, make its move" : "Stupefy jab  Protego raise  +5 more");
 
   int bar = (int)(v.activity * 300);
   if (bar < 0) bar = 0;
