@@ -110,20 +110,16 @@ Object.defineProperty(navigator, "bluetooth", {
 
 async function connectBadge(page: Page) {
   await page.getByRole("button", { name: "Connect badge", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Your wand is connected." })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Join battle", exact: true })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "Battle lobby" })).toBeVisible();
 }
 
-test("a paired wand can enter the battle immediately or leave practice without completing it", async ({ page }) => {
+test("a paired wand lands in the battle lobby at once, with no calibration or practice step", async ({ page }) => {
   await scriptedLaptop(page);
   await page.getByRole("button", { name: "Start a duel", exact: true }).click();
   await expect(page.getByLabel("Duel code")).toHaveText(/^[A-Z0-9]{6}$/);
   const code = await page.getByLabel("Duel code").textContent();
   await connectBadge(page);
-  await page.getByRole("button", { name: "Practice first", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Enable microphone", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Join battle", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Battle lobby" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /practice|calibrat|join battle/i })).toHaveCount(0);
   await expect(page.locator("main")).toHaveClass(/in-duel/);
   await expect(page.getByLabel("Duel code")).toHaveText(code!);
   await expect(page.getByText("Share this code with your rival.")).toBeVisible();
@@ -142,14 +138,12 @@ test("two player lobbies start a duel and recover visibility without choosing th
   await expect(page.getByLabel("Duel code")).toHaveText(/^[A-Z0-9]{6}$/);
   const code = (await page.getByLabel("Duel code").textContent())!;
   await connectBadge(page);
-  await page.getByRole("button", { name: "Join battle", exact: true }).click();
   await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeDisabled();
   const opponent = await context.newPage();
   const second = await scriptedLaptop(opponent);
   await opponent.getByLabel("Duel code").fill(code);
   await opponent.getByRole("button", { name: "Join with code", exact: true }).click();
   await connectBadge(opponent);
-  await opponent.getByRole("button", { name: "Join battle", exact: true }).click();
   for (const player of [page, opponent])
     await expect(player.getByText("Your rival has joined.")).toBeVisible();
   first.enableSpeech();

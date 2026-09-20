@@ -41,20 +41,21 @@ Windows PowerShell:
 That starts the game frontend and the local speech helper on this laptop (the pinned
 transcription model is downloaded on first use if it is missing) and connects them to the
 team's deployed referee, `https://wandduel-referee.onrender.com`, so any two laptops with
-internet can duel. iPhone pairing is included once the phone defaults have been saved with
-`tools/run_game.py --save-defaults --phone-service <origin> --phone-secret-file <file>`
-(`--no-phone` or `--badge-only` skips them for a run). A previous stack started by the
-launcher is stopped automatically before the new one comes up.
+internet can duel. iPhone pairing needs nothing else on the laptop: the deployed referee
+brokers the pairing service, so any laptop pairs any iPhone from the QR code. (The old
+`--save-defaults --phone-service <origin> --phone-secret-file <file>` setup is only for
+`--local-referee` play; `--no-phone` or `--badge-only` skip it.) A previous stack started by
+the launcher is stopped automatically before the new one comes up.
 
 Wait for **Game ready: http://127.0.0.1:5173** (a keep-alive job normally keeps the deployed
 referee awake; if it was asleep the first launch waits about a minute for it), then open that
 exact URL in desktop Chrome; a tab typed as `localhost:5173` is redirected there. One player clicks
 **Start a duel** and reads the six-character code to the other, who clicks **Join with code**;
 each then connects a badge or iPhone. One referee serves several duels at once, one per code.
-After pairing, **Join battle** opens the multiplayer lobby immediately. Quick play starts the
-microphone and uses a shared gesture profile (any firm jab is Stupefy, any held raise is Protego).
-Ready still requires healthy wand/microphone input, and every cast requires speech and movement.
-**Practice first** offers personal calibration; **Join battle** can skip that walkthrough.
+A paired wand lands straight in the battle lobby: the microphone starts for you and the
+recognizer uses one shared gesture profile (any firm jab is Stupefy, any held raise is Protego),
+so there is no calibration or practice step. Ready still requires healthy wand and microphone
+input, and every cast requires speech and movement.
 Switching laptop tabs pauses an active duel while retaining the wand connection where available;
 returning validates fresh input before a new Ready. See [multiplayer checks and remaining work](docs/qa/multiplayer-entry.md).
 

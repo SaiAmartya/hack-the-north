@@ -32,3 +32,10 @@ services:
         sync: false
       - key: WAND_TURN_API_TOKEN
         sync: false
+      # iPhone pairing for every laptop: the referee mints hosted pairing rooms with the phone
+      # service's enrollment secret, so no laptop needs the secret file. Set the secret in the
+      # Render dashboard (the value from the private enrollment file); never commit it.
+      - key: WAND_PHONE_SERVICE
+        value: https://wandduel-phone.saiamartya19.workers.dev
+      - key: WAND_PHONE_CREATE_SECRET
+        sync: false

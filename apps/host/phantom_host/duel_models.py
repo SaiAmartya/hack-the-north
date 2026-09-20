@@ -97,6 +97,7 @@ class HealthResponse(WireModel):
     multiplayer_ready: Literal[True] = True
     dev_relay_enabled: bool
     allow_replay: bool
+    phone_broker: bool = False
 
 
 class SpellRuleWire(WireModel):

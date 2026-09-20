@@ -113,6 +113,63 @@ def test_join_codes_address_independent_rooms():
             assert welcome["snapshot"]["players"]["P2"]["name"] == "Ron"
 
 
+def test_referee_brokers_hosted_phone_pairing_for_phone_sessions_only():
+    from phantom_host.duel_phone import PhoneSettings
+
+    room = "d" * 32
+    pair = {
+        "roomId": room,
+        "ownerToken": "e" * 64,
+        "expiresAtMs": int(time.time() * 1000) + 120_000,
+        "socketUrl": f"wss://phone.example/ws/{room}",
+        "phoneUrl": f"https://phone.example/phone?room={room}",
+    }
+    calls = []
+
+    def fetch(url, headers, body):
+        calls.append(url)
+        return json.dumps(pair).encode()
+
+    settings = DuelSettings(
+        dev_relay_enabled=True,
+        start_background_tick=False,
+        phone=PhoneSettings(service="https://phone.example", create_secret="s3cret"),
+    )
+    with TestClient(create_app(settings, phone_fetch=fetch)) as client:
+        assert client.get("/api/game/health").json()["phoneBroker"] is True
+        assert client.post("/api/game/phone/pair", headers=ORIGIN_HEADERS).status_code == 401
+        assert client.post(
+            "/api/game/phone/pair",
+            headers={**ORIGIN_HEADERS, "authorization": "Bearer nobody-knows-this-token"},
+        ).status_code == 401
+        badge = _session(client, "Badge")
+        refused = client.post(
+            "/api/game/phone/pair",
+            headers={**ORIGIN_HEADERS, "authorization": f"Bearer {badge['token']}"},
+        )
+        assert refused.status_code == 409 and refused.json() == {"detail": "phone_source_required"}
+        phone = _session(client, "Phone", source="phone")
+        assert client.post(
+            "/api/game/phone/pair",
+            headers={"authorization": f"Bearer {phone['token']}"},
+        ).status_code == 403
+        minted = client.post(
+            "/api/game/phone/pair",
+            headers={**ORIGIN_HEADERS, "authorization": f"Bearer {phone['token']}"},
+        )
+        assert minted.status_code == 200, minted.text
+        assert minted.json() == pair
+        assert calls == ["https://phone.example/api/rooms"]
+
+    with TestClient(create_app(DuelSettings(dev_relay_enabled=True, start_background_tick=False))) as client:
+        assert client.get("/api/game/health").json()["phoneBroker"] is False
+        phone = _session(client, "Phone", source="phone")
+        assert client.post(
+            "/api/game/phone/pair",
+            headers={**ORIGIN_HEADERS, "authorization": f"Bearer {phone['token']}"},
+        ).status_code == 404
+
+
 def test_room_creation_is_capped_per_process():
     settings = DuelSettings(start_background_tick=False)
     with TestClient(create_app(settings)) as client:

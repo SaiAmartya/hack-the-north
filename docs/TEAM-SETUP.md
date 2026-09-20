@@ -20,11 +20,10 @@ change certificate trust, open firewall rules or flash a badge automatically.
 - iPhone recognition has been rebuilt, but real held-out movement/speech testing is pending.
   Internet relay has an unresolved intermittent 500 ms freshness failure. Prefer the direct
   route for the next physical test; do not describe either input as fully qualified yet.
-- The existing public phone service is already deployed. Teammates do **not** need Wrangler,
-  a Cloudflare login, a new deployment, API keys for speech, or a phone certificate installation.
-  They do need the existing phone enrollment credential supplied privately by Sai/the service owner.
-- The game referee is already deployed too (Section 5); a plain launcher run uses it, so two
-  laptops anywhere with internet can duel with nothing else to set up.
+- The public phone service and the game referee are already deployed. Teammates need **no**
+  Wrangler, Cloudflare login, deployment, API key, certificate or credential: a plain launcher
+  run uses the deployed referee (Section 5), which also brokers iPhone pairing for every
+  laptop, so two laptops anywhere with internet can duel with nothing else to set up.
 
 Clone, or update an existing checkout without discarding local work:
 
@@ -107,14 +106,20 @@ failure.
 
 ## 3. Connect an iPhone
 
-A plain launcher stack that is still running is stopped automatically when you rerun the
-launcher below. Ask Sai/the service owner to provide the **existing** enrollment-secret file
-through an approved private channel. Store it outside the repository,
-readable only by your user. On macOS the launcher requires mode `0600`; on Windows restrict
-the file's Security permissions to its intended owner. Do not paste the value into commands,
-chat, screenshots, `.env`, URLs or logs. Generating a new local value will not match the service.
+Nothing to install: with the deployed referee (the default), **Connect iPhone** asks the referee
+to mint the pairing room, and the referee holds the phone service's enrollment secret. Any
+laptop pairs any iPhone by scanning the QR; no certificate, secret file or extra launcher flag.
+Skip to the numbered steps below.
 
-The following paths are examples for that privately delivered file; they do not create it.
+**Only for `--local-referee` or LAN play** (Section 4), where no deployed referee is involved,
+this laptop must broker pairing itself with the secret file. Ask Sai/the service owner for the
+**existing** enrollment-secret file through an approved private channel. Store it outside the
+repository, readable only by your user. On macOS the launcher requires mode `0600`; on Windows
+restrict the file's Security permissions to its intended owner. Do not paste the value into
+commands, chat, screenshots, `.env`, URLs or logs. Generating a new local value will not match
+the service. A plain launcher stack that is still running is stopped automatically when you
+rerun the launcher. The following paths are examples for that privately delivered file; they
+do not create it.
 
 macOS, from the root:
 
@@ -146,19 +151,12 @@ a plain `tools/run_game.py` uses those defaults, `--no-phone` ignores them for o
    changes route during play. Internet is needed for initial QR pairing/signalling either way.
 3. Move gently. Check **Sensor active** and **Reaching laptop** on the phone. If either fails,
    open Connection details; socket connection alone does not mean valid motion is arriving.
-4. **Quick play (default):** after pairing, choose **Join battle** to enter the lobby immediately.
-   As soon as the wand streams, the laptop microphone is started for
-   you (allow it and give it two seconds of quiet) and a generic gesture profile is active: any
-   firm jab is Stupefy, any held raise is Protego, lowering the wand is ignored. Enable the
-   camera if you like, then **Ready**. Speech and a matching movement are still both required
-   for every cast.
-5. **Personal calibration (optional):** choose **Practice first**. **Join battle** can skip this
-   walkthrough at any point. Find a comfortable grip (sideways/slightly diagonal is recommended; another consistent
-   grip is valid), tap **Start calibration**, hold still for three visible seconds, then follow
-   three jabs and three guard examples, and cast each spell once in practice before Ready.
-   Calibration is movement-only. Do not jab harder to overcome a rejection. Return to the
-   starting grip between attempts; **Reset grip** is for an intentional grip change without
-   re-pairing.
+4. As soon as the wand streams you are in the **battle lobby**: the laptop microphone is
+   started for you (allow it and give it two seconds of quiet) and one shared gesture profile is
+   active for everyone: any firm jab is Stupefy, any held raise is Protego, lowering the wand is
+   ignored. There is no calibration or practice step. Try a spell in the lobby if you like (the
+   announcement shows what was heard and seen), enable the camera, then **Ready**. Speech and a
+   matching movement are still both required for every cast.
 
 Switching laptop tabs retains the selected wand where available, pauses input and aborts an active
 duel. Returning checks fresh input; microphone and battle recovery stay available in the lobby.
@@ -269,8 +267,8 @@ no uptime guarantee. Checked against Render's documentation on September 19, 202
 1. Freeze `main`; do not deploy the referee on demo day.
 2. Both laptops: `tools/run_game.py` two minutes early. Confirm `Game ready` and the
    `Hosted referee:` line, then leave the terminals open.
-3. Player A **Start a duel**, player B **Join with code**; both connect wands, calibrate,
-   practice, enable cameras, Ready.
+3. Player A **Start a duel**, player B **Join with code**; both connect wands, allow the
+   microphone, enable cameras, Ready.
 4. If video never appears, share a hotspot or add the TURN key. If Render is unreachable,
    fall back to Section 4 over a hotspot.
 
@@ -328,12 +326,12 @@ in [the input rebuild report](qa/input-rebuild.md).
 | --- | --- |
 | No `Game ready` / speech unavailable | Keep the first startup error. Verify Python 3.11 environment, speech extra, pinned model path (internet is needed for its one-time download) and free ports. Do not start a second partial stack. |
 | `DLL load failed` / native dependency error on Windows | Capture only the package/error and Python/architecture versions. Windows runtime setup needs qualification; do not substitute cloud speech or remove health gates. |
-| Phone hosting unavailable | Use both hosted-service flags (or saved defaults), the existing approved credential, private file permissions and working internet. A failed or cancelled pairing attempt can be retried at once; the page shows the broker's own reason, and only a successful pair starts a two-second cooldown (`Wait a moment, then reconnect`). Never print the credential. |
+| `iPhone pairing is not set up on this referee.` or `Phone connection unavailable` | With the deployed referee this means its `WAND_PHONE_SERVICE`/`WAND_PHONE_CREATE_SECRET` environment variables are missing or wrong (service owner: set them in Render and restart between matches). With `--local-referee`, use both hosted-service flags (or saved defaults), the existing credential, private file permissions and working internet. A failed or cancelled pairing attempt can be retried at once; only a successful pair starts a two-second cooldown (`Wait a moment, then reconnect`). Never print the credential. |
 | Laptop shows `Connection interrupted. Reconnecting…` after Connect iPhone and never recovers | Check the address bar: the game must be open at `http://127.0.0.1:5173`. The hosted phone service refuses the laptop's connection from any other origin, `localhost:5173` included; the frontend now redirects such a tab to the exact origin, so close or reload an older tab. If the origin is already correct, report route and last failure from Connection details. |
 | Certificate warning | The selected phone URL must be the public HTTPS service, not a stale LAN-IP bookmark. Start from a fresh QR; do not bypass TLS warnings. |
 | Direct connection unavailable | Check venue peer isolation; explicitly try Internet if desired. Its intermittent freshness failure is still open. Do not loosen timing limits. |
 | Sensor active, but no Reaching laptop | Report route, received rate, age and visible last failure from Connection details. Export a trace only deliberately. |
-| Jab/guard counter stuck | Report its actionable hint; Reset grip and hold the same starting grip. Share a fresh trace if requested. Physical classifier accuracy is not yet qualified. |
+| Spells not recognized in the lobby | Speech and movement are both required: say the exact spell name while jabbing (Stupefy) or raising and holding the wand (Protego). The shared profile accepts any firm jab direction; a weak wobble or a slow tilt is ignored on purpose. Watch the announcement line, which shows the heard spell and the accepted movement; report which half is missing. |
 | Badge missing after a cold boot | A badge still on 0.1.8 boots with BLE off after any power cycle. Flash the current 0.2.x image (0.2.1: radio on for every reset, advertising watchdog, brownout soft start); check `id` on the console, not repeated blind reconnects. |
 | Badge says firmware needs repair / diagnostic INFO only | The badge is on a 0.1.x image or a diagnostic boot row (`profile creator|rate`). Flash 0.2.1 or select `profile range on`; never restore capability bits in the browser. |
 | Laptop says Reconnecting your badge… | Normal bounded auto-reconnect after a dropped link (up to three per minute). If it ends in Reconnect badge, press it once; if that fails, power-cycle the badge and report `status`. |

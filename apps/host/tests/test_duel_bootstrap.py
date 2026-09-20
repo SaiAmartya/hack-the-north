@@ -29,6 +29,7 @@ def test_bootstrap_exposes_isolated_game_authority_and_no_legacy_reset():
             "multiplayerReady": True,
             "devRelayEnabled": False,
             "allowReplay": False,
+            "phoneBroker": False,
         }
         assert client.post("/match/reset").status_code == 404
         rules = client.get("/api/game/rules").json()

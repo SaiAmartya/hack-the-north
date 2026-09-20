@@ -4,7 +4,7 @@ The product is a game, not a development dashboard. A friendly wizard-school set
 
 ## Player experience
 
-One task per screen: **Connect wand → Join battle → battle lobby → Ready → duel → rematch.** The lobby is available as soon as the wand pairs; Ready still requires fresh input and a healthy microphone. **Practice first** offers the optional personal flow: microphone → illustrated grip → Start calibration → visible stillness → three jabs → three guards → cast each spell. **Join battle** can skip that walkthrough using the shared quick-play profile. Calibration never starts behind microphone setup.
+One task per screen: **Start or join a duel → Connect wand → battle lobby → Ready → duel → rematch.** The lobby opens the moment the wand streams; the microphone is started for the player and one shared gesture profile serves everyone, so there is no calibration or practice screen. Ready still requires fresh input and a healthy microphone.
 
 Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synthetic replay is never a third way to play.
 
@@ -14,7 +14,7 @@ Supported choices are Bluetooth badge and iPhone. Both are physical inputs; synt
 - Coaching is brief and physical: “Hold your wand still,” “Three gentle jabs,” “Raise. Tilt. Hold.” Success appears only after observed input.
 - Show one actionable fault at a time. Device/profile incompatibility is a setup failure, never a cosmetic warning permitting play.
 - The phone has two essential, expiring player indicators: **Sensor active** (fresh finite acceleration) and **Reaching laptop** (laptop-confirmed accepted input). A small acceleration-responsive orb and synchronized coaching/example dots make movement visible. Optional **Connection details** reveals observed/received rate, age and last issue, with an explicit sanitized trace download. These are necessary input feedback, not a general debugging dashboard; no gyro claim.
-- **Reset grip** restarts visible stillness without disconnecting. Show one actionable retry hint and the current movement stage, never a silent 0/3. A diagnostic badge offers **Use iPhone**, not a futile reconnect loop. Direct Wi-Fi failure offers **Use internet connection** explicitly; never switch routes during a round.
+- The lobby announces each heard spell and accepted movement so a missed cast is explained, never silent. A diagnostic badge offers **Use iPhone**, not a futile reconnect loop. Direct Wi-Fi failure offers **Use internet connection** explicitly; never switch routes during a round.
 - Recommend a comfortable sideways/slightly diagonal grip with an angled illustration. Other consistent grips are valid; never demand portrait, screen-facing or top-edge-up. Coach return to the learned starting grip, not an absolute device axis. Screen rotation must not interrupt play.
 - Keep test routes behind `VITE_WAND_QA=1`; they are never linked from the game and are excluded from the default production bundle. Automated replay remains a regression tool, not a player feature.
 

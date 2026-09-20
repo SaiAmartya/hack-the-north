@@ -82,15 +82,6 @@ export function SpellGlyph({ spell }: { spell: Spell }) {
     </svg>
   );
 }
-function GripGuide() {
-  return <svg className="grip-guide" viewBox="0 0 160 120" role="img" aria-label="Hold your wand comfortably on its side at a slight diagonal. We learn your starting grip.">
-    <g transform="rotate(60 80 60)">
-    <rect x="54" y="15" width="52" height="85" rx="10" fill="none" stroke="currentColor" strokeWidth="4" />
-    <path d="M72 25h16M76 90h8M117 64h27m-9-9 9 9-9 9M43 50H16m9-9-9 9 9 9" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx="80" cy="58" r="12" fill="currentColor" opacity=".15" />
-    </g>
-  </svg>;
-}
 export function GameApp() {
   const [controller, setController] = useState<DuelController>();
   const [, redraw] = useState(0);
@@ -147,14 +138,12 @@ export function GameApp() {
     if (game && slot) effects.current?.update(game, slot);
   }, [game, slot]);
   const live = game?.phase === "playing" || game?.phase === "countdown";
-  const motion = c?.motion.getState(),
-    mic = c?.speech.getSnapshot();
+  const mic = c?.speech.getSnapshot();
   const wandReady = c?.wand?.getSnapshot().phase === "streaming";
   const wand = c?.wand?.getSnapshot();
   const phone = c?.phoneSession?.getState();
   const pairingPhone = c?.source === "phone" && c.busy && !wandReady;
   const micReady = mic?.phase === "listening" || mic?.phase === "busy";
-  const practice = motion?.phase === "ready" && micReady;
   const issue =
     c?.issue ||
     c?.game.issue ||
@@ -163,7 +152,7 @@ export function GameApp() {
     renderIssue;
   const now = c?.game.now() ?? 0;
   const result = game?.result;
-  const inLobby = c?.battleLobby && c.source && !pairingPhone;
+  const inLobby = Boolean(c?.source) && !pairingPhone && (c!.battleLobby || wandReady);
   const battle = live || inLobby;
   const checkingWand = c?.busy || ["recovering", "validating", "synchronizing", "suspended"].includes(wand?.phase ?? "");
   const startingMic = mic?.phase === "starting" || mic?.phase === "calibrating";
@@ -320,18 +309,14 @@ export function GameApp() {
                   <button disabled={startingMic} onClick={() => void c.startMic()}>
                     {mic?.phase === "calibrating" ? "A moment of quiet…" : startingMic ? "Warming up…" : "Enable microphone"}
                   </button>
-                ) : motion?.phase === "resuming" ? <p role="status">Hold your wand still for a moment.</p>
-                  : !c.practiceComplete() ? <p role="status">Cast each spell once, or practice your grip again.</p> : null}
+                ) : null}
                 <div className="ready-actions">
                   {!c.localVideo && <button className="secondary" onClick={() => void c.startCamera(low)}>Enable camera</button>}
-                  <button disabled={!c.healthy() || !c.practiceComplete() || c.busy || !!me?.ready} onClick={() => c.ready()}>
+                  <button disabled={!c.healthy() || c.busy || !!me?.ready} onClick={() => c.ready()}>
                     {me?.ready ? "Waiting for opponent…" : result ? "Rematch" : "Ready"}
                   </button>
                 </div>
                 {c.localVideo && <Video stream={c.localVideo} className="setup-preview" label="Your camera" />}
-                {wandReady && !me?.ready && (
-                  <button className="quiet" onClick={() => c.startCalibration()}>Practice first</button>
-                )}
               </>
             ) : !c?.roomCode ? (
               <>
@@ -468,7 +453,7 @@ export function GameApp() {
                   Cancel
                 </button>
               </>
-            ) : !wandReady ? (
+            ) : (
               <>
                 <div className="result-star" aria-hidden="true">
                   ✧
@@ -489,152 +474,6 @@ export function GameApp() {
                 )}
                 {phone?.relayAvailable && <button className="secondary" onClick={() => c.phoneSession?.chooseRelay()}>Use internet connection</button>}
               </>
-            ) : c.quickPlay ? (
-              <>
-                <div className="result-star" aria-hidden="true">✧</div>
-                <h1>Your wand is connected.</h1>
-                <button onClick={() => c.enterBattle()}>Join battle</button>
-                <button className="quiet" onClick={() => c.startCalibration()}>Practice first</button>
-              </>
-            ) : !micReady ? (
-              <>
-                <div className="result-star" aria-hidden="true">
-                  ♪
-                </div>
-                <h1>
-                  {mic?.phase === "calibrating"
-                    ? "A moment of quiet…"
-                    : mic?.phase === "starting"
-                      ? "Warming up…"
-                      : "Speak your magic."}
-                </h1>
-                <button
-                  onClick={() => void c.startMic()}
-                  disabled={
-                    mic?.phase === "starting" || mic?.phase === "calibrating"
-                  }
-                >
-                  Enable microphone
-                </button>
-              </>
-            ) : motion?.phase === "uncalibrated" || motion?.phase === "fault" ? (
-              <>
-                <GripGuide />
-                <h1>Find your wand grip.</h1>
-                <p>Try sideways, slightly diagonal. We’ll learn your grip.</p>
-                <button onClick={() => c.startCalibration()}>Start calibration</button>
-              </>
-            ) : motion?.phase === "stillness" || motion?.phase === "resuming" ? (
-              <>
-                <div className="result-star" aria-hidden="true">
-                  ✧
-                </div>
-                <h1>{motion.phase === "resuming" ? "Hold still for a moment." : "Hold your wand still."}</h1>
-                <progress
-                  max={motion.progressTargetMs || 1500}
-                  value={motion.progressMs}
-                  aria-label="Stillness calibration"
-                />
-                <p role="status">{motion.reason === "keep-still" ? "Keep still; the timer restarts on its own." : "Keep this comfortable grip."}</p>
-                <button className="quiet" onClick={() => c.startCalibration()}>Reset grip</button>
-              </>
-            ) : !practice ? (
-              <>
-                <SpellGlyph
-                  spell={
-                    motion?.calibratingSpell ??
-                    (!motion?.calibratedSpells.includes("stupefy")
-                      ? "stupefy"
-                      : "protego")
-                  }
-                />
-                <h1>
-                  {motion?.calibratingSpell
-                    ? motion.calibratingSpell === "stupefy"
-                      ? "Jab forward, three times."
-                      : "Raise, hold, lower. Three times."
-                    : "Learn your wand."}
-                </h1>
-                {motion?.calibratingSpell ? (
-                  <>
-                    <p>{motion.examplesBySpell[motion.calibratingSpell]} / 3</p>
-                    <p role="status">{motion.lastIssue || ({ "hold-still": "Hold still", "return-neutral": "Hold still", armed: "Ready when you are", moving: "Moving…", settling: "Settling…", ready: "Got it" }[motion.progress])}</p>
-                  </>
-                ) : (
-                  <button
-                    onClick={() =>
-                      c.calibrate(
-                        !motion?.calibratedSpells.includes("stupefy")
-                          ? "stupefy"
-                          : "protego",
-                      )
-                    }
-                  >
-                    Practice{" "}
-                    {!motion?.calibratedSpells.includes("stupefy")
-                      ? "Stupefy"
-                      : "Protego"}
-                  </button>
-                )}
-                <button className="quiet" onClick={() => c.startCalibration()}>Reset grip</button>
-              </>
-            ) : (
-              <>
-                <div className="practice-spells">
-                  {(["stupefy", "protego"] as Spell[]).map((spell) => (
-                    <div
-                      key={spell}
-                      className={c.practiced.has(spell) ? "learned" : ""}
-                    >
-                      <SpellGlyph spell={spell} />
-                      <span>
-                        {nameOf(spell)} {c.practiced.has(spell) ? "✓" : ""}
-                      </span>
-                      <small>
-                        {spell === "stupefy" ? "Jab + speak" : "Raise + speak"}
-                      </small>
-                    </div>
-                  ))}
-                </div>
-                <h1>
-                  {me?.ready
-                    ? "Waiting for your rival…"
-                    : !c.practiceComplete()
-                      ? "Cast each spell once."
-                      : "Ready to duel?"}
-                </h1>
-                <p className="pair-status" role="status">
-                  Duel code {c.roomCode}
-                </p>
-                <div className="ready-actions">
-                  {!c.localVideo && (
-                    <button
-                      className="secondary"
-                      onClick={() => void c.startCamera(low)}
-                    >
-                      Enable camera
-                    </button>
-                  )}
-                  <button
-                    disabled={
-                      !c.practiceComplete() || !c.healthy() || !!me?.ready
-                    }
-                    onClick={() => c.ready()}
-                  >
-                    Ready
-                  </button>
-                </div>
-                {c.localVideo && (
-                  <Video
-                    stream={c.localVideo}
-                    className="setup-preview"
-                    label="Your camera"
-                  />
-                )}
-              </>
-            )}
-            {wandReady && c && !c.battleLobby && !c.quickPlay && (
-              <button className="quiet" onClick={() => c.enterBattle()}>Join battle</button>
             )}
           </section>
         )}

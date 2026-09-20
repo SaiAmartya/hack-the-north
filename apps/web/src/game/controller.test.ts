@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DuelController } from "./controller";
 import { SpeechClient, type SpeechOnset } from "../speech/client";
-import { WandClient, type CapturedMotion } from "../wand/client";
+import { WandClient } from "../wand/client";
 import { GameClient } from "./client";
-import { createCoreMotionFixtures } from "../input/traceFixtures";
 
 class FakeWebSocket {
   static readonly OPEN = 1;
@@ -88,50 +87,6 @@ it("does not admit speech beginning during calibration into fusion", () => {
   controller.destroy();
 });
 
-it("keeps recognition paused through motion calibration and enables it for practice", async () => {
-  let sample!: (value: CapturedMotion) => void;
-  vi.spyOn(WandClient.prototype, "onSample").mockImplementation((callback) => {
-    sample = callback;
-    return () => {};
-  });
-  vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
-  const getSnapshot = WandClient.prototype.getSnapshot;
-  vi.spyOn(WandClient.prototype, "getSnapshot").mockImplementation(function (this: WandClient) {
-    return { ...getSnapshot.call(this), phase: "streaming" };
-  });
-  vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
-  vi.stubGlobal("navigator", { bluetooth: { requestDevice: vi.fn() } });
-  const controller = new DuelController();
-  controller.roomCode = "K7X2PD";
-  controller.quickPlay = false; // the personal calibration flow
-  const recognition = vi.spyOn(controller.speech, "setRecognitionEnabled");
-  const microphone = vi.spyOn(controller.speech, "start").mockResolvedValue();
-  await controller.startMic();
-  expect(recognition).toHaveBeenLastCalledWith(false);
-  expect(recognition.mock.invocationCallOrder[0]).toBeLessThan(
-    microphone.mock.invocationCallOrder[0],
-  );
-  await controller.connect("ble");
-  const fixtures = createCoreMotionFixtures();
-  fixtures.stillness.forEach(sample);
-  expect(controller.motion.getState().phase).toBe("uncalibrated");
-  controller.startCalibration();
-  fixtures.stillness.forEach(sample);
-  controller.calibrate("stupefy");
-  fixtures.calibration.stupefy.forEach((trace) => trace.forEach(sample));
-  controller.calibrate("protego");
-  // Two guards, each followed by lowering the wand again.
-  fixtures.calibration.protego.slice(0, 4).forEach((trace) => trace.forEach(sample));
-  expect(recognition.mock.calls.every(([enabled]) => !enabled)).toBe(true);
-
-  fixtures.calibration.protego.slice(4).forEach((trace) => trace.forEach(sample));
-  expect(controller.motion.getState().phase).toBe("ready");
-  expect(recognition).toHaveBeenLastCalledWith(true);
-  controller.calibrate("stupefy");
-  expect(recognition).toHaveBeenLastCalledWith(false);
-  controller.destroy();
-});
-
 it("uses POST-only local brokers and requires explicit hosted phone approval", async () => {
   const roomId = "1".repeat(32),
     ownerToken = "2".repeat(64),
@@ -207,10 +162,67 @@ it("uses POST-only local brokers and requires explicit hosted phone approval", a
   controller.destroy();
 });
 
-it("keeps the trusted-LAN code flow when hosted pairing is disabled", async () => {
+it("pairs through the referee when this laptop holds no phone secret", async () => {
+  const roomId = "4".repeat(32),
+    ownerToken = "5".repeat(64);
+  const pair = {
+    roomId,
+    ownerToken,
+    expiresAtMs: Date.now() + 120_000,
+    socketUrl: `wss://wand.example/ws/${roomId}`,
+    phoneUrl: `https://wand.example/phone?room=${roomId}`,
+  };
   const fetchMock = vi
     .fn<typeof fetch>()
-    .mockResolvedValueOnce(Response.json({ enabled: false }));
+    .mockResolvedValueOnce(Response.json({ enabled: false }))
+    .mockResolvedValueOnce(Response.json({ version: 1, stage: "game", multiplayerReady: true, devRelayEnabled: true, allowReplay: false, phoneBroker: true }))
+    .mockResolvedValueOnce(Response.json(pair))
+    .mockResolvedValue(new Response(null, { status: 204 })); // the session release on cancel
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("location", { protocol: "http:", origin: "http://127.0.0.1:5173", host: "127.0.0.1:5173" });
+  vi.stubGlobal("WebSocket", FakeWebSocket);
+  vi.spyOn(GameClient.prototype, "connect").mockImplementation(async function (this: GameClient) {
+    this.token = "game-token-".padEnd(32, "x");
+  });
+  const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
+
+  const connecting = controller.connect("phone");
+  for (let round = 0; round < 6; round++) await flushPromises();
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/phone/config", "/api/game/health", "/api/game/phone/pair"]);
+  const pairRequest = fetchMock.mock.calls[2][1] as RequestInit;
+  expect(pairRequest.method).toBe("POST");
+  expect((pairRequest.headers as Record<string, string>).Authorization).toBe("Bearer game-token-xxxxxxxxxxxxxxxxxxxxx");
+  expect(controller.phoneHosted).toBe(true);
+  expect(controller.phoneUrl).toBe(pair.phoneUrl);
+  expect(FakeWebSocket.instances[0].url).toBe(pair.socketUrl);
+
+  controller.cancelPhonePairing();
+  await connecting;
+  controller.destroy();
+});
+
+it("explains a referee without phone pairing instead of asking for certificates", async () => {
+  const fetchMock = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ enabled: false }))
+    .mockResolvedValueOnce(Response.json({ version: 1, stage: "game", multiplayerReady: true, devRelayEnabled: true, allowReplay: false, phoneBroker: false }));
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("location", { protocol: "http:", origin: "http://127.0.0.1:5173", host: "127.0.0.1:5173" });
+  const gameConnect = vi.spyOn(GameClient.prototype, "connect").mockResolvedValue();
+  const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
+  await controller.connect("phone");
+  expect(controller.issue).toBe("iPhone pairing is not set up on this referee.");
+  expect(gameConnect).not.toHaveBeenCalled();
+  controller.destroy();
+});
+
+it("keeps the trusted-LAN code flow when neither this laptop nor the referee brokers pairing", async () => {
+  const fetchMock = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ enabled: false }))
+    .mockResolvedValueOnce(Response.json({ version: 1, stage: "game", multiplayerReady: true, devRelayEnabled: true, allowReplay: false, phoneBroker: false }));
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("location", {
     protocol: "https:",
@@ -240,7 +252,7 @@ it("keeps the trusted-LAN code flow when hosted pairing is disabled", async () =
   controller.destroy();
 });
 
-it("quick play readies with a connected wand: generic profile, microphone started, no practice", async () => {
+it("a streaming wand is enough: shared profile, microphone started, lobby open, no practice gate", async () => {
   vi.spyOn(WandClient.prototype, "onSample").mockImplementation(() => () => {});
   vi.spyOn(WandClient.prototype, "connect").mockResolvedValue();
   const getSnapshot = WandClient.prototype.getSnapshot;
@@ -252,26 +264,17 @@ it("quick play readies with a connected wand: generic profile, microphone starte
   const controller = new DuelController();
   controller.roomCode = "K7X2PD";
   const microphone = vi.spyOn(controller.speech, "start").mockResolvedValue();
-  expect(controller.quickPlay).toBe(true);
   await controller.connect("ble");
   await flushPromises();
   expect(controller.motion.getState().phase).toBe("ready");
   expect(controller.motion.getState().calibratedSpells).toEqual(["stupefy", "protego"]);
   expect(microphone).toHaveBeenCalledTimes(1);
-  expect(controller.practiceComplete()).toBe(true);
-  controller.enterBattle();
   expect(controller.battleLobby).toBe(true);
-
-  controller.startCalibration();
-  expect(controller.battleLobby).toBe(false);
-  expect(controller.quickPlay).toBe(false);
-  expect(controller.motion.getState().phase).toBe("stillness");
-  expect(controller.practiceComplete()).toBe(false);
-  controller.enterBattle();
-  expect(controller.battleLobby).toBe(true);
-  expect(controller.quickPlay).toBe(true);
+  // A recognizer reset the controller did not cause is repaired with the shared profile on the next sync.
+  controller.motion.reset();
+  expect(controller.motion.getState().phase).toBe("uncalibrated");
+  vi.advanceTimersByTime(100);
   expect(controller.motion.getState().phase).toBe("ready");
-  expect(controller.healthy()).toBe(false);
   controller.destroy();
 });
 
@@ -287,7 +290,7 @@ it("pauses hidden input without disconnecting the wand or automatically readying
   const controller = new DuelController();
   controller.roomCode = "K7X2PD";
   await controller.connect("ble");
-  controller.enterBattle();
+  expect(controller.battleLobby).toBe(true);
   const disconnect = vi.spyOn(controller.wand!, "disconnect");
   const suspend = vi.spyOn(controller.wand!, "suspend").mockImplementation(() => {});
   const resume = vi.spyOn(controller.wand!, "resume").mockResolvedValue();

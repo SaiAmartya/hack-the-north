@@ -16,21 +16,35 @@ The original `DuelController.visibility` called `WandClient.suspend`, which fail
 
 ## Implemented behavior
 
-- After pairing: **Join battle** opens the dark lobby immediately. **Practice first** retains personal calibration, and **Join battle** is available throughout that optional walkthrough.
+- After pairing the dark lobby opens by itself. There is no calibration or practice screen: the recognizer's shared quick-play profile is applied the moment the wand streams (and re-applied after any reset), and the microphone is started for the player. Per-player calibration remains in the recognizer for scripted QA only.
 - Lobby: visible room code, opponent presence, microphone/camera controls and Ready. Supported wand input, fresh stream, microphone and renderer remain required for Ready; the tutorial shortcut never invents a cast or server health.
 - Hiding the laptop page clears fusion/movement evidence, stops speech, sends an unhealthy heartbeat and suspends wand processing/feedback. An active round is aborted without a winner. The physical carrier is retained where available.
 - Returning revalidates clocks and one second of fresh movement. A retained BLE session keeps its protocol nonce/next CONTROL sequence because firmware rejects a second OPEN with a new nonce on an already-open link. Actual carrier loss uses the existing bounded reconnect and fresh OPEN. Old browser callback generations remain invalid.
 - Recovery can restart the microphone, reconnect the selected wand or reattach the referee session from the lobby/result screen. Expired referee reservations rejoin the same room; a full or expired room still reports failure. A fresh Ready is required; rounds never resume automatically.
 - A resumed referee session renews video negotiation even when room membership did not change.
 
-Reuse: extended `DuelController`, `GameClient`, `WandClient` and `BleWandTransport`; reused the existing recognizer profile, session authentication, transport recovery, validation and presentation. New public methods are `enterBattle`, `reconnectBattle`, `reconnect` and `resume`; searches of their existing classes found the underlying primitives but no equivalent operation retaining both pairing and recovery UI. No new runtime dependency or player QA route was added.
+Reuse: extended `DuelController`, `GameClient`, `WandClient` and `BleWandTransport`; reused the existing recognizer profile, session authentication, transport recovery, validation and presentation. New public methods are `reconnectBattle`, `reconnect` and `resume`; searches of their existing classes found the underlying primitives but no equivalent operation retaining both pairing and recovery UI. No new runtime dependency or player QA route was added.
+
+## Any laptop, any iPhone
+
+The hosted phone service mints a pairing room only for a caller presenting the enrollment secret,
+and until now that secret had to live on each laptop. A teammate's laptop without it fell back to
+the old private-LAN profile and reported `Phone control needs the trusted HTTPS setup.` The
+deployed referee now brokers pairing: `POST /api/game/phone/pair`, authenticated by the player's
+own game session (which must be a phone session), calls the phone service server-side with the
+secret from `WAND_PHONE_SERVICE`/`WAND_PHONE_CREATE_SECRET` and returns the same pair record the
+laptop broker would. The browser prefers its laptop's own broker when the launcher holds the
+secret (offline and LAN play), otherwise asks the referee, whose health route advertises
+`phoneBroker`. A referee without the variables reports `iPhone pairing is not set up on this
+referee.` instead of mentioning certificates. Per-session cooldown and an in-flight cap mirror the
+laptop broker; the secret never reaches a laptop or the browser.
 
 ## Verification
 
-- Frontend unit suite: 176 tests passed, including stale callbacks, retained BLE/phone carriers, bounded recovery, the quick-play profile (any-direction jab, held raise, ignored lowering), skipped practice, speech/fusion and game-session reattachment.
-- Referee suite: 56 passed (rooms by join code, ICE provider, engine, API); launcher suite: 32 passed.
+- Frontend unit suite: 183 tests passed, including stale callbacks, retained BLE/phone carriers, bounded recovery, the shared quick-play profile (any-direction jab, held raise, ignored lowering; upstream's DTW matching still applies to calibrated templates), automatic lobby entry, recognizer repair after a foreign reset, referee-brokered pairing and the no-broker explanation, speech/fusion and game-session reattachment.
+- Referee suite: 60 passed (rooms by join code, ICE provider, phone broker unit and API behaviour, engine, API); launcher suite: 32 passed.
 - Frontend typecheck and production build passed. The existing large-bundle warning remains; no lint command is configured in the web package.
-- Browser suite: 29 passed, including the two new `multiplayer-entry` specs: a paired scripted badge enters the lobby at once or leaves practice unfinished; two lobbies in one browser context start a duel, one player hides the tab (duel paused, badge not disconnected, no second chooser), returns, restarts the microphone, loses and reattaches the battle socket, and can Rematch. Lobby screenshots at desktop and 390 px width showed the dark lobby card with the code, rival status, spell hints, microphone/camera/Ready controls and no horizontal overflow.
+- Browser suite: 29 passed, including the two `multiplayer-entry` specs: a paired scripted badge lands in the lobby at once with no calibration, practice or "join" control; two lobbies in one browser context start a duel, one player hides the tab (duel paused, badge not disconnected, no second chooser), returns, restarts the microphone, loses and reattaches the battle socket, and can Rematch. (One run of the unrelated speech-worklet timing spec failed while the launcher was rebuilding on the same CPU; it passed alone.) Lobby screenshots at desktop and 390 px width showed the dark lobby card with the code, rival status, spell hints, microphone/camera/Ready controls and no horizontal overflow.
 
 The browser fixtures use a protocol-faithful virtual endpoint at the mocked Bluetooth boundary and generated silent microphone PCM. They exercise the production adapter, input client, controller, React interface and local referee. They do not establish real Bluetooth endurance, acoustic recognition or cross-network media behavior.
 
@@ -45,6 +59,6 @@ Remaining multiplayer work, in order:
 3. Test the quick-play profile with real voices and physical controllers: correct casts, negatives/nearby voices, defense timing and five complete two-player matches.
 4. Qualify physical tab-switch/recovery and a ten-minute loaded session separately for badge and iPhone. Keep badge battery, cold-boot, Windows and two-badge gates separate.
 
-Physical test card: start both laptop stacks; start/join one code; pair each wand; choose Join battle; enable microphones/cameras; Ready on both. Switch one laptop to another tab for 15 seconds. Return: same wand should recover without a chooser, both players should see a paused duel, and microphone/Rematch recovery should remain available. Ready again, then verify a real Stupefy/Protego exchange. Repeat with the phone staying foregrounded; separately test phone lock and its explicit Resume flow.
+Physical test card: start both laptop stacks; start/join one code; pair each wand (the lobby opens by itself); allow microphones, enable cameras; Ready on both. Switch one laptop to another tab for 15 seconds. Return: same wand should recover without a chooser, both players should see a paused duel, and microphone/Rematch recovery should remain available. Ready again, then verify a real Stupefy/Protego exchange. Repeat with the phone staying foregrounded; separately test phone lock and its explicit Resume flow.
 
 The application no longer deliberately drops a healthy badge for an ordinary laptop tab switch. [Chrome may freeze or discard hidden pages](https://developer.chrome.com/docs/web-platform/page-lifecycle-api), and [background timers can be throttled](https://developer.chrome.com/blog/timer-throttling-in-chrome-88). OS sleep, tab discard/reload, physical Bluetooth loss and hidden/locked iPhone sensing cannot be guaranteed away by this web application.

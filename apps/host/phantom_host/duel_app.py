@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from phantom_host.duel_engine import TICK_MS, ruleset
 from phantom_host.duel_ice import IceProvider, IceSettings
+from phantom_host.duel_phone import Fetch as PhoneFetch, PhoneBroker, PhoneSettings
 from phantom_host.duel_models import (
     AuthMessage,
     CastMessage,
@@ -36,6 +37,7 @@ from phantom_host.duel_models import (
     SessionRequest,
     SessionResponse,
     SignalMessage,
+    Source,
     wire_dict,
 )
 from phantom_host.duel_registry import RoomRegistry
@@ -75,6 +77,7 @@ class DuelSettings:
     expelliarmus_enabled: bool = False
     start_background_tick: bool = True
     ice: IceSettings = IceSettings()
+    phone: PhoneSettings = PhoneSettings()
 
     @classmethod
     def from_environment(cls) -> DuelSettings:
@@ -99,6 +102,7 @@ class DuelSettings:
                 "WAND_ENABLE_EXPELLIARMUS"
             ),
             ice=IceSettings.from_environment(),
+            phone=PhoneSettings.from_environment(),
         )
 
 
@@ -106,9 +110,11 @@ def create_app(
     settings: DuelSettings | None = None,
     *,
     clock_ms: Callable[[], int] | None = None,
+    phone_fetch: PhoneFetch | None = None,
 ) -> FastAPI:
     active_settings = settings or DuelSettings.from_environment()
     active_clock = clock_ms or _monotonic_ms
+    phone = PhoneBroker(active_settings.phone, fetch=phone_fetch, clock_ms=active_clock)
     registry = RoomRegistry(
         clock_ms=active_clock,
         allow_phone=active_settings.dev_relay_enabled,
@@ -149,6 +155,7 @@ def create_app(
         return HealthResponse(
             dev_relay_enabled=active_settings.dev_relay_enabled,
             allow_replay=active_settings.allow_replay,
+            phone_broker=phone.enabled,
         )
 
     @app.get("/api/game/rules")
@@ -201,6 +208,28 @@ def create_app(
                 detail=error.code,
             ) from None
         return Response(status_code=204)
+
+    @app.post("/api/game/phone/pair")
+    async def broker_phone_pair(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Mint a hosted phone pairing room for a phone session; the secret stays on this referee."""
+
+        _require_origin(request.headers.get("origin"), active_settings)
+        token = _bearer_token(authorization)
+        session = registry.session_for_token(token)
+        if session is None:
+            raise HTTPException(status_code=401, detail="invalid_token")
+        if session.source is not Source.PHONE:
+            raise HTTPException(status_code=409, detail="phone_source_required")
+        try:
+            return await phone.pair(token)
+        except RoomError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail=error.code,
+            ) from None
 
     @app.post("/api/game/pair", response_model=PairResponse)
     async def create_pair(

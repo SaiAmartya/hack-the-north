@@ -25,8 +25,7 @@ export class DuelController {
   source?: Source;
   /** The duel this player started or joined; every referee session is created inside it. */
   roomCode = "";
-  /** Shared gesture profile without personal calibration or required practice casts. */
-  quickPlay = true;
+  /** The battle lobby opens as soon as the wand streams; Ready still needs healthy input. */
   battleLobby = false;
   pairingCode = "";
   phoneUrl = "";
@@ -41,7 +40,6 @@ export class DuelController {
   localVideo?: MediaStream;
   remoteVideo?: MediaStream;
   cameraIssue = "";
-  practiced = new Set<SpellName>();
   lastSpell?: SpellName;
   lastSpellAt = 0;
   renderingReady = false;
@@ -61,7 +59,6 @@ export class DuelController {
   phoneSession?: PhoneSession;
   private observedWandGeneration = -1;
   private wasStreaming = false;
-  private calibrationIdentity = "";
   private phoneRequest?: AbortController;
   onChange = () => {};
 
@@ -84,7 +81,6 @@ export class DuelController {
       ) {
         this.lastSpell = attempt.spell;
         this.lastSpellAt = performance.now();
-        this.practiced.add(attempt.spell);
         this.notice = `${nameOf(attempt.spell)}!`;
         this.wand?.cue({
           effect: CueEffect.AcceptedCast,
@@ -221,22 +217,6 @@ export class DuelController {
     this.roomCode = code;
     this.onChange();
   }
-  enterBattle() {
-    if (this.wand?.getSnapshot().phase !== "streaming") return;
-    this.battleLobby = true;
-    if (!this.practiceComplete()) {
-      this.quickPlay = true;
-      this.generation++;
-      this.fusion.reset(this.generation);
-      this.speech.setRecognitionEnabled(false);
-      this.motion.useDefaultProfile(this.generation);
-      this.practiced.clear();
-      this.calibrationIdentity = "";
-      this.sendUnhealthyHeartbeat();
-    }
-    this.autoStartMic();
-    this.onChange();
-  }
   async reconnectBattle() {
     if (this.busy || !this.source || !this.roomCode) return;
     this.busy = true;
@@ -245,8 +225,7 @@ export class DuelController {
     this.generation++;
     this.fusion.reset(this.generation);
     this.speech.setRecognitionEnabled(false);
-    if (this.quickPlay) this.motion.useDefaultProfile(this.generation);
-    else if (!this.motion.resumeCalibration(this.generation)) this.motion.reset();
+    this.motion.useDefaultProfile(this.generation);
     this.onChange();
     try {
       const reattached = await this.game.reconnect();
@@ -271,7 +250,6 @@ export class DuelController {
     this.phoneClaim = undefined;
     this.phoneClaimApproved = false;
     this.phoneHosted = false;
-    this.practiced.clear();
     this.context = "";
     this.feedbackKey = "";
     this.seen.clear();
@@ -285,7 +263,6 @@ export class DuelController {
     this.wand?.disconnect();
     this.phoneRelay = undefined;
     this.phoneSession = undefined;
-    this.calibrationIdentity = "";
     this.wasStreaming = false;
     this.peer.stop();
     this.videoPeerKey = "";
@@ -302,13 +279,13 @@ export class DuelController {
       } else {
         const phoneRequest = new AbortController();
         this.phoneRequest = phoneRequest;
-        const hosted = await hostedPhoneEnabled(phoneRequest.signal);
+        const hosted = await hostedPhoneBroker(phoneRequest.signal);
         if (!hosted && location.protocol !== "https:")
-          throw new Error("Phone control needs the trusted HTTPS setup.");
+          throw new Error("iPhone pairing is not set up on this referee.");
         await this.game.connect("phone", this.roomCode);
         if (request !== this.attemptGeneration || this.dead) return;
         const hostedPair = hosted
-          ? await createHostedPair(phoneRequest.signal)
+          ? await createHostedPair(phoneRequest.signal, hosted, this.game.token)
           : undefined;
         const localPair = hostedPair ? undefined : await this.game.pair();
         if (request !== this.attemptGeneration || this.dead) {
@@ -464,16 +441,11 @@ export class DuelController {
         const state = wand.getSnapshot();
         this.phoneSession?.reportAccepted({ sequence: sample.seq, accepted: state.accepted,
           receivedHz: state.observedHz ?? 0, ageMs: Math.max(0, sample.ageUpperMs) });
-        if (this.motion.getState().phase === "ready") this.calibrationIdentity = this.inputIdentity();
         this.speech.setRecognitionEnabled(
           this.motion.getState().phase === "ready",
         );
       }),
     );
-  }
-  private inputIdentity() {
-    const info = this.wand?.getSnapshot().info;
-    return info ? JSON.stringify([this.source, info.deviceId, info.bootId, info.sampleHz, info.rangeG, info.axisConvention]) : "";
   }
   private syncInputState() {
     const state = this.wand?.getSnapshot();
@@ -482,21 +454,20 @@ export class DuelController {
       this.observedWandGeneration = state.generation;
       this.generation++;
       this.fusion.reset(this.generation);
-      if (this.quickPlay) this.motion.useDefaultProfile(this.generation);
-      else this.motion.clearPending();
-      this.practiced.clear();
+      this.motion.useDefaultProfile(this.generation);
       this.feedbackKey = "";
       this.speech.setRecognitionEnabled(false);
-      if (state.failureCode === "orientation") this.calibrationIdentity = "";
     }
     const streaming = state.phase === "streaming";
     if (streaming && !this.wasStreaming) {
-      if (this.quickPlay) this.motion.useDefaultProfile(this.generation);
-      else if (this.calibrationIdentity && this.calibrationIdentity === this.inputIdentity()) {
-        if (!this.motion.resumeCalibration(this.generation)) this.motion.reset();
-      } else this.motion.reset();
+      this.motion.useDefaultProfile(this.generation);
+      this.battleLobby = true;
       this.issue = "";
     }
+    // Any recognizer reset while the wand streams (a generation change it did not see) is
+    // repaired with the shared profile instead of leaving Ready unexplainedly disabled.
+    if (streaming && this.motion.getState().phase !== "ready")
+      this.motion.useDefaultProfile(this.generation);
     if (!streaming && this.wasStreaming) {
       this.fusion.reset(this.generation);
       this.motion.clearPending();
@@ -505,43 +476,19 @@ export class DuelController {
     }
     this.wasStreaming = streaming;
   }
-  /** Quick play starts the microphone as soon as the wand streams; failures show the usual mic step. */
+  /** The microphone starts as soon as the wand streams; a failure leaves the lobby's mic button. */
   private autoStartMic() {
-    if (document.hidden || !this.quickPlay || this.wand?.getSnapshot().phase !== "streaming") return;
+    if (document.hidden || this.wand?.getSnapshot().phase !== "streaming") return;
     if (this.speech.getSnapshot().phase !== "off" && this.speech.getSnapshot().phase !== "fault") return;
     void this.startMic();
-  }
-  /** Whether the player may Ready: quick play needs no practice casts, the personal flow needs both spells. */
-  practiceComplete() {
-    return this.quickPlay || this.practiced.size >= 2;
-  }
-  startCalibration() {
-    if (this.wand?.getSnapshot().phase !== "streaming") return;
-    this.quickPlay = false;
-    this.battleLobby = false;
-    this.syncInputState();
-    this.generation++;
-    this.practiced.clear();
-    this.calibrationIdentity = "";
-    this.fusion.reset(this.generation);
-    this.speech.setRecognitionEnabled(false);
-    this.motion.beginCalibration();
-    this.updatePhoneCoaching();
-    this.onChange();
   }
   private updatePhoneCoaching() {
     const motion = this.motion.getState();
     const mic = this.speech.getSnapshot().phase;
     const instruction = !["listening", "busy"].includes(mic) ? "Enable the laptop microphone"
-      : motion.phase === "uncalibrated" ? "Find a comfortable grip. Start on the laptop."
-      : motion.phase === "stillness" ? "Hold still"
-      : motion.phase === "resuming" ? "Hold still for a moment"
-      : motion.calibratingSpell === "stupefy" ? "Jab forward, three times"
-      : motion.calibratingSpell === "protego" ? "Raise into a guard, hold, lower. Three times"
-      : motion.calibratingSpell === "expelliarmus" ? "Sweep sideways, three times"
       : motion.phase === "ready" ? "Move and speak your spell" : "Continue on the laptop";
-    this.phoneSession?.coach({ instruction, completed: motion.calibratingSpell ? motion.examplesBySpell[motion.calibratingSpell] : 0,
-      total: motion.calibratingSpell ? 3 : 0, hint: motion.lastIssue, diagnostics: this.motion.getDiagnostics() });
+    this.phoneSession?.coach({ instruction, completed: 0, total: 0, hint: motion.lastIssue,
+      diagnostics: this.motion.getDiagnostics() });
   }
   async startMic() {
     this.issue = "";
@@ -586,16 +533,9 @@ export class DuelController {
     }
     this.onChange();
   }
-  calibrate(spell: SpellName) {
-    this.practiced.clear();
-    this.fusion.reset(this.generation);
-    this.motion.beginGestureCalibration(spell);
-    this.speech.setRecognitionEnabled(false);
-    this.onChange();
-  }
   ready() {
     const info = this.wand?.getSnapshot().info;
-    if (!info || !this.healthy() || !this.practiceComplete()) return;
+    if (!info || !this.healthy()) return;
     this.battleLobby = true;
     this.game.send({
       type: "ready",
@@ -742,7 +682,14 @@ async function brokerPost(path: string, signal: AbortSignal): Promise<unknown> {
   return response.json();
 }
 
-async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
+/**
+ * Who mints the hosted phone pair: this laptop's own broker when its launcher holds the enrollment
+ * secret, otherwise the referee, which keeps the secret for every laptop. Neither path needs a
+ * certificate on the laptop or the phone.
+ */
+type PhoneBroker = "local" | "referee";
+
+async function hostedPhoneBroker(signal: AbortSignal): Promise<PhoneBroker | undefined> {
   const value = await brokerPost("/api/phone/config", signal);
   if (
     !value ||
@@ -752,11 +699,32 @@ async function hostedPhoneEnabled(signal: AbortSignal): Promise<boolean> {
     typeof (value as { enabled?: unknown }).enabled !== "boolean"
   )
     throw new Error("Phone pairing returned an invalid response.");
-  return (value as { enabled: boolean }).enabled;
+  if ((value as { enabled: boolean }).enabled) return "local";
+  const response = await fetch("/api/game/health", { cache: "no-store", signal });
+  if (!response.ok) throw new Error("Start the game server to connect.");
+  const health: unknown = await response.json();
+  return health && typeof health === "object" && (health as { phoneBroker?: unknown }).phoneBroker === true
+    ? "referee"
+    : undefined;
 }
 
-async function createHostedPair(signal: AbortSignal): Promise<HostedPair> {
-  return parseHostedPair(await brokerPost("/api/phone/pair", signal));
+async function createHostedPair(signal: AbortSignal, broker: PhoneBroker, token: string): Promise<HostedPair> {
+  if (broker === "local") return parseHostedPair(await brokerPost("/api/phone/pair", signal));
+  const response = await fetch("/api/game/phone/pair", {
+    cache: "no-store",
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  });
+  if (!response.ok)
+    throw new Error(
+      response.status === 429
+        ? "Wait a moment, then reconnect."
+        : response.status === 404
+          ? "iPhone pairing is not set up on this referee."
+          : "Phone connection unavailable. Try again.",
+    );
+  return parseHostedPair(await response.json());
 }
 const stopTracks = (stream?: MediaStream) => stream?.getTracks().forEach((track) => track.stop());
 export const nameOf = (spell: SpellName) =>

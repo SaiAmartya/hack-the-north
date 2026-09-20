@@ -118,6 +118,8 @@ This script uses real public pairing/carriers and injected movement/audio+ASR fi
 
 Build/source: the next explicitly reported deployed revision; Safari on an unlocked iPhone, held comfortably sideways/slightly diagonal (other consistent grips are valid), same venue Wi-Fi. Do not start this card against an old page.
 
+Since the battle lobby landed (see [multiplayer-entry.md](multiplayer-entry.md)) the game no longer exposes Start calibration or practice: steps 3–5 below describe the recognizer's personal-calibration path, which now runs only through scripted QA. On the game itself, replace them with: in the lobby, jab three times and raise-and-hold three times while saying nothing, then again while saying each spell name, and report which announcements appeared.
+
 1. Refresh laptop, connect iPhone, scan and approve the matching number; allow motion in Safari. If offered, select Internet explicitly and report which route was used.
 2. Move gently: **Sensor active** and **Reaching laptop** should both respond/expire truthfully. Open Connection details if either is missing.
 3. Enable laptop microphone. Nothing should calibrate until **Start calibration**.
