@@ -38,7 +38,7 @@ Implementation reuses `DuelRoom` and `DuelEngine`; the small `PracticeBot` polic
 
 ## Physical QA contract
 
-Use the latest main checkout and restart the launcher after pulling. The final release section below records which referee revision was deployed. On this Mac WAND-B602 is already flashed; teammates must follow the guarded [firmware instructions](firmware-0.3.0.md) for their own devices.
+Use the latest main checkout and restart the launcher after pulling. The hosted release section records which referee revision was deployed. On this Mac WAND-B602 is already flashed; teammates must follow the guarded [firmware instructions](firmware-0.3.0.md) for their own devices.
 
 1. **Entry:** Open `http://127.0.0.1:5173` in Chrome. Pair the intended badge or iPhone, permit the laptop microphone, hold the wand briefly still and allow two seconds of quiet. Choose **Duel a bot**, then **Ready**. Expect a countdown and no second-device or opponent requirement.
 2. **Five spells:** Across as many rematches as needed, make five attempts per spell, speaking its exact name with the displayed gesture. Stupefy: jab, 20 damage, 2 s cooldown. Protego: raise/hold, one-hit shield for 1.2 s, 3 s cooldown. Expelliarmus: jab, 10 damage and 1 s offensive lock, 6 s cooldown. Incendio: jab, 30 damage, 8 s cooldown. Episkey: raise/hold, heal up to 18, 12 s cooldown; take damage first. Confirm each accepted cast fires once and the badge displays the matching feedback.
