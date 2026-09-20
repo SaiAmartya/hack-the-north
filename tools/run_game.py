@@ -1,8 +1,9 @@
-"""Start the isolated game stack. No installs, downloads, trust changes or flashing.
+"""Start the isolated game stack. No installs, trust changes or flashing; the pinned speech model
+is downloaded on first use if it is missing.
 
     python3 tools/run_game.py                      # full stack with the saved phone defaults
     python3 tools/run_game.py --save-defaults --phone-service https://... --phone-secret-file <file>
-    python3 tools/run_game.py --no-phone           # badge/replay only, ignore saved phone defaults
+    python3 tools/run_game.py --no-phone           # badge/replay only, ignore saved phone defaults (--badge-only also skips them)
 
 A previous stack started by this launcher is stopped automatically before the new one starts;
 ports held by anything else still block startup.

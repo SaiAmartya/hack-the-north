@@ -2,7 +2,7 @@
 
 **Product:** a two-player live-video duel in which every spell requires a spoken incantation on the player's laptop and a matching motion from that player's hacker badge or iPhone.
 
-**Current direction (September 19, 2026):** the approved [input rebuild](docs/qa/input-rebuild.md) supersedes the older connection/calibration slices below: hosted HTTPS QR, direct data-only WebRTC first, explicit Internet relay, recoverable approved pairs, visible sensor/receipt indicators and explicit grip calibration. Both real BLE badge and physical iPhone remain player controls. Sai authorized publication of the reviewed rebuild after integrating teammate main `76b6388`; see [teammate setup](docs/TEAM-SETUP.md) for current installation/run steps. Current firmware 0.1.9 is diagnostic-only and has not been flashed or hardware-qualified. Automated raw replay is test-only. Physical badge, iPhone, speech and Windows acceptance remain distinct from software tests and from one another.
+**Current direction (September 19, 2026):** the approved [input rebuild](docs/qa/input-rebuild.md) supersedes the older connection/calibration slices below: hosted HTTPS QR, direct data-only WebRTC first, explicit Internet relay, recoverable approved pairs, visible sensor/receipt indicators and explicit grip calibration. Both real BLE badge and physical iPhone remain player controls. Sai authorized publication of the reviewed rebuild after integrating teammate main `76b6388`; see [teammate setup](docs/TEAM-SETUP.md) for current installation/run steps. The current firmware source is 0.2.1 (0.2.0 was the first gameplay image); it is flashed on WAND-B602 with readback verification and its physical QA card is pending. Automated raw replay is test-only. Physical badge, iPhone, speech and Windows acceptance remain distinct from software tests and from one another.
 
 This document is the durable end-to-end build order. [MVP-OUTLINE.md](MVP-OUTLINE.md) owns product/gameplay scope, [BADGE-FIRMWARE-CONTRACT.md](BADGE-FIRMWARE-CONTRACT.md) owns the unchanged badge interface, [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md) owns visual and interaction presentation, and [$wand-dev-workflow](.agents/skills/wand-dev-workflow/SKILL.md) owns the development and human-QA procedure. If they conflict on badge bytes, the firmware contract wins; if they conflict on what game to ship, the MVP outline wins. The design system cannot change mechanics, runtime gates or evidence status.
 
@@ -58,7 +58,7 @@ QA traces/results name their motion and speech sources. Player screens use only 
 - Speech: `faster-whisper` `base.en`, English, CPU `int8`, one warmed inference worker per laptop.
 - Production browser: qualified Windows x64 desktop Chrome build. “Chromium-compatible” is not accepted as a substitute for the tested Chrome build.
 
-Keep the new duel behind an isolated entry path and runtime mode. That mode must not start the legacy serial gateway, host-camera/JPEG worker, AI director or old button/preclassified-cast flow. Legacy files may remain for reference while the new path is built.
+Keep the new duel behind an isolated entry path and runtime mode. That mode must not start the legacy serial gateway, host-camera/JPEG worker, AI director or old button/preclassified-cast flow. Those legacy files were removed from the tree on September 19, 2026 (commit `530a0ba`) and remain only in git history.
 
 ### 2.2 Ownership and data paths
 
@@ -302,7 +302,7 @@ Audio is last. Use only original/licensed nonverbal cues, start SFX after local 
 
 ## 4. Delivery stages and gates
 
-Every stage has three outputs: **Build**, **Automated gate**, and **Your card** for the smallest necessary human check. These headings define dependency and acceptance, not current implementation status. Keep current commands, test counts, completed software slices and open physical gates in [docs/qa/game-platform.md](docs/qa/game-platform.md); keep hardware-specific evidence in [docs/qa/firmware-integration-review.md](docs/qa/firmware-integration-review.md). A stage is not complete because files exist or tests were proposed.
+Every stage has three outputs: **Build**, **Automated gate**, and **Your card** for the smallest necessary human check. These headings define dependency and acceptance, not current implementation status. Keep current commands, test counts, completed software slices and open physical gates in [docs/qa/input-rebuild.md](docs/qa/input-rebuild.md); keep hardware-specific evidence in [docs/qa/firmware-0.2.0.md](docs/qa/firmware-0.2.0.md). A stage is not complete because files exist or tests were proposed.
 
 ### Slice 0 — Isolated runtime shell
 
@@ -411,7 +411,7 @@ Badge integration runs alongside platform delivery. Preserve the shared platform
 | Sustained demo | Five uninterrupted matches and clean rematches with no service restart; source/build versions and known limits recorded |
 | Hardware | Contract H0–H5 evidence remains independent: recovery, sensor truth, Windows GATT, combined load, two-wand soak, feedback and endurance |
 
-Do not infer current pass/fail status from this durable matrix. Use [current platform evidence](docs/qa/game-platform.md) and the [firmware integration review](docs/qa/firmware-integration-review.md), and distinguish automated, iPhone, badge, microphone, Windows and two-human evidence.
+Do not infer current pass/fail status from this durable matrix. Use [current input evidence](docs/qa/input-rebuild.md) and the [firmware 0.2.x change record](docs/qa/firmware-0.2.0.md), and distinguish automated, iPhone, badge, microphone, Windows and two-human evidence.
 
 ## 6. Feedback and trace discipline
 
@@ -445,4 +445,4 @@ Trace export is bounded and opt-in. Include build/protocol/profile/source labels
 
 ## 8. Current checkpoint
 
-The full plan is approved and is being executed procedurally across non-firmware work and physical-input integration. [docs/qa/game-platform.md](docs/qa/game-platform.md) is the single current checkpoint for implemented surfaces, exact checks and the next unmet gate; [docs/qa/firmware-integration-review.md](docs/qa/firmware-integration-review.md) owns badge-specific evidence. Continue from those reports rather than obsolete slice-order claims. Replay/fault tools remain scripts or build-gated QA only; the player experience remains the minimal Badge/iPhone setup, practice and duel. Preserve separate approval for certificate trust/network exposure, firmware flashing, commits and remote writes.
+The full plan is approved and is being executed procedurally across non-firmware work and physical-input integration. [docs/qa/input-rebuild.md](docs/qa/input-rebuild.md) is the single current checkpoint for implemented surfaces, exact checks and the next unmet gate; [docs/qa/firmware-0.2.0.md](docs/qa/firmware-0.2.0.md) owns badge-specific evidence. Continue from those reports rather than obsolete slice-order claims. Replay/fault tools remain scripts or build-gated QA only; the player experience remains the minimal Badge/iPhone setup, practice and duel. Preserve separate approval for certificate trust/network exposure, firmware flashing, commits and remote writes.

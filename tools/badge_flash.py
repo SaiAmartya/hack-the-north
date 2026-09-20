@@ -2,19 +2,25 @@
 """Flash, back up and restore the Hacker Badge over USB.
 
     uv run --with pyserial python tools/badge_flash.py list
-    uv run --with pyserial python tools/badge_flash.py backup            # two verified 4 MB reads -> private user data
+    uv run --with pyserial --with esptool python tools/badge_flash.py backup          # two verified 4 MB reads -> private user data
     uv run --with pyserial python tools/badge_flash.py register-backup --device-mac <mac> <read1> <read2>
-    uv run --with pyserial python tools/badge_flash.py flash             # legacy multi-artifact upload; NOT app-only
-    uv run --with pyserial python tools/badge_flash.py restore <file>    # write a backup back, byte for byte
+    uv run --with pyserial --with esptool python tools/badge_flash.py flash           # guarded app-slot-only install (0x10000 only, readback verified)
+    uv run --with pyserial --with esptool python tools/badge_flash.py restore-boot    # rewrite only the bootloader region (0x0-0x8000) from the stock backup
+    uv run --with pyserial --with esptool python tools/badge_flash.py restore <file>  # write a backup back, byte for byte
     uv run --with pyserial python tools/badge_flash.py monitor           # raw serial console at 115200 (--seconds N to auto-stop)
     uv run --with pyserial python tools/badge_flash.py cmd selftest axes # send console commands, print replies
 
 Back up before any approved write. A dump contains the device's current image,
-not necessarily stock. `restore` writes all 4 MiB and is a separately approved
-recovery action. Follow firmware/README.md for guarded app-only installation;
-this helper's legacy `flash` action does not perform that procedure.
+not necessarily stock. `flash` is the guarded app-only installation from firmware/README.md:
+it refuses an image larger than the app partition, asks a running wand firmware for download
+mode (`flashmode`), requires a verified backup for this exact device, refuses to write unless
+0x0-0x9000 (bootloader + partition table) still matches that backup byte for byte, writes only
+the app slot at 0x10000, reads it back and compares the SHA-256, then watchdog-resets and checks
+that `id` answers. Never `pio run -t upload` on a badge: it writes the bootloader and partition
+table too. `restore` writes all 4 MiB and is a separately approved recovery action.
 
-Requirements: `esptool` on PATH (`uv run --with esptool`); build the image first with PlatformIO.
+Requirements: `esptool` on PATH (`uv run --with esptool`); build the image first with PlatformIO
+(cd firmware && uv run --python 3.12 --with "platformio>=6.2.0" pio run -e badge).
 The badge IDE tab must be closed: only one program can hold the serial port.
 """
 from __future__ import annotations

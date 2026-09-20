@@ -1,5 +1,10 @@
 """Boot-profile comparison matrix for the wand firmware. Never flashes, writes NVS, or qualifies a release.
 
+Reboots the badge through eight boot rows (four sensor profiles x BLE off/on) via the console
+`profile` command (RTC-only selection), drives real SET_STATE/CUE feedback on the BLE rows, and
+leaves the badge on the gameplay default `range on`. Not passive monitoring; keep it off the
+ordinary player startup path.
+
 Keep one serial handle open: reopening this Mac's USB console may reset the badge.
 Requires pyserial and bleak. Close the browser's BLE connection first.
 """

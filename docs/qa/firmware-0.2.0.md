@@ -90,7 +90,8 @@ readback verified) stages the load and adapts:
   report `brownouts`, the applied `tx_dbm` and the radio delay.
 
 Sai reported that fresh batteries also fixed the loop on their own; 0.2.1 keeps the margin for tired
-ones. Battery run time and the 30-minute endurance gate remain to be measured.
+ones. Battery run time and the 30-minute endurance gate remain to be measured. The physical QA card
+below has not yet been run on 0.2.1.
 
 ## Physical QA card (after the app-only flash above)
 
@@ -104,7 +105,8 @@ uv run --with pyserial --with esptool python tools/badge_flash.py flash
 Then, in order, and please report each line's result verbatim:
 
 1. **Cold boot discoverability.** Unplug USB, put in batteries (or replug), do not touch Start. Within
-   5 s the screen should say `BLE WAND-xxxx advertising`. On the laptop, Chrome → Wandduel → *Connect
+   5 s the boot lines show `BLE WAND-xxxx starting` (0.2.0 said `advertising`; after a brownout reset,
+   `after brownout`) and the wand screen shows `WAND xxxx` over `advertising`. On the laptop, Chrome → Wandduel → *Connect
    badge*: does `WAND-xxxx` appear in the chooser within ~5 s? Repeat three power cycles.
    *Report:* appeared yes/no per cycle, and seconds to appear.
 2. **Console identity.** `uv run --with pyserial python tools/badge_flash.py cmd id status` (this

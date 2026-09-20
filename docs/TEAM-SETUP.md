@@ -12,10 +12,11 @@ change certificate trust, open firewall rules or flash a badge automatically.
   is still pending. Do not substitute a newer Python for the documented environment.
 - Each player needs their own laptop microphone, camera and one phone or qualified BLE badge.
   Voice stays on that laptop; the phone requests motion access only.
-- The current firmware source is **0.2.0**, the first gameplay-profile image (50 Hz/±8 g, radio on after
-  every reset, measured-gap discontinuity instead of the sensor's overwrite flag). It is built but must
-  be flashed and physically QA'd per [the 0.2.0 change record](qa/firmware-0.2.0.md) before a badge is
-  called qualified. See [firmware installation and recovery](../firmware/README.md).
+- The current firmware source is **0.2.1**. 0.2.0 was the first gameplay-profile image (50 Hz/±8 g,
+  radio on after every reset, measured-gap discontinuity instead of the sensor's overwrite flag);
+  0.2.1 adds the battery brownout soft start. 0.2.1 is flashed on WAND-B602 with readback
+  verification but must still be physically QA'd per [the 0.2.x change record](qa/firmware-0.2.0.md)
+  before a badge is called qualified. See [firmware installation and recovery](../firmware/README.md).
 - iPhone recognition has been rebuilt, but real held-out movement/speech testing is pending.
   Internet relay has an unresolved intermittent 500 ms freshness failure. Prefer the direct
   route for the next physical test; do not describe either input as fully qualified yet.
@@ -48,7 +49,6 @@ apps/host/.venv/bin/python -m pip install -e './apps/host[dev,speech]'
 cd apps/web
 npm ci
 cd ../..
-apps/host/.venv/bin/python tools/setup_speech.py --model-dir "$HOME/.cache/wand-speech/faster-whisper-base.en"
 apps/host/.venv/bin/python tools/run_game.py
 ```
 
@@ -62,8 +62,6 @@ py -3.11 -m venv apps/host/.venv
 Set-Location apps/web
 npm.cmd ci
 Set-Location ../..
-$wandModel = Join-Path $env:USERPROFILE '.cache/wand-speech/faster-whisper-base.en'
-.\apps\host\.venv\Scripts\python.exe .\tools\setup_speech.py --model-dir $wandModel
 .\apps\host\.venv\Scripts\python.exe .\tools\run_game.py
 ```
 
@@ -71,20 +69,27 @@ No virtual-environment activation or PowerShell execution-policy change is requi
 The launcher starts only the referee, the local speech helper and the frontend; there are no
 other workers.
 
-`setup_speech.py` downloads pinned `faster-whisper base.en` weights once, outside the repo.
-The runtime loads only local files, uses CPU INT8 and keeps audio in memory. If you choose
-a different model **directory**, pass that same path with `--speech-model` to every launch;
-the model/revision itself must remain the pinned one. Each laptop needs its own model.
+The first launch downloads the pinned `faster-whisper base.en` weights once, outside the repo
+(`.cache/wand-speech/faster-whisper-base.en` under your home directory), by running
+`tools/setup_speech.py` for you; running `setup_speech.py --model-dir <dir>` yourself beforehand
+is optional. The runtime loads only local files, uses CPU INT8 and keeps audio in memory. If you
+choose a different model **directory**, pass that same path with `--speech-model` to every launch
+(a missing directory is provisioned the same way); the model/revision itself must remain the
+pinned one. Each laptop needs its own model.
 
 Wait for **Game ready: http://127.0.0.1:5173**, then open that exact URL in Chrome.
-Do not use `localhost`, a random port or a LAN URL interchangeably: permissions/origin checks
-are scoped to the selected origin. Startup verifies the frontend, referee and warm speech
-worker; it is not a declaration that physical calibration or multiplayer has passed.
+A tab typed as `localhost:5173` is redirected there automatically; the hosted phone service
+accepts the laptop's connection only from that exact origin. A random port or a LAN URL is
+still wrong: permissions/origin checks are scoped to the selected origin. Startup verifies the
+frontend, referee and warm speech worker; it is not a declaration that physical calibration or
+multiplayer has passed.
 
 The default launcher builds a stable temporary frontend snapshot. Source edits do not replace
 a running session. **Ctrl+C**, wait for shutdown, then rerun after updates. `--dev` opts into
-hot reload for engineering only. The launcher refuses occupied ports instead of killing
-unrelated processes and stops its children on startup failure.
+hot reload for engineering only. Rerunning the launcher first stops a stack it started itself
+(tracked in `launcher.pid` beside the `launcher.json` described in Section 3); it refuses ports
+held by anything else instead of killing unrelated processes and stops its children on startup
+failure.
 
 | Service | Default address | Responsibility |
 | --- | --- | --- |
@@ -94,8 +99,9 @@ unrelated processes and stops its children on startup failure.
 
 ## 3. Connect an iPhone
 
-First stop the plain launcher with Ctrl+C. Ask Sai/the service owner to provide the **existing**
-enrollment-secret file through an approved private channel. Store it outside the repository,
+A plain launcher stack that is still running is stopped automatically when you rerun the
+launcher below. Ask Sai/the service owner to provide the **existing** enrollment-secret file
+through an approved private channel. Store it outside the repository,
 readable only by your user. On macOS the launcher requires mode `0600`; on Windows restrict
 the file's Security permissions to its intended owner. Do not paste the value into commands,
 chat, screenshots, `.env`, URLs or logs. Generating a new local value will not match the service.
@@ -116,6 +122,12 @@ Windows PowerShell, from the root:
 $wandPhoneSecret = Join-Path $env:USERPROFILE '.config/wandduel/phone-enrollment-secret'
 .\apps\host\.venv\Scripts\python.exe .\tools\run_game.py --save-defaults --phone-service https://wandduel-phone.saiamartya19.workers.dev --phone-secret-file $wandPhoneSecret
 ```
+
+`--save-defaults` writes only the service origin and the secret file's **path** to `launcher.json`
+under `~/.local/share/wandduel/` (or `$XDG_DATA_HOME/wandduel`) on macOS and
+`%LOCALAPPDATA%\wandduel\` on Windows; the secret itself stays in your private file. From then on
+a plain `tools/run_game.py` uses those defaults, `--no-phone` ignores them for one run and
+`--badge-only` also skips them. The same command starts the stack, so continue below.
 
 1. On the laptop choose **Connect iPhone**. Scan its fresh QR with the phone camera and open
    the controller in **Safari**. Tap **Connect wand**, allow motion, and approve the matching
@@ -178,9 +190,10 @@ own microphone. Neither player browses to the other laptop's frontend. Speech ne
 to A; only game/referee traffic does. Opponent video is a separate direct, video-only WebRTC
 connection, with no deployed TURN fallback. Wi-Fi peer isolation can block phone or video peers.
 
-For a later **qualified** badge, omit the two `--phone-*` options on that player's launcher
-and select Connect badge. Badge-only qualification can additionally use `--badge-only`.
-A badge on a 0.1.x diagnostic image cannot pass Ready; flash 0.2.0 rather than changing browser gates.
+For a later **qualified** badge, replace the two `--phone-*` options on that player's launcher
+with `--no-phone` (saved phone defaults would otherwise still apply) and select Connect badge.
+Badge-only qualification can use `--badge-only` instead, which also skips them.
+A badge on a 0.1.x diagnostic image cannot pass Ready; flash the current 0.2.x image (0.2.1) rather than changing browser gates.
 
 ## 5. Repeatable checks and useful failure reports
 
@@ -207,18 +220,19 @@ in [the input rebuild report](qa/input-rebuild.md).
 
 | Symptom | Next check |
 | --- | --- |
-| No `Game ready` / speech unavailable | Keep the first startup error. Verify Python 3.11 environment, speech extra, pinned model path and free ports. Do not start a second partial stack. |
+| No `Game ready` / speech unavailable | Keep the first startup error. Verify Python 3.11 environment, speech extra, pinned model path (internet is needed for its one-time download) and free ports. Do not start a second partial stack. |
 | `DLL load failed` / native dependency error on Windows | Capture only the package/error and Python/architecture versions. Windows runtime setup needs qualification; do not substitute cloud speech or remove health gates. |
-| Phone hosting unavailable | Use both hosted-service flags, the existing approved credential, private file permissions and working internet. Wait ten seconds before retrying pair creation. Never print the credential. |
+| Phone hosting unavailable | Use both hosted-service flags (or saved defaults), the existing approved credential, private file permissions and working internet. A failed or cancelled pairing attempt can be retried at once; the page shows the broker's own reason, and only a successful pair starts a two-second cooldown (`Wait a moment, then reconnect`). Never print the credential. |
+| Laptop shows `Connection interrupted. Reconnecting…` after Connect iPhone and never recovers | Check the address bar: the game must be open at `http://127.0.0.1:5173`. The hosted phone service refuses the laptop's connection from any other origin, `localhost:5173` included; the frontend now redirects such a tab to the exact origin, so close or reload an older tab. If the origin is already correct, report route and last failure from Connection details. |
 | Certificate warning | The selected phone URL must be the public HTTPS service, not a stale LAN-IP bookmark. Start from a fresh QR; do not bypass TLS warnings. |
 | Direct connection unavailable | Check venue peer isolation; explicitly try Internet if desired. Its intermittent freshness failure is still open. Do not loosen timing limits. |
 | Sensor active, but no Reaching laptop | Report route, received rate, age and visible last failure from Connection details. Export a trace only deliberately. |
 | Jab/guard counter stuck | Report its actionable hint; Reset grip and hold the same starting grip. Share a fresh trace if requested. Physical classifier accuracy is not yet qualified. |
-| Badge missing after a cold boot | A badge still on 0.1.8 boots with BLE off after any power cycle. Flash 0.2.0 (radio on for every reset, advertising watchdog); check `id` on the console, not repeated blind reconnects. |
-| Badge says firmware needs repair / diagnostic INFO only | The badge is on a 0.1.x image or a diagnostic boot row (`profile creator|rate`). Flash 0.2.0 or select `profile range on`; never restore capability bits in the browser. |
+| Badge missing after a cold boot | A badge still on 0.1.8 boots with BLE off after any power cycle. Flash the current 0.2.x image (0.2.1: radio on for every reset, advertising watchdog, brownout soft start); check `id` on the console, not repeated blind reconnects. |
+| Badge says firmware needs repair / diagnostic INFO only | The badge is on a 0.1.x image or a diagnostic boot row (`profile creator|rate`). Flash 0.2.1 or select `profile range on`; never restore capability bits in the browser. |
 | Laptop says Reconnecting your badge… | Normal bounded auto-reconnect after a dropped link (up to three per minute). If it ends in Reconnect badge, press it once; if that fails, power-cycle the badge and report `status`. |
 | Camera or multiplayer peers cannot connect | Confirm both clients selected the same referee, their own local origin, network approval and peer reachability. No public TURN fallback is configured. |
-| Port occupied | Stop the known old launcher using its own Ctrl+C. Do not kill every Node/Python process or print full process environments/arguments. |
+| Port occupied | A stack started by this launcher is stopped automatically on the next run; anything else holding `5173`, `8000` or `8001` must be stopped by whoever owns it. Do not kill every Node/Python process or print full process environments/arguments. |
 
 Keep the next physical card small: **Sensor active → Reaching laptop → visible stillness →
 accepted jab examples**. Reply with **commit/build · route/devices · failed step · expected →

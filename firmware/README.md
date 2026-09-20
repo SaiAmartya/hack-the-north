@@ -32,7 +32,7 @@ gameplay profile and advertises after **every** kind of reset:
   idle and the stack reports it stopped; `status` counts `adv_restarts` and `connections`.
 - **Connection parameters:** on connect the badge requests a **15–30 ms** interval, no slave latency
   and a 3 s supervision timeout, and publishes the same preferred range in its scan response. `status`
-  reports the negotiated `conn_interval_us`. Advertising runs at 20–40 ms for a snappy chooser.
+  reports the negotiated `conn_interval_us`. Advertising ran at 20–40 ms in 0.2.0 (40–80 ms since 0.2.1, below).
 - **Overwrite flag no longer poisons the stream.** Every 0.1.x image counted the sensor's STATUS bit 7
   as a lost sample and flagged nearly every MOTION record discontinuous, which the browser rightly
   rejected — so the badge could never feed a gesture. Measured fresh-read cadence on this sensor equals
@@ -54,21 +54,30 @@ gameplay profile and advertises after **every** kind of reset:
   [the change record](../docs/qa/firmware-0.2.0.md#021--battery-brownout-fix-flashed).
 
 **Evidence so far (source-level, this Mac):** portable protocol golden vectors, the new continuity-policy
-test, the boot-profile/RTC test, axis-mapping and console-default tests all pass; PlatformIO build
-succeeds (655,961 bytes flash, 26,304 bytes static RAM). The application image is
-`.pio/build/badge/firmware.bin`, SHA-256 `3cce4f3c3658e526413387ecf17f0d4491698a34e725ecd44eae4571e54cbc1e`.
-**Flashed to WAND-B602** (app slot only, readback verified; the stock bootloader region was restored
-from the verified backup after a failed PlatformIO upload attempt, see [the 0.2.0 change record](../docs/qa/firmware-0.2.0.md)).
+test, the boot-profile/RTC test, axis-mapping and console-default tests all pass. The 0.2.0 PlatformIO build
+was 655,961 bytes flash, 26,304 bytes static RAM, image `.pio/build/badge/firmware.bin` SHA-256
+`3cce4f3c3658e526413387ecf17f0d4491698a34e725ecd44eae4571e54cbc1e`; the 0.2.1 image is SHA-256
+`492bf8e42f423ee8bdbdc12338b810e71470fefdc7441c55b9fd911381f9d577`.
+**Flashed to WAND-B602:** 0.2.0 (app slot only, readback verified; the stock bootloader region was restored
+from the verified backup after a failed PlatformIO upload attempt), then 0.2.1 (app slot only, readback
+verified); both in [the 0.2.0 change record](../docs/qa/firmware-0.2.0.md). The source since the 0.2.1 image
+has only had dead code removed (no version bump), so a fresh build is not byte-identical to the flashed image.
 Hardware results (Chrome chooser after a power cycle, stream rate, discontinuity count, reconnects)
-belong in that record once the QA card has been run. Battery-only boot, six faces, 20 reconnects, endurance and Windows remain H-gates.
+belong in that record once the QA card has been run; it has not yet been run on 0.2.1.
+Battery-only boot, six faces, 20 reconnects, endurance and Windows remain H-gates.
 
-**Build.** The bundled `~/.platformio/penv` core (6.1.19) is too old for the pinned pioarduino platform
-and will *uninstall* it; build with a current core instead:
+**Build.** The pinned pioarduino platform needs PlatformIO Core **6.2.0 or newer**; an older core (the
+`~/.platformio/penv` core was 6.1.19 when this bit on September 19) *uninstalls* the pinned platform instead
+of building. Build with `uv`, which fetches a current core; the command is the same in macOS shells and
+Windows PowerShell and runs from the `firmware` directory:
 
 ```sh
 cd firmware
 uv run --python 3.12 --with "platformio>=6.2.0" pio run -e badge
 ```
+
+Never `pio run -t upload` on a badge; install with `badge_flash.py flash`
+([section 3](#3-guarded-app-only-installation)).
 
 ## 0.1.x history (diagnostic images)
 
@@ -198,30 +207,24 @@ The creator's 100 Hz/±2g baseline is also recorded in
 
 ### 1. Build without touching a badge
 
-Run from the repository root. Use a separate firmware environment, not the game's Python 3.11
-environment. The measured Mac tool environment is Python **3.13.5**, PlatformIO **6.2.0**,
-esptool **5.4.0**, pyserial **3.5** and Bleak **2.0.0**. The commands below reproduce those direct
-tool pins; Windows installation/build and hardware behavior still need their own qualification.
-Install Python 3.13 first if it is not available. On Windows use **PowerShell**, not Git Bash/MSYS.
-
-macOS:
+Needs `uv` on PATH; it fetches the pinned Python and a current PlatformIO Core into its own cache,
+separate from the game's Python 3.11 environment. The pinned pioarduino platform requires PlatformIO
+Core **6.2.0 or newer**: an older core (the `~/.platformio/penv` core was 6.1.19 when this bit on
+September 19) removes the pinned platform instead of building, so do not build with a stray `pio`.
+On Windows use **PowerShell**, not Git Bash/MSYS. The build command is the same on both and runs
+from the `firmware` directory:
 
 ```sh
-python3.13 -m venv firmware/.venv
-source firmware/.venv/bin/activate
-python -m pip install platformio==6.2.0 esptool==5.4.0 pyserial==3.5 bleak==2.0.0
-pio run -d firmware -e badge
+cd firmware
+uv run --python 3.12 --with "platformio>=6.2.0" pio run -e badge
 ```
 
-Windows PowerShell, without changing script-execution policy:
-
-```powershell
-py -3.13 -m venv firmware/.venv
-$wandTools = (Resolve-Path firmware/.venv/Scripts).Path
-$env:PATH = "$wandTools;$env:PATH"
-python -m pip install platformio==6.2.0 esptool==5.4.0 pyserial==3.5 bleak==2.0.0
-pio run -d firmware -e badge
-```
+The `tools/` scripts run the same way from the repository root, with their dependencies named per
+call: `uv run --with pyserial --with esptool python tools/badge_flash.py …` and
+`uv run --python 3.12 --with bleak python tools/wand_ble_check.py …` (exact commands below). Direct
+tool versions measured on this Mac on September 19 were PlatformIO 6.2.0, esptool 5.4.0, pyserial 3.5
+and Bleak 2.0.0 (Python 3.13.5); `uv run --with` resolves current releases unless you pin them.
+Windows installation/build and hardware behavior still need their own qualification.
 
 First build downloads the pinned toolchain and libraries from their normal upstream sources.
 [`platformio.ini`](platformio.ini) pins pioarduino **55.03.312**, Arduino-ESP32 **3.3.12** /
@@ -247,18 +250,20 @@ configuration with the creators, and the device-specific recovery/reset procedur
 cable, close the badge IDE, serial monitor and Chrome/Bleak connection, and attach only one badge.
 
 ```sh
-python tools/badge_flash.py list
-python tools/badge_flash.py --help
+uv run --with pyserial python tools/badge_flash.py list
+uv run --with pyserial python tools/badge_flash.py --help
 ```
 
 Use the exact listed port below (`/dev/cu.usbmodem…` on macOS, `COM…` on Windows). Enter the ROM
-download mode using the demonstrated procedure for that badge. Start/GPIO9 held during reset is
+download mode using the demonstrated procedure for that badge: `backup` does not enter it for you
+(a badge already running this firmware can be sent there with `… cmd flashmode`; `flash` and
+`restore-boot` do that themselves). Start/GPIO9 held during reset is
 the manual recovery route; unplug/replug USB is **not** a guaranteed reset while AA power remains
 connected. USB-Serial-JTAG may support automatic entry, but it is not assumed here. A blank
 display in confirmed download mode is expected. If unsure, stop and ask the firmware maintainer.
 
 ```sh
-python tools/badge_flash.py --port PORT_FROM_LIST backup
+uv run --with pyserial --with esptool python tools/badge_flash.py --port PORT_FROM_LIST backup
 ```
 
 Replace `PORT_FROM_LIST` before running. The helper reads **all 4 MiB twice**, compares hashes and
@@ -280,14 +285,34 @@ commit, board, power state, exact base MAC from `read-mac`, full backup/manifest
 partition table and application hashes. Do not substitute the advertised BLE MAC for the base MAC.
 `partitions_badge.csv` matches the measured WAND-B602 layout, not every possible badge revision.
 
-The only written artifact below is `firmware.bin` at **`0x10000`**, bounded by the factory slot size
-**`0x2a0000`**. Reads compare the generated table, live table and that badge's backup table over
-the same 3,072 bytes at **`0x8000`**. Any mismatch stops the operation: do not "fix" it by uploading
-a new partition table. Application sectors are erased as part of writing, but no bootloader,
+The only written artifact is `firmware.bin` at **`0x10000`**, bounded by the factory slot size
+**`0x2a0000`**. Application sectors are erased as part of writing, but no bootloader,
 partition table, NVS, PHY, littlefs storage or eFuse is written. Current firmware may later persist
 its own explicit settings in the existing `hpwand` NVS namespace; ordinary installation preserves it.
 
-First read the selected badge's identity (replace the port):
+**The helper is the installation path.** From the repository root, with the badge on USB and no other
+program on the port:
+
+```sh
+uv run --with pyserial --with esptool python tools/badge_flash.py flash
+```
+
+It refuses an image larger than the app partition, asks a running wand firmware to reboot into
+download mode (`flashmode`; a badge that does not answer must already be in download mode via
+Start/GPIO9), reads the base MAC, requires the verified two-read backup for that exact device
+(section 2), reads `0x0`–`0x9000` and refuses to write unless the bootloader and partition table are
+byte-identical to that backup (`restore-boot` rewrites `0x0`–`0x8000` from the backup if they are
+not), writes only `0x10000` with `--no-progress`, reads the application back and compares its
+SHA-256, then leaves the bootloader with a watchdog reset and checks that the application answers
+`id`. Every failed pre-write check stops before the write; a readback mismatch says so and asks for
+another flash without powering off. Never "fix" a mismatch by uploading a new partition table or
+bootloader.
+
+**Manual reference** (the same guards with plain `esptool`, kept for auditing the helper; not the
+normal path). It additionally compares the generated `partitions.bin` with the live table and the
+backup table over the same 3,072 bytes at **`0x8000`**. It needs `esptool` on PATH
+(`uv tool install esptool`) and a Python 3 as `python` (`python3` on macOS). First read the selected
+badge's identity (replace the port):
 
 ```sh
 esptool --chip esp32c3 --port PORT_FROM_LIST --before no-reset --after no-reset read-mac
@@ -363,8 +388,9 @@ If PowerShell 7.3+ is unavailable, ask a maintainer rather than simplifying thes
 }
 ```
 
-These procedures leave the badge in download mode for preservation checks. Return to application
-boot using its approved reset/power procedure **without holding Start**; port names may change.
+The manual reference leaves the badge in download mode for preservation checks; return to application
+boot using its approved reset/power procedure **without holding Start** (the helper does this with a
+watchdog reset); port names may change.
 Do not repeatedly flash if the application fails to boot. Preserve the evidence and use the
 device-specific recovery procedure. Full-image restore is a separate approved operation that
 overwrites all flash settings/storage; `badge_flash.py restore` alone does not perform an independent
@@ -372,21 +398,22 @@ post-write full readback. A backup cannot recover damaged hardware or changed eF
 
 ### 4. Verify diagnostics, then qualify before gameplay
 
-After normal boot, use the same activated firmware tool environment and exact newly listed port:
+After normal boot, from the repository root with the exact newly listed port:
 
 ```sh
-python tools/badge_flash.py --port PORT_FROM_LIST cmd id status selftest
-python tools/badge_flash.py --port PORT_FROM_LIST monitor --seconds 10
-python tools/wand_ble_check.py --name WAND-XXXX --scan 15 --seconds 5
+uv run --with pyserial python tools/badge_flash.py --port PORT_FROM_LIST cmd id status selftest
+uv run --with pyserial python tools/badge_flash.py --port PORT_FROM_LIST monitor --seconds 10
+uv run --python 3.12 --with bleak python tools/wand_ble_check.py --name WAND-XXXX --scan 15 --seconds 5
 ```
 
 Replace placeholders; close the monitor before another console command and disconnect Chrome
 before Bleak. Console opening can reset the badge; do not open it halfway through a timing run.
-`id` must identify the built image; a cold 0.2.0 boot reports `profile=range ble=on caps=0F`.
+`id` must report the built version (`fw=0.2.1` for current source); a cold 0.2.x boot reports
+`profile=range ble=on caps=0F` on the first `status` line and in the `HPDIAG` boot line.
 `wand_ble_check.py` must pass its INFO gate on this build; a `creator`/`rate` boot row is expected to
 fail it, and that is truthful rejection, not a reason to remove the gate.
 
-For separately approved profile experiments, `python tools/badge_matrix.py --help` describes the
+For separately approved profile experiments, `uv run --with pyserial --with bleak python tools/badge_matrix.py --help` describes the
 profile runner. It **reboots through eight profiles and sends real display/LED feedback**;
 it is not passive monitoring. Leave it off the ordinary player startup path. Its short comparisons
 cannot replace six faces, clipping tests, combined-load endurance, battery operation, reconnects
@@ -395,7 +422,8 @@ and Windows/two-badge acceptance. See [the contract's H0–H5 gates](../BADGE-FI
 **Port busy/access denied:** close the actual IDE/monitor owning the port, then re-list ports. Do
 not kill unrelated processes or disable security software. **Not in the pairing list:** verify
 normal app boot, Bluetooth permission, no other central, and the actual `id`/`status` version.
-Installed 0.1.8 cold boots use BLE `off`; 0.2.0 boots with the radio on and re-arms advertising.
+Installed 0.1.8 cold boots use BLE `off`; 0.2.x boots with the radio on (0.2.1 starts it 1.2 s after
+boot, later after brownout resets) and re-arms advertising.
 A new source build is not proof that a connected badge has been flashed: check `id`.
 
 ## Checked against the official custom-flash guide
@@ -419,16 +447,16 @@ A new source build is not proof that a connected badge has been flashed: check `
 
 ## Bring-up checklist (first time on hardware)
 
-1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.2.0|name=WAND-xxxx|...|profile=range|ble=on|caps=0F|...|sensor=1` after a cold boot. The screen
-   shows boot diagnostics (accelerometer id 11, reset reason) then the wand screen;
-   LEDs breathe blue. Fresh badges default to `rot 3`; use `rot 0`, `rot 1`, or `rot 2` if the panel differs. The selected rotation is saved in NVS.
+1. After separately approved flash, open the monitor. Expect `HPHELLO|fw=0.2.1|name=WAND-xxxx|boot=…|hz=50|range=8|profile=range|ble=on|caps=0F|axes=…|sensor=1` after a cold boot (0.2.1 is the current source version; an `HPDIAG|reset=…|profile=range|ble=on|caps=0F|…` line precedes it). The screen
+   shows boot diagnostics (accelerometer id 11, reset reason, `BLE WAND-xxxx starting`) then the wand screen;
+   LEDs breathe blue once the staged start releases them (radio 1.2 s after boot, LEDs 2 s later). Fresh badges default to `rot 3`; use `rot 0`, `rot 1`, or `rot 2` if the panel differs. The selected rotation is saved in NVS.
 2. `selftest` runs the contract's golden vectors on the badge. Expect `selftest failures=0`.
 3. Axis check: lay the badge face up on a table and type `axes`. The contract wants about
    `0, 0, +1000` mg. If not, remap without reflashing, e.g. `axes -y +x +z` means contract X = −chip Y,
    contract Y = +chip X, contract Z = +chip Z. This saves the map for the next reboot so a live
    boot's axes never silently change. Reboot and check all six faces; ±100 mg tolerance.
 4. `btn` while holding buttons confirms the shift-register order.
-5. `python tools/wand_ble_check.py --name WAND-xxxx` from the activated firmware tool environment on the
+5. `uv run --python 3.12 --with bleak python tools/wand_ble_check.py --name WAND-xxxx` from the repository root on the
    laptop walks the whole contract over real BLE (scan, INFO, OPEN, SYNC, SET_STATE, cues, motion
    stream, health) and prints PASS/FAIL per step with rate and interval statistics. Use `--scan 15`
    in a crowded venue. Chrome must be disconnected from the badge while it runs.
@@ -481,8 +509,8 @@ baseline.
 ## Console commands (USB serial, diagnostics only)
 
 `help`, `status`, `trace [reset]`, `profile creator|rate|range|high off|on`, `id`, `selftest`, `axes [+x -y +z]`, `btn`, `rot <0-3>`, `leds on|off`,
-`echo on|off`, `recal`, `reboot`, `flashmode` (reboot into the ROM download mode for reflashing).
-Rotation/axes/LED settings persist in NVS; the diagnostic profile/BLE selection uses RTC RAM
+`txpower <-12..9>`, `echo on|off`, `recal`, `reboot`, `flashmode` (reboot into the ROM download mode for reflashing).
+Rotation/axes/LED/TX-power settings persist in NVS; the diagnostic profile/BLE selection uses RTC RAM
 only and takes effect after software reboot. Lines may end in `\r`, `\n` or both.
 
 ## Source layout

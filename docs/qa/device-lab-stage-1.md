@@ -4,6 +4,10 @@
 `codex/harry-potter-battle-mvp-outline` from contract commit `04e315b`; use
 `git rev-parse --short HEAD` to report the exact checkpoint revision.
 
+**Historical checkpoint.** The legacy arena, `App.tsx` and gateway code that this record
+preserved were removed from the tree on September 19, 2026 (commit `530a0ba`); they remain only
+in git history.
+
 The approved [0→1 plan](../../IMPLEMENTATION-PLAN.md) is being implemented one
 testable checkpoint at a time. This checkpoint establishes the Stage 0–1 device
 foundation. **Your replay QA is next; speech, classification, iPhone pairing,

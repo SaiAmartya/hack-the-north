@@ -29,7 +29,8 @@ reshaped to match the recording (wind-up, thrust, brake, slow drifting return). 
 physical pass: the next iPhone and badge sessions must confirm it with real hands.
 
 Badge firmware **0.2.0** and the browser's badge auto-reconnect are described in
-[the 0.2.0 change record](firmware-0.2.0.md), together with the physical QA card.
+[the 0.2.x change record](firmware-0.2.0.md), together with the 0.2.1 battery brownout soft start
+(the current source, flashed on WAND-B602 with readback verification) and the physical QA card.
 
 ## Checkpoint and boundaries
 
@@ -62,7 +63,9 @@ Source candidate **0.1.9** defaults to creator-profile **BLE on**, invalidates o
 selections and retains literal-zero capabilities. Its build and portable tests pass;
 it has **not been flashed**. The candidate application SHA-256 is
 `a876134408bf60a82620ff9508eb7d8ac7e4203ec5f738899dbd46a205f18e5f`.
-This is a discoverability correction, not a sensor fix or a playable-badge release.
+This is a discoverability correction, not a sensor fix or a playable-badge release. The 0.1.9
+candidate was superseded the same evening by 0.2.0 and then 0.2.1 (see above); 0.2.1 is the image
+now on WAND-B602.
 
 ## Repeatable software checks
 
