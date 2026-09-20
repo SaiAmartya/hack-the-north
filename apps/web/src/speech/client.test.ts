@@ -5,6 +5,7 @@ import {
   type SpeechClientPlatform,
   type SpeechEvidence,
   type SpeechDiagnostic,
+  type SpeechDiscard,
 } from "./client";
 import {
   SPEECH_SAMPLE_RATE,
@@ -121,7 +122,7 @@ function fuseSpeech(client: SpeechClient) {
   const fusion = new CastFusion((attempt) => casts.push(attempt));
   client.onOnset((event) => fusion.beginUtterance(event));
   client.onSpeech((event) => fusion.pushUtterance({ ...event, finalAtMs: event.arrivedMs }));
-  client.onDiscard((event) => fusion.cancelUtterance(event.id, event.generation));
+  client.onDiscard((event) => fusion.cancelUtterance(event.id, event.generation, event.disposition));
   return { fusion, casts };
 }
 
@@ -313,6 +314,110 @@ describe("speech client lifecycle", () => {
     await flush();
     expect(casts.map(cast => cast.gestureId)).toEqual(["first-gesture", "next-gesture"]);
     expect(onsets).toHaveLength(2);
+    client.stop();
+  });
+
+  it("suppresses noise captured during inference even when its onset confirmation arrives after the spell result", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const onsets = vi.fn();
+    const diagnostics: SpeechDiagnostic[] = [];
+    client.onOnset(onsets);
+    client.onDiagnostic(event => diagnostics.push(event));
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const first = new Headers(platform.requests.at(-1)!.init?.headers);
+    // This is the recorded ordering: noise starts ~30ms before the valid
+    // result, but has not yet crossed the endpoint's 60ms onset threshold.
+    const noiseStartMs = platform.nowMs;
+    platform.feed(0.012, 4);
+    expect(onsets).toHaveBeenCalledOnce();
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: first.get("X-Wand-Utterance-Id"),
+      generation: Number(first.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(fusion.getState().pendingUtterance?.spell).toBe("stupefy");
+    platform.feed(0.012, 6);
+    expect(onsets).toHaveBeenCalledOnce();
+    expect(fusion.getState().pendingUtterance?.spell).toBe("stupefy");
+    platform.feed(0.001, 25);
+    expect(platform.transcriptions).toHaveLength(1);
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "onset", voiceStartMs: noiseStartMs,
+        detail: "inference-busy-delayed: onset captured before prior result" }),
+      expect.objectContaining({ type: "discard", detail: "inference-busy-delayed" }),
+    ]));
+    const gesture = matchingGesture(first, "preserved-word");
+    fusion.pushGesture(gesture);
+    fusion.pushGesture(gesture);
+    expect(casts.map(cast => cast.gestureId)).toEqual(["preserved-word"]);
+    platform.utterance();
+    expect(platform.transcriptions).toHaveLength(2);
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "fresh-word"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["preserved-word", "fresh-word"]);
+    client.stop();
+  });
+
+  it("does not suppress a genuinely new onset captured at or after the prior result", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const onsets = vi.fn();
+    client.onOnset(onsets);
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const first = new Headers(platform.requests.at(-1)!.init?.headers);
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: first.get("X-Wand-Utterance-Id"),
+      generation: Number(first.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    const nextStartMs = platform.nowMs;
+    platform.utterance();
+    expect(onsets).toHaveBeenCalledTimes(2);
+    expect(onsets.mock.calls[1][0].startMs).toBe(nextStartMs);
+    expect(platform.transcriptions).toHaveLength(2);
+    client.stop();
+  });
+
+  it.each([4, 10])("keeps the tail of a suppressed busy-time sound fenced until quiet (%i frames before result)", async framesBeforeResult => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const onsets = vi.fn();
+    const diagnostics: SpeechDiagnostic[] = [];
+    client.onOnset(onsets);
+    client.onDiagnostic(event => diagnostics.push(event));
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const first = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(first, "retained-first"));
+    // Four frames exercise delayed confirmation; ten exercise the already-busy
+    // onset path. The same continuous noise then spans multiple clip limits.
+    platform.feed(0.012, framesBeforeResult);
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: first.get("X-Wand-Utterance-Id"),
+      generation: Number(first.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["retained-first"]);
+    platform.feed(0.012, 500 - framesBeforeResult);
+    expect(platform.transcriptions).toHaveLength(1);
+    expect(onsets).toHaveBeenCalledOnce();
+    expect(diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ type: "discard",
+      detail: framesBeforeResult < 8 ? "inference-busy-delayed" : "inference-busy" })]));
+    platform.feed(0.001, 25);
+    platform.utterance();
+    expect(platform.transcriptions).toHaveLength(2);
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "after-quiet"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(casts.map(cast => cast.gestureId)).toEqual(["retained-first", "after-quiet"]);
+    expect(onsets).toHaveBeenCalledTimes(2);
     client.stop();
   });
 
@@ -667,6 +772,47 @@ describe("speech client lifecycle", () => {
     client.stop();
   });
 
+  it.each([
+    ["no-speech", "silence", true],
+    ["not-an-incantation", "silence", true],
+    ["low-confidence", "silence", false],
+    [undefined, "silence", false],
+    ["not-an-incantation", "cutoff", false],
+    ["no-speech", "cutoff", false],
+    ["no-speech", "paused", false],
+    ["no-speech", "timeout", false],
+  ] as const)("allows prior-word fallback only for confirmed nonspell (%s, %s)", async (reason, ending, mayFallback) => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const discards: SpeechDiscard[] = [];
+    client.onDiscard(event => discards.push(event));
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const first = new Headers(platform.requests.at(-1)!.init?.headers);
+    platform.transcriptions[0].resolve(Response.json({ utteranceId: first.get("X-Wand-Utterance-Id"),
+      generation: Number(first.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(fusion.getState().pendingUtterance?.spell).toBe("stupefy");
+    if (ending === "cutoff") platform.feed(0.08, 225);
+    else platform.utterance();
+    const newer = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(newer, "movement-during-new-sound"));
+    expect(casts).toEqual([]);
+    if (ending === "paused") client.setRecognitionEnabled(false);
+    if (ending === "timeout") await vi.advanceTimersByTimeAsync(1_000);
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: newer.get("X-Wand-Utterance-Id"),
+      generation: Number(newer.get("X-Wand-Generation")), text: reason === "not-an-incantation" ? "ordinary words" : "",
+      spell: null, accepted: false, reason }));
+    await flush();
+    expect(discards).toEqual([{ id: newer.get("X-Wand-Utterance-Id"), generation: client.getSnapshot().generation,
+      disposition: mayFallback ? "confirmed-nonspell" : "ambiguous" }]);
+    expect(casts.map(cast => cast.gestureId)).toEqual(mayFallback ? ["movement-during-new-sound"] : []);
+    if (!mayFallback) expect(fusion.getState()).toMatchObject({ pendingUtterance: undefined, pendingGesture: undefined });
+    client.stop();
+  });
+
   it("rejects stale callbacks after stop and invalidates immediately when hidden", async () => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
@@ -702,6 +848,84 @@ describe("speech client lifecycle", () => {
 
 describe("browser speech capture ownership", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  function clockHarness() {
+    let wallMs = 1000;
+    const stopTrack = vi.fn();
+    const track = { addEventListener: vi.fn(), removeEventListener: vi.fn(), stop: stopTrack };
+    const stream = { getAudioTracks: () => [track], getTracks: () => [track] };
+    const listeners = new Set<() => void>();
+    let audio!: Context;
+    let worklet!: Worklet;
+    class Context {
+      sampleRate = SPEECH_SAMPLE_RATE;
+      currentTime = 0;
+      state = "running";
+      audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+      source = { connect: vi.fn(), disconnect: vi.fn() };
+      constructor() { audio = this; }
+      setState(state: string) { this.state = state; for (const listener of [...listeners]) listener(); }
+      suspend = vi.fn(async () => this.setState("suspended"));
+      resume = vi.fn(async () => this.setState("running"));
+      close = vi.fn(async () => this.setState("closed"));
+      createMediaStreamSource = () => this.source;
+      addEventListener(type: string, listener: () => void) { if (type === "statechange") listeners.add(listener); }
+      removeEventListener(type: string, listener: () => void) { if (type === "statechange") listeners.delete(listener); }
+    }
+    class Worklet {
+      port: { onmessage: ((message: MessageEvent<CapturedAudioFrame>) => void) | null } = { onmessage: null };
+      onprocessorerror = null;
+      disconnect = vi.fn();
+      constructor() { worklet = this; }
+    }
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: vi.fn().mockResolvedValue(stream) } });
+    vi.stubGlobal("AudioContext", Context);
+    vi.stubGlobal("AudioWorkletNode", Worklet);
+    vi.stubGlobal("performance", { now: () => wallMs });
+    return {
+      get audio() { return audio; }, get worklet() { return worklet; }, listeners, stopTrack,
+      advance: (ms: number) => { wallMs += ms; },
+    };
+  }
+
+  it.each(["suspended", "interrupted", "closed"])("retires the fixed capture clock when a visible audio context becomes %s", async state => {
+    const test = clockHarness();
+    const onLost = vi.fn();
+    const onFrame = vi.fn();
+    const capture = await browserSpeechPlatform().openCapture(4, "/worklet", onFrame, onLost);
+    expect(onLost).not.toHaveBeenCalled();
+    const lateFrame = test.worklet.port.onmessage!;
+    lateFrame({ data: { generation: 4, startFrame: 0 } } as MessageEvent<CapturedAudioFrame>);
+    expect(onFrame).toHaveBeenCalledWith({ generation: 4, startFrame: 0 }, 1000);
+    test.audio.setState(state);
+    expect(onLost).toHaveBeenCalledExactlyOnceWith("Microphone audio clock stopped; enable speech again");
+    expect(test.stopTrack).toHaveBeenCalledOnce();
+    expect(test.audio.close).toHaveBeenCalledOnce();
+    expect(test.listeners.size).toBe(0);
+    test.advance(4000);
+    test.audio.setState("running");
+    // A queued frame with contiguous currentFrame cannot revive the old clock.
+    lateFrame({ data: { generation: 4, startFrame: 128 } } as MessageEvent<CapturedAudioFrame>);
+    expect(onFrame).toHaveBeenCalledOnce();
+    capture.stop();
+    expect(onLost).toHaveBeenCalledOnce();
+  });
+
+  it("permits the startup suspension and removes clock listeners before intentional cleanup", async () => {
+    const test = clockHarness();
+    const onLost = vi.fn();
+    const capture = await browserSpeechPlatform().openCapture(4, "/worklet", vi.fn(), onLost);
+    expect(test.audio.suspend).toHaveBeenCalledOnce();
+    expect(test.audio.resume).toHaveBeenCalledOnce();
+    expect(test.listeners.size).toBe(1);
+    expect(onLost).not.toHaveBeenCalled();
+    capture.stop();
+    capture.stop();
+    expect(test.listeners.size).toBe(0);
+    expect(test.audio.close).toHaveBeenCalledOnce();
+    expect(test.stopTrack).toHaveBeenCalledOnce();
+    expect(onLost).not.toHaveBeenCalled();
+  });
 
   it.each(["suspend", "addModule", "resume"] as const)(
     "releases the microphone and context when %s fails",

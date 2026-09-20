@@ -9,6 +9,7 @@ import {
   type HostedPair,
 } from "../phone/relay";
 import { MotionRecognizer } from "../input/motion";
+import { AccelerationSpikeRecognizer } from "../input/spike";
 import { CastFusion, type CastRejection } from "../input/fusion";
 import { SpeechClient } from "../speech/client";
 import { GameClient, ROOM_CODE_PATTERN, normalizeRoomCode } from "./client";
@@ -27,6 +28,9 @@ export class DuelController {
   readonly speech = new SpeechClient();
   readonly motion: MotionRecognizer;
   readonly fusion: CastFusion;
+  readonly spikes: AccelerationSpikeRecognizer;
+  private simpleMotionEnabled = false;
+  get simpleMotion(): boolean { return this.devMode && this.simpleMotionEnabled; }
   readonly telemetry = new DuelTelemetry();
   devMode = false;
   wand?: WandClient;
@@ -53,6 +57,9 @@ export class DuelController {
   private timer: ReturnType<typeof setInterval>;
   private unsubscribers: (() => void)[] = [];
   private seen = new Set<string>();
+  private pendingCasts = new Map<string, { spell: Spell; roomId: string; roomGeneration: number;
+    roundId: number; generation: number; context: string; sentAtMs: number }>();
+  private presentedCasts = new Set<string>();
   private context = "";
   private feedbackKey = "";
   private presentationEpoch =
@@ -69,10 +76,11 @@ export class DuelController {
 
   constructor() {
     this.fusion = new CastFusion((attempt) => {
-      this.telemetry.record("cast.attempt", { ...attempt, input: "speech+motion", healthy: this.healthy() });
+      this.telemetry.record("cast.attempt", { ...attempt, input: this.simpleMotion ? "speech+acceleration-spike" : "speech+motion", healthy: this.healthy() });
       if (!this.healthy()) return;
       this.miscast = undefined;
-      if (this.game.snapshot?.phase === "playing")
+      if (this.game.snapshot?.phase === "playing") {
+        this.trackCast(attempt.id, attempt.spell);
         this.game.send({
           type: "cast",
           roundId: this.game.snapshot.roundId,
@@ -82,7 +90,7 @@ export class DuelController {
           speechId: attempt.utteranceId,
           inputGeneration: this.generation,
         });
-      else if (
+      } else if (
         this.game.snapshot?.phase === "lobby" ||
         this.game.snapshot?.phase === "result"
       ) {
@@ -99,8 +107,14 @@ export class DuelController {
       this.onChange();
     }, rejection => this.showMiscast(rejection));
     this.motion = new MotionRecognizer((evidence) => {
-      this.telemetry.record("gesture.accepted", evidence);
-      if (this.game.snapshot?.tutorial?.paused) return;
+      this.telemetry.record(this.simpleMotion ? "gesture.shadow" : "gesture.accepted", evidence);
+      if (this.simpleMotion || this.game.snapshot?.tutorial?.paused) return;
+      this.fusion.pushGesture(evidence);
+      this.recordFusion();
+    });
+    this.spikes = new AccelerationSpikeRecognizer(evidence => {
+      this.telemetry.record("motion.spike", evidence);
+      if (!this.simpleMotion || document.hidden || !this.recognitionEnabled()) return;
       this.fusion.pushGesture(evidence);
       this.recordFusion();
     });
@@ -127,7 +141,7 @@ export class DuelController {
           speechPhase: this.speech.getSnapshot().phase, tutorial: this.game.snapshot?.tutorial ?? null });
         // Speech capture and wand input have separate generations, just as at onset.
         if (e.generation === this.speech.getSnapshot().generation)
-          this.fusion.cancelUtterance(e.id, this.generation);
+          this.fusion.cancelUtterance(e.id, this.generation, e.disposition);
         this.recordFusion();
       }),
       this.speech.onDiagnostic(event => this.telemetry.record(`speech.${event.type}`, event, event.atMs)),
@@ -142,7 +156,16 @@ export class DuelController {
     };
     this.game.onAck = (message) => {
       this.telemetry.record("game.ack", message);
-      if (message.command === "cast" && !message.accepted) {
+      if (message.command !== "cast" || typeof message.requestId !== "string") return;
+      this.pruneCasts();
+      const pending = this.pendingCasts.get(message.requestId);
+      if (!pending) return;
+      if (message.accepted === true && typeof message.actionId === "string" && message.actionId) {
+        this.pendingCasts.delete(message.requestId);
+        this.presentAcceptedCast(pending.spell, message.actionId);
+        this.onChange();
+      } else if (message.accepted === false) {
+        this.pendingCasts.delete(message.requestId);
         this.notice =
           message.reason === "cooldown"
             ? "Spell recharging"
@@ -170,11 +193,25 @@ export class DuelController {
   }
   setDevMode(enabled: boolean) {
     if (this.roomCode || this.busy) return;
+    if (!enabled) this.setSimpleMotion(false);
     this.devMode = enabled;
     this.telemetry.enabled = enabled;
     this.diagnosticKeys.clear();
     this.configureWandTelemetry();
     this.telemetry.record("settings", { devMode: enabled, source: this.source ?? "unpaired" });
+    this.onChange();
+  }
+  setSimpleMotion(enabled: boolean): void {
+    if ((enabled && !this.devMode) || this.roomCode || this.busy || enabled === this.simpleMotionEnabled) return;
+    this.simpleMotionEnabled = enabled;
+    this.speech.setRecognitionEnabled(false);
+    this.generation++;
+    this.fusion.setSimpleMotion(enabled);
+    this.fusion.reset(this.generation);
+    this.spikes.reset();
+    this.motion.clearPending();
+    this.miscast = undefined;
+    this.telemetry.record("settings", { devMode: this.devMode, simpleMotion: enabled });
     this.onChange();
   }
   exportTelemetry(): string {
@@ -187,8 +224,9 @@ export class DuelController {
         firmware: info.firmware, bootId: info.bootId } : null,
       speech: "local microphone; no audio retained",
       developerClicksEnabled: this.devMode,
+      simpleMotionEnabled: this.simpleMotion,
       rules: this.game.rules ?? null,
-      gestureProfile: "quick-play-jab-raise-v3",
+      gestureProfile: this.simpleMotion ? "acceleration-spike-v1" : "quick-play-jab-raise-v5",
       context: { phase: this.game.snapshot?.phase ?? "paired", tutorial: this.game.snapshot?.tutorial ?? null,
         speech: this.speech.getSnapshot(), recognitionEnabled: this.recognitionEnabled(),
         gesture: this.motion.getState(), fusion: this.fusion.getState() },
@@ -209,6 +247,7 @@ export class DuelController {
     this.miscast = undefined;
     const id = `dev:${crypto.randomUUID()}`;
     this.telemetry.record("cast.attempt", { id, spell, input: "developer-click", generation: this.generation });
+    this.trackCast(id, spell);
     this.game.send({ type: "cast", roundId: this.game.snapshot!.roundId, attemptId: id,
       spell, gestureId: id, speechId: id, inputGeneration: this.generation });
   }
@@ -233,6 +272,42 @@ export class DuelController {
   private recordFusion(): void {
     this.recordChanged("fusion", this.fusion.getState());
   }
+  private gameContext(): string {
+    const state = this.game.snapshot;
+    return state && this.game.slot
+      ? `${state.roomId}:${state.roundId}:${state.phase}:${state.tutorial?.step}:${state.tutorial?.stage}` : "paired";
+  }
+  private trackCast(id: string, spell: Spell): void {
+    const state = this.game.snapshot!;
+    this.pruneCasts();
+    this.pendingCasts.set(id, { spell, roomId: state.roomId, roomGeneration: state.roomGeneration,
+      roundId: state.roundId, generation: this.generation, context: this.gameContext(), sentAtMs: performance.now() });
+    if (this.pendingCasts.size > 32) this.pendingCasts.delete(this.pendingCasts.keys().next().value!);
+  }
+  private pruneCasts(): void {
+    const state = this.game.snapshot, now = performance.now(), context = this.gameContext();
+    for (const [id, cast] of this.pendingCasts) {
+      if (this.dead || document.hidden || this.game.issue || this.wand?.getSnapshot().phase !== "streaming" ||
+        state?.phase !== "playing" || state.roomId !== cast.roomId || state.roomGeneration !== cast.roomGeneration ||
+        state.roundId !== cast.roundId || this.generation !== cast.generation || context !== cast.context ||
+        now - cast.sentAtMs > 2_000) this.pendingCasts.delete(id);
+    }
+  }
+  private presentAcceptedCast(spell: Spell, actionId?: string | null): void {
+    const state = this.game.snapshot!;
+    if (actionId) {
+      const key = `${state.roomId}:${state.roomGeneration}:${state.roundId}:${actionId}`;
+      if (this.presentedCasts.has(key)) return;
+      this.presentedCasts.add(key);
+      if (this.presentedCasts.size > 128) this.presentedCasts.delete(this.presentedCasts.values().next().value!);
+    }
+    this.miscast = undefined;
+    this.lastSpell = spell;
+    this.lastSpellAt = performance.now();
+    this.notice = "";
+    this.wand?.cue({ effect: CueEffect.AcceptedCast, spell: codeOf(spell), durationMs: 180,
+      presentationEpoch: this.presentationEpoch });
+  }
   private showMiscast(rejection: CastRejection): void {
     this.telemetry.record("cast.rejected_input", rejection);
     const state = this.game.snapshot;
@@ -242,8 +317,7 @@ export class DuelController {
     const support = spell === "protego" || spell === "episkey";
     const action = rejection.reason === "evidence-timing-mismatch"
       ? "Speak and move together."
-      : rejection.reason === "multiple-gesture-candidates"
-        ? "Make one clear movement."
+      : this.simpleMotion ? "Move your wand as you say the spell."
         : support ? "Raise your wand and hold briefly." : "Give your wand a clear forward jab.";
     this.miscast = { id: `${this.generation}:${rejection.utterance.id}`, spell,
       atMs: performance.now(), message: `${nameOf(spell)} fizzled. ${action}` };
@@ -254,9 +328,11 @@ export class DuelController {
   }
   private visibility = () => {
     if (document.hidden) {
+      this.pendingCasts.clear();
       this.miscast = undefined;
       this.generation++;
       this.fusion.reset(this.generation);
+      this.spikes.reset();
       this.motion.clearPending();
       this.wand?.suspend();
       this.speech.stop();
@@ -356,6 +432,8 @@ export class DuelController {
     }
   }
   leaveRoom() {
+    this.pendingCasts.clear();
+    this.presentedCasts.clear();
     this.miscast = undefined;
     this.game.disconnect();
     this.game.issue = "";
@@ -368,6 +446,7 @@ export class DuelController {
     this.wand?.stopFeedback();
     this.generation++;
     this.fusion.reset(this.generation);
+    this.spikes.reset();
     this.motion.clearPending();
     this.onChange();
   }
@@ -378,6 +457,7 @@ export class DuelController {
     const request = this.attemptGeneration;
     this.generation++;
     this.fusion.reset(this.generation);
+    this.spikes.reset();
     this.speech.setRecognitionEnabled(false);
     this.motion.useDefaultProfile(this.generation);
     this.onChange();
@@ -419,6 +499,7 @@ export class DuelController {
     this.source = source;
     this.generation++;
     this.fusion.reset(this.generation);
+    this.spikes.reset();
     this.speech.setRecognitionEnabled(false);
     this.motion.reset();
     this.phoneRequest?.abort();
@@ -591,6 +672,7 @@ export class DuelController {
     this.phoneHosted = false;
     this.generation++;
     this.fusion.reset(this.generation);
+    this.spikes.reset();
     this.motion.reset();
     this.onChange();
   }
@@ -601,8 +683,13 @@ export class DuelController {
       wand.onSample((sample) => {
         if (this.wand !== wand || document.hidden) return;
         this.syncInputState();
-        if (sample.breaksGesture) this.fusion.reset(this.generation);
+        if (sample.breaksGesture) {
+          this.fusion.reset(this.generation);
+          this.spikes.reset();
+        }
         this.motion.push(sample, this.generation);
+        if (this.simpleMotion && this.recognitionEnabled()) this.spikes.push(sample, this.generation);
+        else this.spikes.reset();
         this.recordChanged("gesture.candidate", this.motion.getDiagnostics());
         const motion = this.motion.getState();
         this.recordChanged("gesture.state", { phase: motion.phase, progress: motion.progress, reason: motion.reason, issue: motion.lastIssue });
@@ -623,10 +710,12 @@ export class DuelController {
     this.recordChanged("wand.state", { phase: state.phase, generation: state.generation, issue: state.issue,
       lost: state.lost, rejected: state.rejected, deviceDropped: state.deviceDropped, rttMs: state.rttMs });
     if (state.generation !== this.observedWandGeneration) {
+      this.pendingCasts.clear();
       this.miscast = undefined;
       this.observedWandGeneration = state.generation;
       this.generation++;
       this.fusion.reset(this.generation);
+      this.spikes.reset();
       this.motion.useDefaultProfile(this.generation);
       this.feedbackKey = "";
       this.speech.setRecognitionEnabled(false);
@@ -642,8 +731,10 @@ export class DuelController {
     if (streaming && this.motion.getState().phase !== "ready")
       this.motion.useDefaultProfile(this.generation);
     if (!streaming && this.wasStreaming) {
+      this.pendingCasts.clear();
       this.miscast = undefined;
       this.fusion.reset(this.generation);
+      this.spikes.reset();
       this.motion.clearPending();
       this.speech.setRecognitionEnabled(false);
       this.sendUnhealthyHeartbeat();
@@ -691,9 +782,16 @@ export class DuelController {
     }
     this.onChange();
   }
+  canReady(): boolean {
+    const state = this.game.snapshot, slot = this.game.slot;
+    const own = slot ? state?.players[slot] : undefined;
+    if (!state || !slot || !own?.connected || own.ready || this.busy || !this.healthy() ||
+      !this.wand?.getSnapshot().info || (state.phase !== "lobby" && state.phase !== "result")) return false;
+    return state.mode !== "duel" || state.players[slot === "P1" ? "P2" : "P1"]?.connected === true;
+  }
   ready() {
     const info = this.wand?.getSnapshot().info;
-    if (!info || !this.healthy()) return;
+    if (!info || !this.canReady()) return;
     this.battleLobby = true;
     this.game.send({
       type: "ready",
@@ -705,6 +803,7 @@ export class DuelController {
     });
   }
   private syncGame() {
+    this.pruneCasts();
     this.recordChanged("game.connection", { issue: this.game.issue, mode: this.mode });
     if (this.game.issue || document.hidden) {
       this.miscast = undefined;
@@ -712,18 +811,19 @@ export class DuelController {
       this.wand?.stopFeedback();
       this.feedbackKey = "";
       this.fusion.reset(this.generation);
+      this.spikes.reset();
       this.motion.clearPending();
       return;
     }
     const state = this.game.snapshot,
       slot = this.game.slot;
-    const context =
-      state && slot ? `${state.roomId}:${state.roundId}:${state.phase}:${state.tutorial?.step}:${state.tutorial?.stage}` : "paired";
+    const context = this.gameContext();
     if (context !== this.context) {
       this.miscast = undefined;
       this.context = context;
       this.presentationEpoch = (this.presentationEpoch + 1) >>> 0 || 1;
       this.fusion.reset(this.generation);
+      this.spikes.reset();
       this.motion.clearPending();
       this.speech.setRecognitionEnabled(this.recognitionEnabled());
     }
@@ -800,15 +900,11 @@ export class DuelController {
         event.actor === slot &&
         event.spell
       ) {
-        this.miscast = undefined;
-        this.lastSpell = event.spell;
-        this.lastSpellAt = performance.now();
-        this.notice = "";
+        this.presentAcceptedCast(event.spell, event.actionId);
+        continue;
       }
       const effect =
-        event.type === "castAccepted" && event.actor === slot
-          ? CueEffect.AcceptedCast
-          : event.type === "impactBlocked" && event.target === slot
+        event.type === "impactBlocked" && event.target === slot
             ? CueEffect.BlockedIncomingHit
             : event.type === "damage" && event.target === slot
               ? CueEffect.TookDamage
@@ -826,6 +922,7 @@ export class DuelController {
     if (this.seen.size > 512) this.seen = new Set([...this.seen].slice(-256));
   }
   destroy() {
+    this.pendingCasts.clear();
     this.dead = true;
     this.attemptGeneration++;
     this.phoneRequest?.abort();

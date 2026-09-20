@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { scriptedLaptop, connectBadge, snapshot, cast, miscast } from "./scripted-laptop";
+import { scriptedLaptop, connectBadge, snapshot, cast, castWithMicrophone, miscast } from "./scripted-laptop";
 import badgeGestures from "../src/input/fixtures/badge-gestures-2026-09-20.json" with { type: "json" };
 
 test("the homepage requires a wand before offering duel creation or a code", async ({ page }) => {
@@ -397,6 +397,125 @@ test("a recorded badge raise reaches the solo referee as one Protego", async ({ 
   expect(events).toContainEqual(expect.objectContaining({ type: "shieldRaised", spell: "protego" }));
 });
 
+test("normal mode aligns real microphone timing with batched BLE in both orders and overlap", async ({ page }, testInfo) => {
+  test.setTimeout(70_000);
+  const laptop = await scriptedLaptop(page);
+  laptop.enableSpeech();
+  await expect(page.getByRole("switch", { name: "Dev mode", exact: true })).not.toBeChecked();
+  await connectBadge(page);
+  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeEnabled({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
+  await page.evaluate(() => { Reflect.get(window, "__scriptedBadge").batchMs = 100; });
+  const timing = [];
+  for (const order of ["overlap", "speech-first", "movement-first"] as const) {
+    for (const spell of ["protego", "stupefy"] as const) {
+      await expect.poll(async () => {
+        const state = await snapshot(page);
+        return state.players.P1!.cooldownUntilMs[spell] - state.serverNowMs;
+      }).toBeLessThanOrEqual(0);
+      timing.push({ order, spell, ...await castWithMicrophone(page, spell, order) });
+    }
+  }
+  await testInfo.attach("normal-microphone-motion-timing", { body: JSON.stringify(timing, null, 2), contentType: "application/json" });
+  await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(40);
+  const ownCasts = (await snapshot(page)).recentEvents.filter(e => e.actor === "P1" && e.type === "castAccepted");
+  expect(ownCasts.map(e => e.spell)).toEqual(["protego", "stupefy", "protego", "stupefy", "protego", "stupefy"]);
+  expect(await page.evaluate(() => {
+    const c = Reflect.get(window, "__duelController");
+    return { dev: c.devMode, simple: c.simpleMotion, rejected: c.wand.getSnapshot().rejected };
+  })).toEqual({ dev: false, simple: false, rejected: 0 });
+  await page.locator(".arena-frame").screenshot({ path: "/tmp/wandduel-normal-timing.png" });
+});
+
+test("dev-only simple motion casts all five spoken spells from the same raw spike", async ({ page }) => {
+  test.setTimeout(55_000);
+  await scriptedLaptop(page);
+  const toggle = page.getByRole("switch", { name: "Simple motion", exact: true });
+  await expect(toggle).toHaveCount(0);
+  await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await page.screenshot({ path: "/tmp/wandduel-simple-home.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: "/tmp/wandduel-simple-mobile.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await connectBadge(page);
+  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
+  await page.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
+  await expect(toggle).toHaveCount(0);
+  await expect(page.getByText("MOVE + SPEAK", { exact: true })).toHaveCount(5);
+
+  // A correctly recognized word on its own never submits a cast.
+  await page.evaluate(() => {
+    const c = Reflect.get(window, "__duelController"), now = performance.now(), id = crypto.randomUUID();
+    c.fusion.beginUtterance({ id, generation: c.generation, startMs: now - 120 });
+    c.fusion.pushUtterance({ id, generation: c.generation, spell: "protego", startMs: now - 120, endMs: now, finalAtMs: now });
+  });
+  await expect.poll(() => page.evaluate(() => Reflect.get(window, "__duelController").fusion.getState().pendingUtterance),
+    { timeout: 4_000 }).toBeUndefined();
+  expect((await snapshot(page)).recentEvents.filter(e => e.type === "castAccepted" && e.actor === "P1")).toEqual([]);
+
+  const spike = async (spell: "stupefy" | "protego" | "expelliarmus" | "incendio" | "episkey" | null) => page.evaluate(async spellName => {
+    const c = Reflect.get(window, "__duelController");
+    const acknowledgements: { accepted: boolean; reason?: string }[] = [];
+    const originalGesture = c.fusion.pushGesture.bind(c.fusion), originalAck = c.game.onAck;
+    let spikes = 0;
+    c.fusion.pushGesture = (evidence: { kind?: string; startMs: number; endMs: number }) => {
+      originalGesture(evidence);
+      if (evidence.kind !== "acceleration-spike") throw new Error("Typed gesture leaked into simple mode");
+      spikes++;
+      if (!spellName || spikes !== 1) return;
+      const id = crypto.randomUUID(), startMs = evidence.startMs - 60;
+      c.fusion.beginUtterance({ id, generation: c.generation, startMs });
+      c.fusion.pushUtterance({ id, generation: c.generation, spell: spellName,
+        // A mapped sensor timestamp may lead now within SYNC uncertainty. A real
+        // transcription final cannot precede its own captured audio interval.
+        startMs, endMs: evidence.endMs, finalAtMs: Math.max(evidence.endMs, performance.now()) });
+    };
+    c.game.onAck = (message: { command: string; accepted: boolean; reason?: string }) => {
+      originalAck(message);
+      if (message.command === "cast") acknowledgements.push({ accepted: message.accepted, reason: message.reason });
+    };
+    // Same short sideways pulse for attacks, shield and healing; no gesture or cast injection.
+    const raw = Array.from({ length: 46 }, (_, i) => ({ captureMs: i * 20,
+      axMg: i >= 15 && i < 19 ? 650 : 0, ayMg: 0, azMg: 1000, flags: 1 }));
+    try {
+      await Reflect.get(window, "__scriptedBadge").play("simple-spike", raw);
+      const until = performance.now() + (spellName ? 1_500 : 200);
+      while (spellName && !acknowledgements.length && performance.now() < until)
+        await new Promise(resolve => setTimeout(resolve, 10));
+      return { spikes, acknowledgements };
+    } finally {
+      c.fusion.pushGesture = originalGesture;
+      c.game.onAck = originalAck;
+    }
+  }, spell);
+  expect(await spike(null)).toMatchObject({ spikes: 1, acknowledgements: [] });
+  // Let the first bot hit supply genuine damage for the healing assertion.
+  await expect.poll(async () => (await snapshot(page)).players.P1?.hp, { timeout: 16_000 }).toBe(80);
+  for (const spell of ["protego", "stupefy", "expelliarmus", "incendio", "episkey"] as const)
+    expect(await spike(spell)).toMatchObject({ spikes: 1, acknowledgements: [{ accepted: true }] });
+  const state = await snapshot(page);
+  expect(state.players.P1?.hp).toBe(98);
+  expect(state.recentEvents.filter(e => e.type === "castAccepted" && e.actor === "P1").map(e => e.spell).sort())
+    .toEqual(["episkey", "expelliarmus", "incendio", "protego", "stupefy"]);
+  const exported = await page.evaluate(() => JSON.parse(Reflect.get(window, "__duelController").exportTelemetry()));
+  expect(exported).toMatchObject({ simpleMotionEnabled: true, gestureProfile: "acceleration-spike-v1" });
+  expect(exported.entries.filter((e: { kind: string }) => e.kind === "cast.attempt").map((e: { data: { input: string } }) => e.data.input))
+    .toEqual(Array(5).fill("speech+acceleration-spike"));
+  await page.locator(".arena-frame").screenshot({ path: "/tmp/wandduel-simple-battle.png" });
+  await page.getByRole("button", { name: "Leave duel", exact: true }).click();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
+  await expect(toggle).toHaveCount(0);
+});
+
 test("developer mode teaches all five spells and exports raw motion, speech and battle telemetry", async ({ page }) => {
   test.setTimeout(80_000);
   const errors: string[] = [];
@@ -551,7 +670,7 @@ test("developer mode teaches all five spells and exports raw motion, speech and 
 });
 
 test("wrong raw gestures fizzle locally, explain the correction, and allow the next correct cast", async ({ page }) => {
-  test.setTimeout(40_000);
+  test.setTimeout(50_000);
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   await scriptedLaptop(page);

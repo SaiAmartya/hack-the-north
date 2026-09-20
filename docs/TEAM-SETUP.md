@@ -45,6 +45,10 @@ artifacts out of commits.
 
 After a team update, pull `main` and restart the launcher on **every laptop**. Render updates
 only the referee; it does not update anyone's local frontend, speech helper or running tab.
+Compare `git rev-parse --short HEAD` across the demo laptops, restart with the platform's
+command below, then reload `127.0.0.1:5173`. Do not use a running stable snapshot as proof
+that newly pulled input code is loaded. The [normal input timing record](qa/normal-input-timing.md)
+lists the current checks and remaining physical tests; this browser change needs no firmware flash.
 
 ## 2. Install each laptop and start locally
 
@@ -105,6 +109,12 @@ ten minutes. **Leave duel** returns to room selection while keeping the connecte
 
 Say the exact incantation while moving the wand. Attack spells use a firm jab; support spells
 use a raise and hold. Cooldowns are independent, so a different ready move can follow immediately.
+Before the multiplayer demo, each laptop should complete a real microphone-and-wand cast in
+solo, then both players should verify damage and shielding in the shared room. Speech decoding
+runs locally with its own one-second result deadline; a healthy Render referee does not measure
+that laptop's microphone or inference speed. Normal mode pairs capture intervals with up to
+two seconds of separation in either order. For diagnosis, leave **Simple motion off** so that
+the typed jab/raise path is still exercised.
 
 **Tutorial duel**, directly beneath **Duel a bot**, teaches each spell's gesture and effect.
 Instructions pause the battle; choose **Try it**, speak while moving, and wait for the confirmed

@@ -14,6 +14,8 @@ Tutorial sits immediately below Duel a bot. Its five lessons pause between confi
 
 Dev mode is an explicit, default-off switch at the homepage's bottom right. It retains wand pairing but permits spell-card clicks without microphone readiness. Those clicks obey the same referee rules and are labeled in a local diagnostic log under the battle. The log includes raw received wand data, classification/fusion outcomes and raw transcription text; no microphone audio or credentials. Keep capture bounded, export on request, and render only a short recent window. Ordinary play has no diagnostic panel or clickable spells. Motion-only casting was explicitly withdrawn.
 
+Dev mode also reveals a default-off **Simple motion** switch before entering a room. It pairs a recognized spell name with a direction-independent acceleration spike. Spell cards and tutorial wording say “move” in this mode. Turning Dev mode off restores ordinary jab/raise recognition; modes cannot change during a duel. Speech is still required for motion casts.
+
 After pairing in Dev mode, a collapsed gesture-trial recorder can capture ten labelled attempts before entering a duel. Failed recognition is useful data and must still be recorded. Keep recordings local, bounded and explicitly exported; mark interruptions rather than inventing completed trials.
 
 Phone pairing uses a public QR and matching-number confirmation, or the optional trusted LAN code. Bearer capabilities never appear in URLs. The phone remains focused on permission, fresh movement, connection and expiring feedback. Failed direct connection offers an explicit internet fallback. No automatic route switch in a round.
