@@ -199,9 +199,11 @@ export class SpeechEndpoint {
   private validate(frame: CapturedAudioFrame): string {
     if (frame.sampleRate !== SPEECH_SAMPLE_RATE)
       return `Audio sample rate changed to ${frame.sampleRate} Hz`;
+    // Missing-input frames have no channels or samples. They retire the old
+    // sequence as a recoverable gap, rather than claiming the mic changed format.
+    if (frame.discontinuity) return "Audio frame continuity was lost";
     if (frame.channelCount !== 1) return "Audio worklet input is not mono";
     if (
-      frame.discontinuity ||
       !Number.isSafeInteger(frame.startFrame) ||
       frame.startFrame < 0
     )

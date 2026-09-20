@@ -7,6 +7,7 @@ type WorkletMessage = {
   startFrame: number;
   samples: Float32Array;
   discontinuity: boolean;
+  nonFinite: boolean;
 };
 
 type Processor = {
@@ -14,7 +15,7 @@ type Processor = {
 };
 
 describe("speech capture worklet", () => {
-  it("ignores only pre-capture empty quanta and still reports later loss", () => {
+  it("primes capture, reports each input outage once, and resumes a fresh contiguous sequence", () => {
     const messages: WorkletMessage[] = [];
     let ProcessorClass:
       | (new (options: { processorOptions: { generation: number } }) => Processor)
@@ -92,5 +93,37 @@ describe("speech capture worklet", () => {
       discontinuity: true,
     });
     expect(messages[3].samples).toHaveLength(0);
+
+    // A sustained outage is one incident, regardless of its render quanta.
+    for (let frame = 1024; frame < 4096; frame += 128) {
+      context.currentFrame = frame;
+      expect(processor.process([[]])).toBe(true);
+    }
+    expect(messages).toHaveLength(4);
+
+    context.currentFrame = 4096;
+    expect(processor.process([[new Float32Array(128).fill(0.02)]])).toBe(true);
+    context.currentFrame = 4224;
+    expect(processor.process([[new Float32Array(128).fill(0.02)]])).toBe(true);
+    expect(messages.slice(4).map(({ startFrame, discontinuity }) => ({
+      startFrame, discontinuity,
+    }))).toEqual([
+      { startFrame: 4096, discontinuity: false },
+      { startFrame: 4224, discontinuity: false },
+    ]);
+
+    // A later outage must still invalidate the newly established sequence.
+    context.currentFrame = 4352;
+    processor.process([[]]);
+    expect(messages).toHaveLength(7);
+    expect(messages[6]).toMatchObject({ startFrame: 4352, discontinuity: true });
+    context.currentFrame = 4480;
+    processor.process([[new Float32Array(128).fill(Number.NaN)]]);
+    expect(messages[7]).toMatchObject({ startFrame: 4480, discontinuity: false, nonFinite: true });
+
+    // Ordinary skipped PCM remains a separate discontinuity after recovery.
+    context.currentFrame = 4736;
+    processor.process([[new Float32Array(128).fill(0.02)]]);
+    expect(messages[8]).toMatchObject({ startFrame: 4736, discontinuity: true });
   });
 });

@@ -144,10 +144,14 @@ export class DuelController {
           this.fusion.cancelUtterance(e.id, this.generation);
         this.recordFusion();
       }),
-      this.speech.onDiagnostic(event => this.telemetry.record(`speech.${event.type}`, event, event.atMs)),
+      this.speech.onDiagnostic(event => {
+        this.telemetry.record(`speech.${event.type}`, event, event.atMs);
+        if (event.type === "capture-reset") this.fusion.reset(this.generation);
+      }),
     );
     this.game.getHealth = () => ({
-      healthy: this.healthy(),
+      // Preserve the round through bounded microphone recovery; casts still require healthy().
+      healthy: this.healthy(true),
       inputGeneration: this.generation,
     });
     this.game.onChange = () => {
@@ -363,14 +367,15 @@ export class DuelController {
       healthy: false,
     });
   }
-  healthy() {
+  healthy(allowMicRecovery = false) {
     const mic = this.speech.getSnapshot().phase;
     return (
       !document.hidden &&
       !this.game.issue &&
       this.wand?.getSnapshot().phase === "streaming" &&
       this.motion.getState().phase === "ready" &&
-      (this.devMode || ["listening", "busy"].includes(mic)) &&
+      (this.devMode || ["listening", "busy"].includes(mic) ||
+        (allowMicRecovery && this.speech.isRecoveringCapture())) &&
       this.renderingReady
     );
   }

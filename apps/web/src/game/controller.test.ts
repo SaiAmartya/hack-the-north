@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DuelController } from "./controller";
-import { SpeechClient, type SpeechDiscard, type SpeechOnset } from "../speech/client";
+import { SpeechClient, type SpeechDiagnostic, type SpeechDiscard, type SpeechOnset } from "../speech/client";
 import { WandClient, type CapturedMotion } from "../wand/client";
+import { BleWandTransport } from "../wand/transport";
 import { GameClient } from "./client";
 import { CueEffect, MotionFlag, PresentationPhase, SpellCode } from "../wand/protocol";
 import { parseRules, parseSnapshot } from "./contracts";
@@ -377,6 +378,45 @@ it("maps speech discard to the wand input generation without clearing newer utte
   onset({ id: "fresh", generation: speechGeneration, startMs: 10 });
   discard({ id: "discarded", generation: speechGeneration, disposition: "ambiguous" });
   expect(controller.fusion.getState().activeUtterance?.id).toBe("fresh");
+  controller.destroy();
+});
+
+it("retires confirmed speech when capture resets so it cannot cast after microphone recovery", () => {
+  let diagnostic!: (event: SpeechDiagnostic) => void;
+  vi.spyOn(SpeechClient.prototype, "onDiagnostic").mockImplementation(callback => {
+    diagnostic = callback;
+    return () => {};
+  });
+  const controller = new DuelController();
+  const voice = { id: "pre-interruption", generation: controller.generation, startMs: 1_000,
+    endMs: 1_400, finalAtMs: 1_500, spell: "stupefy" as const };
+  controller.fusion.beginUtterance(voice);
+  controller.fusion.pushUtterance(voice);
+  expect(controller.fusion.getState().pendingUtterance?.id).toBe(voice.id);
+  diagnostic({ type: "capture-reset", generation: 3, atMs: 1_600 });
+  expect(controller.fusion.getState().pendingUtterance).toBeUndefined();
+  controller.destroy();
+});
+
+it("keeps the referee heartbeat alive only during bounded mic recovery while casting remains unavailable", () => {
+  const controller = new DuelController();
+  controller.renderingReady = true;
+  controller.motion.useDefaultProfile(0);
+  const wand = new WandClient(new BleWandTransport({ requestDevice: vi.fn() }));
+  controller.wand = wand;
+  const wandState = vi.spyOn(wand, "getSnapshot").mockReturnValue({ ...wand.getSnapshot(), phase: "streaming" });
+  vi.spyOn(controller.speech, "getSnapshot").mockReturnValue({ phase: "calibrating", issue: "", generation: 3 });
+  const recovering = vi.spyOn(controller.speech, "isRecoveringCapture").mockReturnValue(true);
+  expect(controller.healthy()).toBe(false);
+  expect(controller.game.getHealth().healthy).toBe(true);
+  vi.stubGlobal("document", { ...document, hidden: true, removeEventListener: vi.fn() });
+  expect(controller.game.getHealth().healthy).toBe(false);
+  vi.stubGlobal("document", { ...document, hidden: false });
+  wandState.mockReturnValue({ ...wand.getSnapshot(), phase: "recovering" });
+  expect(controller.game.getHealth().healthy).toBe(false);
+  wandState.mockReturnValue({ ...wand.getSnapshot(), phase: "streaming" });
+  recovering.mockReturnValue(false);
+  expect(controller.game.getHealth().healthy).toBe(false);
   controller.destroy();
 });
 

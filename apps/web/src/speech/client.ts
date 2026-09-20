@@ -42,7 +42,7 @@ export type SpeechDiscard = Pick<SpeechOnset, "id" | "generation"> & {
 };
 
 export type SpeechDiagnostic = {
-  type: "calibrated" | "onset" | "result" | "discard" | "recovered" | "fault";
+  type: "calibrated" | "onset" | "result" | "discard" | "recovered" | "capture-reset" | "fault";
   atMs: number;
   generation: number;
   utteranceId?: string;
@@ -75,7 +75,7 @@ export type SpeechClientPlatform = {
     generation: number,
     workletUrl: string,
     onFrame: (frame: CapturedAudioFrame, timeOriginMs: number) => void,
-    onLost: (issue: string) => void,
+    onLost: (issue: string, recoverable?: boolean) => void,
   ) => Promise<Capture>;
 };
 
@@ -121,7 +121,7 @@ type HelperResult = {
 const MAX_RESULT_DELAY_MS = 1000;
 const LATE_RESULT_ISSUE = "Speech result arrived too late; say it again";
 const MAX_PCM_BYTES = SPEECH_SAMPLE_RATE * 3 * 2;
-const FIRST_AUDIO_FRAME_TIMEOUT_MS = 2000;
+const AUDIO_FRAME_TIMEOUT_MS = 2000;
 
 export class SpeechClient {
   private snapshot: SpeechSnapshot = {
@@ -140,6 +140,9 @@ export class SpeechClient {
   private recognitionFromMs = -Infinity;
   private requestFailures = 0;
   private captureRecoveries = 0;
+  private captureRestarts: number[] = [];
+  private restartTimer?: ReturnType<typeof setTimeout>;
+  private recoveryUntilMs = 0;
   private speechListeners = new Set<(evidence: SpeechEvidence) => void>();
   private onsetListeners = new Set<(onset: SpeechOnset) => void>();
   private discardListeners = new Set<(utterance: SpeechDiscard) => void>();
@@ -152,6 +155,11 @@ export class SpeechClient {
 
   getSnapshot(): SpeechSnapshot {
     return { ...this.snapshot };
+  }
+
+  isRecoveringCapture(): boolean {
+    return this.platform.now() < this.recoveryUntilMs &&
+      ["starting", "calibrating"].includes(this.snapshot.phase);
   }
 
   setRecognitionEnabled(enabled: boolean): void {
@@ -198,7 +206,13 @@ export class SpeechClient {
   }
 
   async start(): Promise<void> {
+    this.captureRestarts = [];
+    await this.startSession();
+  }
+
+  private async startSession(recoveryUntilMs = 0): Promise<void> {
     this.teardown("off", "");
+    this.recoveryUntilMs = recoveryUntilMs;
     const generation = this.generation;
     this.snapshot = { phase: "starting", issue: "", generation };
     if (this.platform.isHidden()) {
@@ -216,11 +230,10 @@ export class SpeechClient {
         health.status !== "ok" ||
         !health.ready ||
         !health.warm ||
-        health.busy ||
         !health.workerAvailable
       ) {
         throw new Error(
-          health.issue || "Local speech helper is not warm and idle",
+          health.issue || "Local speech helper is not ready",
         );
       }
       this.snapshot = { phase: "calibrating", issue: "", generation };
@@ -228,8 +241,10 @@ export class SpeechClient {
         generation,
         this.workletUrl,
         (frame, timeOriginMs) => this.frame(generation, frame, timeOriginMs),
-        (issue) => {
-          if (generation === this.generation) this.fail(issue);
+        (issue, recoverable) => {
+          if (generation !== this.generation) return;
+          if (recoverable) this.recoverCapture(issue);
+          else this.fail(issue);
         },
       );
       if (generation !== this.generation) {
@@ -280,7 +295,9 @@ export class SpeechClient {
         this.draft = undefined;
         this.completedInference = undefined;
         this.endpoint = new SpeechEndpoint(generation, timeOriginMs);
+        this.recoveryUntilMs = this.platform.now() + 5_000;
         this.snapshot = { phase: "calibrating", issue: "", generation };
+        this.diagnostic({ type: "capture-reset", detail: "Interrupted PCM discarded" });
         this.diagnostic({ type: "recovered", detail: "Audio gap cleared; recalibrating fresh capture" });
       } else this.endpointEvent(event);
     }
@@ -293,6 +310,7 @@ export class SpeechClient {
     }
     if (event.type === "calibrated") {
       this.captureRecoveries = 0;
+      this.recoveryUntilMs = 0;
       this.snapshot = {
         phase: "listening",
         issue: "",
@@ -410,7 +428,7 @@ export class SpeechClient {
       ),
     };
     this.pending = pending;
-    this.snapshot = { ...this.snapshot, phase: "busy", issue: "" };
+    this.snapshot = { ...this.snapshot, phase: "busy" };
     void this.transcribe(pending, body, Math.floor(remaining));
   }
 
@@ -438,6 +456,7 @@ export class SpeechClient {
         body,
         signal: pending.abort.signal,
       });
+      if (!this.isPending(pending)) return;
       if (response.status === 504 || response.status === 409) {
         this.discardPending(
           pending,
@@ -447,8 +466,11 @@ export class SpeechClient {
         );
         return;
       }
-      if (response.status >= 500 && ++this.requestFailures < 3) {
+      if (response.status >= 500) {
+        this.requestFailures++;
         this.discardPending(pending, "Local speech helper temporarily unavailable");
+        if (this.requestFailures >= 3)
+          this.snapshot = { ...this.snapshot, issue: "Speech helper unavailable; retrying with your next spell." };
         return;
       }
       if (!response.ok) throw new Error("Local speech transcription failed");
@@ -457,9 +479,12 @@ export class SpeechClient {
       this.result(pending, result);
     } catch (error) {
       if (!pending.abort.signal.aborted && this.isPending(pending)) {
-        if (error instanceof TypeError && ++this.requestFailures < 3)
+        if (error instanceof TypeError) {
+          this.requestFailures++;
           this.discardPending(pending, "Local speech request interrupted");
-        else this.fail("Microphone recognition is unavailable. Try reconnecting it.");
+          if (this.requestFailures >= 3)
+            this.snapshot = { ...this.snapshot, issue: "Speech helper unavailable; retrying with your next spell." };
+        } else this.fail("Microphone recognition is unavailable. Try reconnecting it.");
       }
     } finally {
       pending.settled = true;
@@ -537,7 +562,6 @@ export class SpeechClient {
     pending.abort.abort();
     pending.settled = true;
     this.diagnostic({ type: "discard", utteranceId: pending.id, detail: issue });
-    this.snapshot = { ...this.snapshot, issue: "" };
     this.completePending(pending);
   }
 
@@ -577,7 +601,7 @@ export class SpeechClient {
     this.snapshot = {
       ...this.snapshot,
       phase: "listening",
-      issue: "",
+      issue: this.requestFailures >= 3 ? this.snapshot.issue : "",
     };
   }
 
@@ -592,8 +616,32 @@ export class SpeechClient {
   }
 
   private fail(issue: string): void {
+    this.diagnostic({ type: "capture-reset", detail: issue });
     this.diagnostic({ type: "fault", detail: issue });
     this.teardown("fault", issue);
+  }
+
+  private recoverCapture(issue: string): void {
+    const now = this.platform.now();
+    this.captureRestarts = this.captureRestarts.filter(atMs => now - atMs < 30_000);
+    if (this.platform.isHidden() || this.captureRestarts.length >= 2) {
+      this.fail(issue);
+      return;
+    }
+    this.captureRestarts.push(now);
+    this.diagnostic({ type: "capture-reset", detail: issue });
+    this.teardown("off", "");
+    const generation = this.generation;
+    const recoveryUntilMs = now + 5_000;
+    this.recoveryUntilMs = recoveryUntilMs;
+    this.snapshot = { phase: "starting", issue: "", generation };
+    this.diagnostic({ type: "recovered", detail: "Restarting interrupted microphone with a fresh audio clock" });
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      if (generation !== this.generation) return;
+      if (this.platform.isHidden()) this.fail("Page is hidden; return to the game before enabling speech");
+      else void this.startSession(recoveryUntilMs);
+    }, 250);
   }
 
   private diagnostic(event: Omit<SpeechDiagnostic, "atMs" | "generation">): void {
@@ -603,6 +651,9 @@ export class SpeechClient {
 
   private teardown(phase: "off" | "fault", issue: string): void {
     this.generation++;
+    if (this.restartTimer !== undefined) clearTimeout(this.restartTimer);
+    this.restartTimer = undefined;
+    this.recoveryUntilMs = 0;
     this.requestFailures = 0;
     this.captureRecoveries = 0;
     this.pending?.abort.abort();
@@ -653,13 +704,9 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
         if (document.visibilityState !== "visible")
           onInvalidated("Page hidden or suspended; speech evidence was cleared");
       };
-      const device = () =>
-        onInvalidated("Microphone devices changed; enable speech again");
       document.addEventListener("visibilitychange", visibility);
-      navigator.mediaDevices.addEventListener("devicechange", device);
       return () => {
         document.removeEventListener("visibilitychange", visibility);
-        navigator.mediaDevices.removeEventListener("devicechange", device);
       };
     },
     openCapture: async (generation, workletUrl, onFrame, onLost) => {
@@ -675,14 +722,14 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
       let context: AudioContext | undefined;
       let source: MediaStreamAudioSourceNode | undefined;
       let node: AudioWorkletNode | undefined;
-      let firstFrameTimeout: ReturnType<typeof setTimeout> | undefined;
+      let audioWatchdog: ReturnType<typeof setInterval> | undefined;
       let stopped = false;
       let ended: (() => void) | undefined;
       let contextStateChanged: (() => void) | undefined;
       const cleanup = () => {
         if (stopped) return;
         stopped = true;
-        if (firstFrameTimeout !== undefined) clearTimeout(firstFrameTimeout);
+        if (audioWatchdog !== undefined) clearInterval(audioWatchdog);
         if (node) {
           node.port.onmessage = null;
           node.onprocessorerror = null;
@@ -705,10 +752,10 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
         for (const item of stream.getTracks()) item.stop();
         if (context) void context.close().catch(() => undefined);
       };
-      const lost = (issue: string) => {
+      const lost = (issue: string, recoverable = false) => {
         if (stopped) return;
         cleanup();
-        onLost(issue);
+        onLost(issue, recoverable);
       };
       try {
         const track = stream.getAudioTracks()[0];
@@ -733,7 +780,7 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
           lost("Laptop microphone track ended; enable speech again");
         track.addEventListener("ended", ended, { once: true });
         node.onprocessorerror = () =>
-          lost("Audio worklet stopped; enable speech again");
+          lost("Audio worklet stopped; enable speech again", true);
         // Assemble the graph while its clock is explicitly suspended. Starting
         // the clock before the source and processor are connected can skip an
         // initial render quantum in Chrome.
@@ -744,24 +791,23 @@ export function browserSpeechPlatform(): SpeechClientPlatform {
         // assigning stale timestamps to resumed or already queued microphone data.
         contextStateChanged = () => {
           if (context?.state !== "running")
-            lost("Microphone audio clock stopped; enable speech again");
+            lost("Microphone audio clock stopped; enable speech again", true);
         };
         context.addEventListener("statechange", contextStateChanged);
         if (context.state !== "running")
           throw new Error("Microphone audio clock stopped; enable speech again");
         const timeOriginMs = performance.now() - context.currentTime * 1000;
+        let lastAudioAtMs = performance.now();
         node.port.onmessage = (message: MessageEvent<CapturedAudioFrame>) => {
           if (stopped) return;
-          if (firstFrameTimeout !== undefined) {
-            clearTimeout(firstFrameTimeout);
-            firstFrameTimeout = undefined;
-          }
+          if (message.data.samples.length && !message.data.discontinuity)
+            lastAudioAtMs = performance.now();
           onFrame(message.data, timeOriginMs);
         };
-        firstFrameTimeout = setTimeout(
-          () => lost("Microphone produced no audio; enable speech again"),
-          FIRST_AUDIO_FRAME_TIMEOUT_MS,
-        );
+        audioWatchdog = setInterval(() => {
+          if (performance.now() - lastAudioAtMs >= AUDIO_FRAME_TIMEOUT_MS)
+            lost("Microphone produced no audio; enable speech again", true);
+        }, 500);
         return { stop: cleanup };
       } catch (error) {
         cleanup();

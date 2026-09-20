@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { castWithMicrophone, connectBadge, scriptedLaptop, snapshot } from "./scripted-laptop";
 
 test.use({
   permissions: ["microphone"],
@@ -55,15 +56,88 @@ test("audio worklet tolerates graph priming but reports loss after capture start
     )
       await new Promise((resolve) => setTimeout(resolve, 10));
     const reportedLoss = messages.some((message) => message.discontinuity);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const outageCount = messages.filter(message => message.discontinuity).length;
+    const beforeResume = messages.length;
+    source.connect(node);
+    const resumeDeadline = performance.now() + 1_000;
+    while (messages.length < beforeResume + 10 && performance.now() < resumeDeadline)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    const resumed = messages.slice(beforeResume);
     source.stop();
     node.disconnect();
     await context.close();
-    return { beforeSource, first, reportedLoss };
+    return { beforeSource, first, reportedLoss, outageCount, resumed };
   });
 
   expect(result.beforeSource).toBe(0);
   expect(result.first).toEqual({ length: 128, discontinuity: false });
   expect(result.reportedLoss).toBe(true);
+  expect(result.outageCount).toBe(1);
+  expect(result.resumed.length).toBeGreaterThanOrEqual(10);
+  expect(result.resumed.every(frame => frame.length === 128 && !frame.discontinuity)).toBe(true);
+});
+
+test("battle microphone ignores unrelated device changes and recovers a suspended audio clock before casting", async ({ page }) => {
+  test.setTimeout(45_000);
+  await page.addInitScript(() => {
+    const captureContexts: AudioContext[] = [];
+    Reflect.set(window, "__captureContexts", captureContexts);
+    const NativeAudioContext = window.AudioContext;
+    class ObservedAudioContext extends NativeAudioContext {
+      override createMediaStreamSource(stream: MediaStream): MediaStreamAudioSourceNode {
+        // Observe only the production capture context, not the synthetic mic source.
+        captureContexts.push(this);
+        return super.createMediaStreamSource(stream);
+      }
+    }
+    window.AudioContext = ObservedAudioContext;
+  });
+  const laptop = await scriptedLaptop(page);
+  laptop.enableSpeech();
+  await connectBadge(page);
+  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeEnabled({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
+
+  const initial = await page.evaluate(() => {
+    const controller = Reflect.get(window, "__duelController");
+    navigator.mediaDevices.dispatchEvent(new Event("devicechange"));
+    return { generation: controller.speech.getSnapshot().generation,
+      contexts: Reflect.get(window, "__captureContexts").length };
+  });
+  await page.waitForTimeout(300); // Let asynchronous device-change handling settle.
+  expect(await page.evaluate(() => {
+    const controller = Reflect.get(window, "__duelController");
+    return { generation: controller.speech.getSnapshot().generation,
+      contexts: Reflect.get(window, "__captureContexts").length, healthy: controller.healthy() };
+  })).toEqual({ ...initial, healthy: true });
+
+  const interruptedAt = await page.evaluate(async () => {
+    const contexts = Reflect.get(window, "__captureContexts") as AudioContext[];
+    const atMs = performance.now();
+    await contexts.at(-1)!.suspend();
+    return atMs;
+  });
+  await expect.poll(() => page.evaluate(() => {
+    const controller = Reflect.get(window, "__duelController");
+    return controller.healthy() && controller.speech.getSnapshot().phase === "listening";
+  }), { timeout: 10_000 }).toBe(true);
+  const recovered = await page.evaluate(() => {
+    const contexts = Reflect.get(window, "__captureContexts") as AudioContext[];
+    return { contexts: contexts.length, first: contexts[0].state, last: contexts.at(-1)!.state,
+      generation: Reflect.get(window, "__duelController").speech.getSnapshot().generation };
+  });
+  expect(recovered).toMatchObject({ contexts: initial.contexts + 1, first: "closed", last: "running" });
+  expect(recovered.generation).toBeGreaterThan(initial.generation);
+  expect((await snapshot(page)).phase).toBe("playing");
+
+  // Real PCM/worklet + raw BLE + referee; only speech decoding is scripted.
+  const proof = await castWithMicrophone(page, "stupefy", "speech-first", { speechFirst: "immediate" });
+  expect(proof.voices[0].startMs).toBeGreaterThan(interruptedAt);
+  await expect(page.getByRole("meter", { name: "Opponent health" })).toHaveAttribute("value", "80");
+  await expect(page.getByRole("button", { name: "Enable microphone", exact: true })).toHaveCount(0);
 });
 
 test.describe("production browser speech capture", () => {

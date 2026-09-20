@@ -170,4 +170,22 @@ describe("speech endpoint", () => {
       { type: "fault", issue: "Microphone produced invalid PCM" },
     ]);
   });
+
+  it("classifies missing input as a continuity gap while still rejecting actual format changes", () => {
+    const missing = harness();
+    missing.many(0.002, 250);
+    missing.many(0.08, 20);
+    expect(missing.push(0, { channelCount: 0, samples: new Float32Array(),
+      discontinuity: true, nonFinite: true })).toEqual([
+      { type: "fault", issue: "Audio frame continuity was lost" },
+    ]);
+    expect(missing.many(0.001, 30)).toEqual([]);
+
+    expect(harness().push(0.01, { channelCount: 2 })).toEqual([
+      { type: "fault", issue: "Audio worklet input is not mono" },
+    ]);
+    expect(harness().push(0, { sampleRate: 48_000, discontinuity: true })).toEqual([
+      { type: "fault", issue: "Audio sample rate changed to 48000 Hz" },
+    ]);
+  });
 });

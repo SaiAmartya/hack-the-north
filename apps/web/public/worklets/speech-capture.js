@@ -4,6 +4,7 @@ class WandSpeechCaptureProcessor extends AudioWorkletProcessor {
     this.generation = options.processorOptions.generation;
     this.expectedFrame = null;
     this.pendingStart = null;
+    this.inputMissing = false;
   }
 
   process(inputs) {
@@ -17,6 +18,10 @@ class WandSpeechCaptureProcessor extends AudioWorkletProcessor {
         this.pendingStart = null;
         return true;
       }
+      // Retire the current utterance once when an input outage begins. Empty
+      // render quanta from the same outage must not exhaust recovery attempts.
+      if (this.inputMissing) return true;
+      this.inputMissing = true;
       this.port.postMessage({
         generation: this.generation,
         startFrame: currentFrame,
@@ -70,7 +75,10 @@ class WandSpeechCaptureProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    message.discontinuity = startFrame !== this.expectedFrame;
+    // The missing-input event already retired the old sequence. Resume with
+    // fresh PCM without reporting that same gap a second time.
+    message.discontinuity = !this.inputMissing && startFrame !== this.expectedFrame;
+    this.inputMissing = false;
     this.expectedFrame = startFrame + samples.length;
     this.port.postMessage(message, [samples.buffer]);
     return true;

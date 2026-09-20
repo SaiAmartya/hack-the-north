@@ -33,14 +33,17 @@ class FakePlatform implements SpeechClientPlatform {
   generation = 0;
   idCounter = 0;
   stopped = false;
+  hidden = false;
+  captures = 0;
   transcriptions: Deferred<Response>[] = [];
   requests: { url: string; init?: RequestInit }[] = [];
   private onFrame?: (frame: CapturedAudioFrame, timeOriginMs: number) => void;
   private invalidated?: (issue: string) => void;
+  private lost?: (issue: string, recoverable?: boolean) => void;
 
   now = () => this.nowMs;
   createId = () => `utterance-${++this.idCounter}`;
-  isHidden = () => false;
+  isHidden = () => this.hidden;
   watchLifecycle = (listener: (issue: string) => void) => {
     this.invalidated = listener;
     return () => {
@@ -51,9 +54,13 @@ class FakePlatform implements SpeechClientPlatform {
     generation,
     _workletUrl,
     onFrame,
+    onLost,
   ) => {
+    this.captures++;
+    this.stopped = false;
     this.generation = generation;
     this.onFrame = onFrame;
+    this.lost = onLost;
     return { stop: () => { this.stopped = true; } };
   };
   request: typeof fetch = async (input, init) => {
@@ -111,6 +118,10 @@ class FakePlatform implements SpeechClientPlatform {
     this.frame += 128;
     this.feed(0.002, 1);
   }
+
+  lose(recoverable = true): void {
+    this.lost?.("Capture interrupted", recoverable);
+  }
 }
 
 async function flush(): Promise<void> {
@@ -123,6 +134,7 @@ function fuseSpeech(client: SpeechClient) {
   client.onOnset((event) => fusion.beginUtterance(event));
   client.onSpeech((event) => fusion.pushUtterance({ ...event, finalAtMs: event.arrivedMs }));
   client.onDiscard((event) => fusion.cancelUtterance(event.id, event.generation));
+  client.onDiagnostic(event => { if (event.type === "capture-reset") fusion.reset(); });
   return { fusion, casts };
 }
 
@@ -198,7 +210,7 @@ describe("speech client lifecycle", () => {
     client.stop();
   });
 
-  it("surfaces a persistent helper failure only after three fresh attempts", async () => {
+  it("keeps capture alive through repeated helper failures and accepts the next recovered result", async () => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
     await client.start();
@@ -207,9 +219,94 @@ describe("speech client lifecycle", () => {
       platform.utterance();
       platform.transcriptions[index].resolve(new Response(null, { status: 503 }));
       await flush();
-      expect(client.getSnapshot().phase).toBe(index < 2 ? "listening" : "fault");
+      expect(client.getSnapshot().phase).toBe("listening");
     }
-    expect(platform.stopped).toBe(true);
+    expect(client.getSnapshot().issue).toContain("Speech helper unavailable");
+    expect(platform.stopped).toBe(false);
+    const evidence: SpeechEvidence[] = [];
+    client.onSpeech(value => evidence.push(value));
+    platform.utterance();
+    expect(client.getSnapshot()).toMatchObject({ phase: "busy", issue: expect.stringContaining("Speech helper unavailable") });
+    const headers = new Headers(platform.requests.at(-1)!.init?.headers);
+    platform.transcriptions[3].resolve(Response.json({ utteranceId: headers.get("X-Wand-Utterance-Id"),
+      generation: Number(headers.get("X-Wand-Generation")), text: "Protego", spell: "protego" }));
+    await flush();
+    expect(evidence.map(value => value.spell)).toEqual(["protego"]);
+    expect(client.getSnapshot()).toMatchObject({ phase: "listening", issue: "" });
+    expect(platform.captures).toBe(1);
+    client.stop();
+  });
+
+  it("automatically reopens interrupted capture with fresh speech and ignores the abandoned result", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const old = new Headers(platform.requests.at(-1)!.init?.headers);
+    platform.lose();
+    expect(client.getSnapshot()).toMatchObject({ phase: "starting", issue: "" });
+    expect(fusion.getState().activeUtterance).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(platform.captures).toBe(2);
+    expect(client.getSnapshot().generation).toBeGreaterThan(Number(old.get("X-Wand-Generation")));
+    platform.transcriptions[0].resolve(new Response(null, { status: 503 }));
+    await flush();
+    expect(casts).toEqual([]);
+    expect(client.getSnapshot()).toMatchObject({ phase: "calibrating", issue: "" });
+    expect(client.isRecoveringCapture()).toBe(true);
+    platform.calibrate();
+    expect(client.isRecoveringCapture()).toBe(false);
+    platform.utterance();
+    const fresh = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(fresh, "fresh-after-restart"));
+    platform.transcriptions[1].resolve(Response.json({ utteranceId: fresh.get("X-Wand-Utterance-Id"),
+      generation: Number(fresh.get("X-Wand-Generation")), text: "Stupefy", spell: "stupefy" }));
+    await flush();
+    expect(casts.map(value => value.gestureId)).toEqual(["fresh-after-restart"]);
+    client.stop();
+  });
+
+  it.each(["stop", "hidden", "track-ended"])("does not retry capture after %s", async cause => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    await client.start();
+    platform.lose(cause !== "track-ended");
+    if (cause === "stop") client.stop();
+    if (cause === "hidden") platform.hidden = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(platform.captures).toBe(1);
+    expect(client.getSnapshot().phase).toBe(cause === "stop" ? "off" : "fault");
+    client.stop();
+  });
+
+  it("bounds automatic capture restarts to two per thirty seconds", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    await client.start();
+    for (let index = 0; index < 3; index++) {
+      platform.lose();
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    expect(platform.captures).toBe(3);
+    expect(client.getSnapshot().phase).toBe("fault");
+    await client.start();
+    expect(platform.captures).toBe(4);
+    client.stop();
+  });
+
+  it("expires the heartbeat recovery grace even if replacement capture never produces audio", async () => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    await client.start();
+    expect(client.isRecoveringCapture()).toBe(false);
+    platform.lose();
+    expect(client.isRecoveringCapture()).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(client.isRecoveringCapture()).toBe(true);
+    platform.nowMs += 5_001;
+    expect(client.isRecoveringCapture()).toBe(false);
     client.stop();
   });
 
@@ -847,7 +944,8 @@ describe("speech client lifecycle", () => {
 });
 
 describe("browser speech capture ownership", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
   function clockHarness() {
     let wallMs = 1000;
@@ -895,10 +993,11 @@ describe("browser speech capture ownership", () => {
     const capture = await browserSpeechPlatform().openCapture(4, "/worklet", onFrame, onLost);
     expect(onLost).not.toHaveBeenCalled();
     const lateFrame = test.worklet.port.onmessage!;
-    lateFrame({ data: { generation: 4, startFrame: 0 } } as MessageEvent<CapturedAudioFrame>);
-    expect(onFrame).toHaveBeenCalledWith({ generation: 4, startFrame: 0 }, 1000);
+    const firstFrame = { generation: 4, startFrame: 0, samples: new Float32Array(128) };
+    lateFrame({ data: firstFrame } as MessageEvent<CapturedAudioFrame>);
+    expect(onFrame).toHaveBeenCalledWith(firstFrame, 1000);
     test.audio.setState(state);
-    expect(onLost).toHaveBeenCalledExactlyOnceWith("Microphone audio clock stopped; enable speech again");
+    expect(onLost).toHaveBeenCalledExactlyOnceWith("Microphone audio clock stopped; enable speech again", true);
     expect(test.stopTrack).toHaveBeenCalledOnce();
     expect(test.audio.close).toHaveBeenCalledOnce();
     expect(test.listeners.size).toBe(0);
@@ -909,6 +1008,18 @@ describe("browser speech capture ownership", () => {
     expect(onFrame).toHaveBeenCalledOnce();
     capture.stop();
     expect(onLost).toHaveBeenCalledOnce();
+  });
+
+  it("detects a persistent outage even after capture initially delivered frames", async () => {
+    const test = clockHarness();
+    const onLost = vi.fn();
+    const capture = await browserSpeechPlatform().openCapture(4, "/worklet", vi.fn(), onLost);
+    test.worklet.port.onmessage!({ data: { samples: new Float32Array(128) } } as MessageEvent<CapturedAudioFrame>);
+    test.advance(2_001);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(onLost).toHaveBeenCalledExactlyOnceWith("Microphone produced no audio; enable speech again", true);
+    expect(test.stopTrack).toHaveBeenCalledOnce();
+    capture.stop();
   });
 
   it("permits the startup suspension and removes clock listeners before intentional cleanup", async () => {
