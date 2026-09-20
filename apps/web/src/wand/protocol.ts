@@ -82,6 +82,8 @@ export enum SpellCode {
 export enum StatusKind {
   Health = 0,
   CommandResult = 1,
+  /** Firmware 0.2.3: a badge button asks the browser to cast a spell (fallback for the recognizer). */
+  ButtonCast = 2,
 }
 
 export enum CommandResultCode {
@@ -194,7 +196,19 @@ export type CommandResultStatus = {
   resultCode: CommandResultCode;
 };
 
-export type StatusRecord = HealthStatus | CommandResultStatus;
+export type ButtonCastStatus = {
+  version: typeof WAND_PROTOCOL_VERSION;
+  kind: StatusKind.ButtonCast;
+  commandSeq: 0;
+  linkNonce: number;
+  deviceMs: number;
+  /** Contract spell code 1..7. */
+  spell: SpellCode;
+  /** Presses since boot; distinguishes two quick presses of the same button. */
+  pressCount: number;
+};
+
+export type StatusRecord = HealthStatus | CommandResultStatus | ButtonCastStatus;
 
 export type ProtocolErrorCode =
   | "invalid-length"
@@ -515,6 +529,15 @@ export function encodeStatus(status: StatusRecord): Uint8Array {
       view.setUint32(12, status.opcode, true);
       view.setUint32(16, status.resultCode, true);
       break;
+    case StatusKind.ButtonCast:
+      if (status.commandSeq !== 0) {
+        throw rangeError("button commandSeq must be zero");
+      }
+      assertEnumValue("spell", status.spell, SpellCode.Stupefy, SpellCode.ExpectoPatronum);
+      assertInteger("pressCount", status.pressCount, 0, 0xffff_ffff);
+      view.setUint32(12, status.spell, true);
+      view.setUint32(16, status.pressCount, true);
+      break;
   }
   return bytes;
 }
@@ -564,6 +587,22 @@ export function decodeStatus(bytes: Uint8Array): StatusRecord {
       deviceMs,
       opcode: detail0,
       resultCode: detail1,
+    };
+  }
+
+  if (kind === StatusKind.ButtonCast) {
+    if (commandSeq !== 0) {
+      throw rangeError("button commandSeq must be zero");
+    }
+    assertEnumValue("spell", detail0, SpellCode.Stupefy, SpellCode.ExpectoPatronum);
+    return {
+      version: WAND_PROTOCOL_VERSION,
+      kind,
+      commandSeq: 0,
+      linkNonce,
+      deviceMs,
+      spell: detail0,
+      pressCount: detail1,
     };
   }
 

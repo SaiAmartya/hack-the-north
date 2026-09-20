@@ -3,6 +3,7 @@ import { DuelController } from "./controller";
 import { SpeechClient, type SpeechOnset } from "../speech/client";
 import { WandClient, type CapturedMotion } from "../wand/client";
 import { GameClient } from "./client";
+import { SpellCode } from "../wand/protocol";
 import { createCoreMotionFixtures } from "../input/traceFixtures";
 
 class FakeWebSocket {
@@ -65,6 +66,37 @@ it("stops renewing badge feedback and clears evidence when the referee is lost",
   controller.game.onChange();
   expect(stopFeedback).toHaveBeenCalledOnce();
   expect(controller.fusion.getState().activeUtterance).toBeUndefined();
+  controller.destroy();
+});
+
+it("casts from a badge button without motion or speech evidence", () => {
+  const controller = new DuelController();
+  controller.roomCode = "K7X2PD";
+  const cue = vi.fn();
+  controller.wand = {
+    getSnapshot: () => ({ phase: "streaming", info: { firmware: { major: 0, minor: 2, patch: 3 } } }),
+    cue,
+    stopFeedback: vi.fn(),
+    disconnect: vi.fn(),
+  } as unknown as WandClient;
+  const press = { spell: SpellCode.Stupefy, pressCount: 1, deviceMs: 100, browserMs: 100, generation: 1 };
+  // Lobby: the press counts as practice and lights the badge, like a fused cast would.
+  controller.game.snapshot = { phase: "lobby", roundId: 1 } as unknown as typeof controller.game.snapshot;
+  controller.castFromButton(press);
+  expect(controller.practiced.has("stupefy")).toBe(true);
+  expect(cue).toHaveBeenCalledWith(expect.objectContaining({ spell: SpellCode.Stupefy }));
+  // Duel: the press becomes a referee cast with button-scoped evidence ids.
+  const send = vi.spyOn(controller.game, "send").mockImplementation(() => {});
+  controller.game.snapshot = { phase: "playing", roundId: 7 } as unknown as typeof controller.game.snapshot;
+  controller.castFromButton({ ...press, spell: SpellCode.ExpectoPatronum, pressCount: 2 });
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({ type: "cast", roundId: 7, spell: "expecto-patronum", gestureId: "button-2", speechId: "button-2" }),
+  );
+  // A wand that is not streaming cannot cast.
+  send.mockClear();
+  (controller.wand as unknown as { getSnapshot: () => unknown }).getSnapshot = () => ({ phase: "fault" });
+  controller.castFromButton({ ...press, pressCount: 3 });
+  expect(send).not.toHaveBeenCalled();
   controller.destroy();
 });
 

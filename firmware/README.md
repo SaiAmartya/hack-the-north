@@ -15,7 +15,7 @@ firmware route, and the organizers now publish an official
 **Teammate starting point:** build/backup/install instructions are in [Safe teammate setup](#safe-teammate-setup).
 For the laptop game and iPhone setup, start at the [repository README](../README.md).
 
-## 0.2.x — gameplay image (current source: 0.2.2)
+## 0.2.x — gameplay image (current source: 0.2.3)
 
 **What changed from the 0.1.x diagnostic images.** The badge boots straight into the contract's
 gameplay profile and advertises after **every** kind of reset:
@@ -52,6 +52,18 @@ gameplay profile and advertises after **every** kind of reset:
   (`txpower` persists another), 40–80 ms advertising, and an RTC-retained brownout count that delays
   the radio and lowers power after each brownout reset (reason 9). See
   [the change record](../docs/qa/firmware-0.2.0.md#021--battery-brownout-fix-flashed).
+- **0.2.3 HUD and button casts (built September 20, not yet flashed):** the screen is a duel HUD:
+  heart + HP number + coloured HP bar, seven cooldown rings (one per spell, in spell-code order) whose
+  inner disc drains clockwise with the seconds left printed inside and the casting button shown while
+  ready, three-letter spell labels, the cue line, the movement bar and a hint. Rings start on an
+  accepted-cast cue during `playing` from the referee's cooldown table (2/3/6/6/9/10/15 s) plus a 500 ms
+  recovery dim, and clear with the lease/epoch/phase. Buttons A/B/RIGHT/UP/LEFT/DOWN/HOME send a
+  STATUS kind-2 button cast request (Stupefy/Protego/Expelliarmus/Incendio/Sectumsempra/Petrificus
+  Totalus/Expecto Patronum) that the browser turns into a full cast; START still recalibrates. Rings are
+  drawn through a 40×40 RGB565 canvas with a precomputed angle table, so a full redraw of all seven
+  costs a few milliseconds. Build: 662,833 bytes flash, 28,008 bytes static RAM (`pio run -e badge` from
+  PowerShell with the PATH `pio`; the `uv run --with platformio` route currently trips over the penv's
+  `littlefs` import on this Windows machine).
 - **0.2.2 seven-spell cue codes:** CUE `spell` accepts codes 4–7 (Incendio, Sectumsempra, Petrificus
   Totalus, Expecto Patronum) with their own display names, TFT colours and LED colours; the display
   hint no longer lists three moves. Contract section 5 documents the codes; the browser folds them

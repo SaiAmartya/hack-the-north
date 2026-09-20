@@ -155,18 +155,22 @@ After OPEN, validate nonce and command sequence: new commands require `0 < (new 
 | Offset | Type | Meaning |
 | --- | --- | --- |
 | 0 | u8 | `version = 1` |
-| 1 | u8 | `kind`: 0 current health, 1 command result |
-| 2–3 | u16 | Echoed `command_seq` for result; zero for health |
+| 1 | u8 | `kind`: 0 current health, 1 command result, 2 button cast request (firmware 0.2.3) |
+| 2–3 | u16 | Echoed `command_seq` for result; zero for health and button |
 | 4–7 | u32 | Active `link_nonce`, or zero before OPEN |
-| 8–11 | u32 | `device_ms`: command receipt for result; snapshot time for health |
-| 12–15 | u32 | `detail0`: echoed opcode for result; cumulative local dropped/overrun count since boot for health |
-| 16–19 | u32 | `detail1`: result code for result; health bits for health |
+| 8–11 | u32 | `device_ms`: command receipt for result; snapshot time for health; press time for button |
+| 12–15 | u32 | `detail0`: echoed opcode for result; cumulative local dropped/overrun count since boot for health; spell code 1–7 for button |
+| 16–19 | u32 | `detail1`: result code for result; health bits for health; presses since boot for button |
 
 Result codes: 0 OK; 1 malformed/unsupported version; 2 wrong session; 3 invalid argument; 4 expired; 5 unsupported command/capability; 6 stale/conflicting sequence. If the frame is too malformed to identify safely, reject the ATT write and do not fabricate a correlatable result. Invalid commands never reset state, nonce or health. STATUS read returns **current health**, not whichever ACK happened last; notify health at 1 Hz and immediately on sensor/fault changes, plus a result for each identifiable command.
 
 Health bits: 0 sensor healthy, 1 stream enabled, 2 presentation healthy, 3 host state stale; others zero. Stream enabled means OPEN succeeded and MOTION notifications are subscribed, not that the sensor is necessarily producing good readings. No invented battery percentage; voltage/percentage reporting is outside v1 until hardware measurement/support is established.
 
 Host-state-stale is set at boot/OPEN, disconnect and state expiry; only accepting a fresh, unexpired SET_STATE clears it. SYNC/CUE, rejected state or a duplicate ACK cannot clear it or extend a state lease. Emit current health on these transitions. Clearing stale does not imply the screen is healthy; presentation health is a separate bit.
+
+**Button cast request (kind 2, firmware 0.2.3):** the badge buttons are a fallback for a misbehaving accelerometer. A debounced press of A (Stupefy), B (Protego), RIGHT (Expelliarmus), UP (Incendio), LEFT (Sectumsempra), DOWN (Petrificus Totalus) or HOME (Expecto Patronum) is notified once on STATUS with the active nonce, `detail0` = spell code and `detail1` = a press counter, only while a session is open and STATUS is subscribed. START still recalibrates the local activity baseline and the slide switch does nothing. The browser treats an accepted press as a complete cast (movement and incantation both stand in) and sends it to the referee, which keeps every combat rule; a repeated delivery with the same press counter is ignored. Firmware never resolves the cast locally: the accepted-cast CUE, the HP state and any refusal still arrive from the browser. Golden vector: `01 02 00 00 dd cc bb aa 88 13 00 00 07 00 00 00 03 00 00 00` is Expecto Patronum, third press, at device time 5000 ms; spell 0 or 8, or a nonzero sequence, is malformed.
+
+**Cooldown rings (firmware 0.2.3, presentation only):** on an accepted-cast CUE while the state phase is playing, the badge starts a local recharge ring for that spell using the referee's published cooldown table (2/3/6/6/9/10/15 s for spells 1–7) and a 500 ms all-spell recovery dim; rings clear with the epoch, the lease or any phase other than playing. They are a courtesy display and never gate a cast.
 
 An ATT write response means the write was received. A STATUS OK means the command was validated and its state/cue accepted by the presentation subsystem (or sync/session operation completed), **not physical proof that photons appeared**. Report presentation failure in health; humans verify LEDs/display. Browser ignores ACKs with wrong nonce, command sequence, opcode or connection generation.
 

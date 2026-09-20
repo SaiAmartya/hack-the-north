@@ -107,6 +107,35 @@ void on_control(const uint8_t *raw, size_t len, uint32_t received_ms, uint32_t g
   }
 }
 
+// Badge buttons cast spells directly (firmware 0.2.3): a press becomes a STATUS kind-2 notification
+// the browser turns into a cast, bypassing the motion recognizer when the accelerometer misbehaves.
+// START keeps its recalibration role; the slide switch is unused.
+struct ButtonSpell {
+  btn::Id button;
+  uint8_t spell;
+};
+const ButtonSpell kButtonSpells[] = {
+    {btn::A, proto::SP_STUPEFY},        {btn::B, proto::SP_PROTEGO},          {btn::RIGHT, proto::SP_EXPELLIARMUS},
+    {btn::UP, proto::SP_INCENDIO},      {btn::LEFT, proto::SP_SECTUMSEMPRA},  {btn::DOWN, proto::SP_PETRIFICUS_TOTALUS},
+    {btn::HOME, proto::SP_EXPECTO_PATRONUM},
+};
+uint32_t g_button_presses = 0;
+
+void send_button_cast(uint8_t spell, uint32_t now) {
+  Lock lock;
+  if (!ble::connected() || !g_session.is_open() || !ble::status_subscribed()) return;
+  proto::Status s;
+  s.kind = proto::SK_BUTTON;
+  s.seq = 0;
+  s.nonce = g_session.nonce();
+  s.device_ms = now;
+  s.detail0 = spell;
+  s.detail1 = ++g_button_presses;
+  uint8_t rec[proto::REC];
+  proto::encode_status(s, rec);
+  ble::notify_status(rec, g_session_gen);
+}
+
 void boot_diag() {
   char b[64];
   const diagnostic::Profile &p = diagnostic::profile();
@@ -176,6 +205,8 @@ void loop() {
     next_btn = now + 10;
     btn::poll();
     if (btn::pressed(btn::START)) wand::recalibrate();
+    for (const ButtonSpell &b : kButtonSpells)
+      if (btn::pressed(b.button)) send_button_cast(b.spell, now);
   }
   console::tick();
   now = millis();

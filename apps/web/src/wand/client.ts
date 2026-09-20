@@ -15,6 +15,7 @@ import {
   type InfoRecord,
   type MotionRecord,
   type StatusRecord,
+  type SpellCode,
   type SetStateCommand,
   type CueCommand,
 } from "./protocol";
@@ -43,6 +44,14 @@ export type CapturedMotion = MotionRecord & {
   browserMs: number;
   ageUpperMs: number;
   breaksGesture: boolean;
+};
+/** A badge button press the firmware forwards as a cast request (STATUS kind 2). */
+export type ButtonPress = {
+  spell: SpellCode;
+  pressCount: number;
+  deviceMs: number;
+  browserMs: number;
+  generation: number;
 };
 
 export type WandSnapshot = {
@@ -107,6 +116,8 @@ export class WandClient {
   private broken = true;
   private samples: CapturedMotion[] = [];
   private listeners = new Set<(sample: CapturedMotion) => void>();
+  private buttonListeners = new Set<(press: ButtonPress) => void>();
+  private lastPressCount = -1;
   private desired?: FeedbackState;
   private acknowledged?: FeedbackState;
   private stateDue = 0;
@@ -141,6 +152,12 @@ export class WandClient {
   onSample(listener: (sample: CapturedMotion) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Badge button presses, delivered only while the link is streaming. */
+  onButton(listener: (press: ButtonPress) => void): () => void {
+    this.buttonListeners.add(listener);
+    return () => this.buttonListeners.delete(listener);
   }
 
   getSamples(): readonly CapturedMotion[] {
@@ -470,6 +487,20 @@ export class WandClient {
       return;
     }
     if (record.linkNonce !== this.nonce) return;
+    if (record.kind === StatusKind.ButtonCast) {
+      // Presses arrive on the STATUS channel; a duplicate delivery repeats the press count.
+      if (this.snapshot.phase !== "streaming" || record.pressCount === this.lastPressCount) return;
+      this.lastPressCount = record.pressCount;
+      const press: ButtonPress = {
+        spell: record.spell,
+        pressCount: record.pressCount,
+        deviceMs: record.deviceMs,
+        browserMs: this.now(),
+        generation: this.snapshot.generation,
+      };
+      for (const listener of this.buttonListeners) listener(press);
+      return;
+    }
     if (record.kind === StatusKind.CommandResult) {
       if (
         record.commandSeq === this.pending?.command.commandSeq &&

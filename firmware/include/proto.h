@@ -15,6 +15,9 @@ enum Phase : uint8_t { PH_IDLE = 0, PH_PRACTICE, PH_COUNTDOWN, PH_PLAYING, PH_WO
 enum Effect : uint8_t { FX_ACCEPTED_CAST = 1, FX_BLOCKED = 2, FX_DAMAGE = 3, FX_RESULT = 4 };
 enum Spell : uint8_t { SP_NONE = 0, SP_STUPEFY = 1, SP_PROTEGO = 2, SP_EXPELLIARMUS = 3, SP_INCENDIO = 4, SP_SECTUMSEMPRA = 5, SP_PETRIFICUS_TOTALUS = 6, SP_EXPECTO_PATRONUM = 7, SP_LAST = SP_EXPECTO_PATRONUM };
 enum StatusBits : uint8_t { ST_SHIELD = 1, ST_LOCKED = 2 };
+// STATUS kinds: health and command results per contract section 5; kind 2 (firmware 0.2.3) is a badge
+// button press asking the browser to cast `detail0` (spell code 1..7), `detail1` = presses since boot.
+enum StatusKind : uint8_t { SK_HEALTH = 0, SK_RESULT = 1, SK_BUTTON = 2 };
 enum Health : uint32_t { H_SENSOR = 1, H_STREAM = 2, H_PRESENTATION = 4, H_STATE_STALE = 8 };
 enum Caps : uint8_t { CAP_MOTION = 1, CAP_STATE = 2, CAP_CUE = 4, CAP_SYNC = 8, CAP_ALL = 0x0F };
 enum MotionFlags : uint8_t { MF_VALID = 1, MF_SATURATED = 2, MF_DISCONTINUITY = 4 };
@@ -41,7 +44,7 @@ struct Control {
 };
 
 struct Status {
-  uint8_t kind;   // 0 health, 1 command result
+  uint8_t kind;   // StatusKind: 0 health, 1 command result, 2 button cast request
   uint16_t seq;
   uint32_t nonce, device_ms, detail0, detail1;
 };

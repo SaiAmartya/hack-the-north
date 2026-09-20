@@ -9,6 +9,7 @@ import {
   MAX_STATE_LEASE_MS,
   PresentationPhase,
   ProtocolError,
+  SpellCode,
   StatusKind,
   WAND_PROTOCOL_VERSION,
   WAND_RECORD_LENGTH,
@@ -96,6 +97,7 @@ export class VirtualWandEndpoint {
   private presentationHealthy: boolean;
   private hostStateStale = true;
   private droppedCount = 0;
+  private buttonPresses = 0;
   private state: PresentedState | null = null;
   private cue: PresentedCue | null = null;
   private cueRevision = 0;
@@ -240,6 +242,24 @@ export class VirtualWandEndpoint {
     const now = this.deviceNow();
     this.expirePresentation(now);
     this.notify(this.statusListeners, encodeStatus(this.healthStatus(now)));
+  }
+
+  /** Firmware 0.2.3 button cast (STATUS kind 2); only an open session forwards presses. */
+  pressButton(spell: SpellCode): void {
+    if (this.activeNonce === null) return;
+    this.buttonPresses += 1;
+    this.notify(
+      this.statusListeners,
+      encodeStatus({
+        version: WAND_PROTOCOL_VERSION,
+        kind: StatusKind.ButtonCast,
+        commandSeq: 0,
+        linkNonce: this.activeNonce,
+        deviceMs: this.deviceNow(),
+        spell,
+        pressCount: this.buttonPresses,
+      }),
+    );
   }
 
   setSensorHealthy(healthy: boolean): void {

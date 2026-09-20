@@ -14,6 +14,20 @@ char g_cue_text[24] = "";
 uint16_t g_cue_color = 0xFFFF;
 bool g_ok = true;
 bool g_redraw = false;
+// Cooldown rings: started by an accepted-cast cue during the duel, cleared with the link/epoch.
+// The durations mirror the referee rules (apps/host/phantom_host/duel_engine.py SPELL_RULES); the
+// referee stays authoritative and the browser tells the player when a cast was refused.
+const uint16_t kCooldownMs[display::SPELL_SLOTS] = {0, 2000, 3000, 6000, 6000, 9000, 10000, 15000};
+const uint16_t kCastRecoveryMs = 500;  // global recovery after any accepted cast
+uint32_t g_cd_until[display::SPELL_SLOTS] = {0};
+uint32_t g_recover_until = 0;
+bool g_cd_active = false;
+
+void clear_cooldowns() {
+  for (uint32_t &u : g_cd_until) u = 0;
+  g_recover_until = 0;
+  g_cd_active = false;
+}
 
 const char *spell_name(uint8_t s) {
   switch (s) {
@@ -41,6 +55,7 @@ bool healthy() { return g_ok; }
 void link_changed() {
   g_cue_text[0] = 0;
   g_cue_until = 0;
+  clear_cooldowns();
   leds::clear_cue();
   leds::set_shield(false);
   g_next_screen = millis();
@@ -54,13 +69,13 @@ void play_cue(const proto::Cue &c, uint8_t phase) {
   switch (c.effect) {
     case proto::FX_ACCEPTED_CAST:
       snprintf(g_cue_text, sizeof(g_cue_text), "%s!", spell_name(c.spell));
-      g_cue_color = c.spell == proto::SP_PROTEGO ? 0x07FF                 // cyan shield
-                    : c.spell == proto::SP_EXPELLIARMUS ? 0xFD20          // red-gold ribbon
-                    : c.spell == proto::SP_INCENDIO ? 0xFBC3              // fire orange
-                    : c.spell == proto::SP_SECTUMSEMPRA ? 0xE73F          // steel white
-                    : c.spell == proto::SP_PETRIFICUS_TOTALUS ? 0x9DBF    // pale binding blue
-                    : c.spell == proto::SP_EXPECTO_PATRONUM ? 0xDFBF      // silver-blue patronus
-                    : 0xF80A;                                              // crimson bolt
+      g_cue_color = display::spell_color(c.spell);
+      // Practice casts never reach the referee, so only a duel cast starts a recharge ring.
+      if (phase == proto::PH_PLAYING && c.spell > 0 && c.spell < display::SPELL_SLOTS) {
+        g_cd_until[c.spell] = now + kCooldownMs[c.spell];
+        g_recover_until = now + kCastRecoveryMs;
+        g_cd_active = true;
+      }
       break;
     case proto::FX_BLOCKED:
       snprintf(g_cue_text, sizeof(g_cue_text), "BLOCKED");
@@ -89,6 +104,7 @@ void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool conne
   if ((int32_t)(now_ms - g_next_screen) < 0) return;
   g_next_screen = now_ms + SCREEN_REFRESH_MS;
   if ((int32_t)(now_ms - g_cue_until) >= 0) g_cue_text[0] = 0;
+  if (g_cd_active && (!st.valid || st.phase != proto::PH_PLAYING)) clear_cooldowns();
   if (g_redraw) {
     g_redraw = false;
     display::force_redraw();
@@ -113,6 +129,19 @@ void tick(const proto::DisplayState &st, bool stale, uint32_t now_ms, bool conne
   v.y = w.y;
   v.z = w.z;
   v.foot = foot;
+  for (int i = 0; i < display::SPELL_SLOTS; i++) {
+    const int32_t left = (int32_t)(g_cd_until[i] - now_ms);
+    if (!g_cd_until[i] || left <= 0 || kCooldownMs[i] == 0) {
+      v.cd_frac[i] = 0;
+      v.cd_secs[i] = 0;
+      continue;
+    }
+    uint32_t frac = ((uint32_t)left * 255u + kCooldownMs[i] - 1) / kCooldownMs[i];
+    v.cd_frac[i] = (uint8_t)(frac < 1 ? 1 : frac > 255 ? 255 : frac);
+    const uint32_t secs = ((uint32_t)left + 999u) / 1000u;
+    v.cd_secs[i] = (uint8_t)(secs > 255 ? 255 : secs);
+  }
+  v.recovering = g_recover_until != 0 && (int32_t)(now_ms - g_recover_until) < 0;
   display::draw(v);
 }
 }  // namespace present

@@ -34,6 +34,31 @@ describe("shared wand lifecycle", () => {
     await client.connect();
     return { client, transport };
   }
+  it("forwards badge button presses while streaming and ignores a repeated delivery", async () => {
+    const { client, transport } = await setup();
+    const presses: SpellCode[] = [];
+    client.onButton((press) => presses.push(press.spell));
+    transport.endpoint.pressButton(SpellCode.Stupefy);
+    transport.endpoint.pressButton(SpellCode.ExpectoPatronum);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(presses).toEqual([SpellCode.Stupefy, SpellCode.ExpectoPatronum]);
+    // A duplicate notification (same press count) is not a second press.
+    const raw = encodeStatus({
+      version: 1,
+      kind: StatusKind.ButtonCast,
+      commandSeq: 0,
+      linkNonce: decodeStatus(await transport.readStatus()).linkNonce,
+      deviceMs: 7_000,
+      spell: SpellCode.ExpectoPatronum,
+      pressCount: 2,
+    });
+    (client as unknown as { status(bytes: Uint8Array): void }).status(raw);
+    expect(presses).toHaveLength(2);
+    client.disconnect();
+    transport.endpoint.pressButton(SpellCode.Protego);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(presses).toHaveLength(2);
+  });
   it("handshakes through STATUS and accepts fresh raw samples", async () => {
     const { client } = await setup();
     expect(client.getSnapshot().phase).toBe("streaming");

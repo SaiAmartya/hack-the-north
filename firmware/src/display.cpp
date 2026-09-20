@@ -4,13 +4,26 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+// Landscape 320x240 HUD (rotation 1/3):
+//   y   2  WAND 46BA  streaming                 (size 2)
+//   y  22  DUEL / PRACTICE / VICTORY ...         (size 3)
+//   y  52  [heart] 100  SHIELD                    (size 2) + HP bar at y 70
+//   y  84  seven cooldown rings, one per spell; the ring shows its button while ready and the
+//          seconds left while recharging, the inner disc drains clockwise like a clock
+//   y 126  three-letter spell labels under the rings (size 1)
+//   y 140  cue text: STUPEFY! / BLOCKED / HIT ...  (size 3)
+//   y 170  movement bar
+//   y 186  hint line                               (size 1)
+//   y 226  diagnostics footer                      (size 1)
 namespace display {
 namespace {
 Adafruit_ST7789 tft(&SPI, PIN_DISP_CS, PIN_DISP_DC, PIN_DISP_RST);
-const uint16_t BG = 0x0000, FG = 0xFFFF, DIM = 0x8410, PURPLE = 0xA11F, CYAN = 0x07FF, AMBER = 0xFD20, GREEN = 0x07E8, RED = 0xF800, GREY = 0x2104;
+const uint16_t BG = 0x0000, FG = 0xFFFF, DIM = 0x8410, PURPLE = 0xA11F, CYAN = 0x07FF, AMBER = 0xFD20, GREEN = 0x07E8, RED = 0xF800, GREY = 0x2104,
+               HEART = 0xF8A3, HP_MID = 0xFDE0;
 bool g_ok = false;
 int g_boot_y = 4;
 uint8_t g_rot = 1;
@@ -20,6 +33,11 @@ uint8_t g_rot = 1;
 // size-1 footer line, more for size 3), which stalled the main loop and everything it services.
 constexpr int16_t FIELD_W = 300, FIELD_H_MAX = 24;  // widest field, tallest text (size 3)
 GFXcanvas16 *g_canvas = nullptr;
+
+// Cooldown rings are rendered the same way into a small square canvas.
+constexpr int16_t RING_W = 40, RING_R_OUT = 18, RING_R_IN = 15, RING_Y = 84, RING_PITCH = 44, RING_X0 = 28;
+GFXcanvas16 *g_ring = nullptr;
+uint8_t g_angle[RING_W * RING_W];  // clockwise angle from 12 o'clock, 0..255, per ring pixel
 
 struct Field {
   int16_t x, y;
@@ -57,26 +75,32 @@ struct Field {
   }
 };
 
-Field f_title{10, 8, 3, PURPLE, 300, "", 0};
-Field f_link{10, 40, 2, DIM, 300, "", 0};
-Field f_phase{10, 68, 3, FG, 300, "", 0};
-Field f_hp{10, 100, 2, FG, 300, "", 0};
-Field f_cue{10, 130, 3, CYAN, 300, "", 0};
-Field f_hint{10, 164, 2, DIM, 300, "", 0};
+Field f_title{10, 2, 2, DIM, 300, "", 0};
+Field f_phase{10, 22, 3, FG, 300, "", 0};
+Field f_hp{32, 52, 2, FG, 300, "", 0};
+Field f_cue{10, 140, 3, CYAN, 300, "", 0};
+Field f_hint{10, 186, 1, DIM, 300, "", 0};
 Field f_foot{10, 226, 1, DIM, 300, "", 0};
 int g_last_bar = -1, g_last_hp = -1;
-bool g_last_hp_shown = false;
+bool g_last_hp_shown = false, g_labels_drawn = false;
+uint32_t g_ring_key[SPELL_SLOTS];  // last drawn (frac, secs, ready, dim) per ring
 enum class Screen { None, Boot, Main } g_screen = Screen::None;
+
+const char *const kSpellLabel[SPELL_SLOTS] = {"", "STU", "PRO", "EXP", "INC", "SEC", "PET", "PAT"};
+// Badge buttons that cast each spell (main.cpp sends the matching STATUS button event).
+const char *const kSpellButton[SPELL_SLOTS] = {"", "A", "B", ">", "^", "<", "v", "H"};
 
 void clear_to(Screen s) {
   if (g_screen == s) return;
   g_screen = s;
   tft.fillScreen(BG);
-  Field *all[] = {&f_title, &f_link, &f_phase, &f_hp, &f_cue, &f_hint, &f_foot};
+  Field *all[] = {&f_title, &f_phase, &f_hp, &f_cue, &f_hint, &f_foot};
   for (Field *f : all) f->reset();
   g_last_bar = -1;
   g_last_hp = -1;
   g_last_hp_shown = false;
+  g_labels_drawn = false;
+  for (uint32_t &k : g_ring_key) k = 0xFFFFFFFF;
 }
 
 const char *phase_text(uint8_t p) {
@@ -100,7 +124,99 @@ uint16_t phase_color(uint8_t p) {
     default: return CYAN;
   }
 }
+
+// Scale an RGB565 colour by k (0..1).
+uint16_t scale565(uint16_t c, float k) {
+  if (k < 0) k = 0;
+  if (k > 1) k = 1;
+  const uint16_t r = (uint16_t)(((c >> 11) & 0x1F) * k), g = (uint16_t)(((c >> 5) & 0x3F) * k), b = (uint16_t)((c & 0x1F) * k);
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+void draw_heart(int16_t x, int16_t y, uint16_t c) {
+  tft.fillCircle(x + 4, y + 4, 4, c);
+  tft.fillCircle(x + 11, y + 4, 4, c);
+  tft.fillTriangle(x, y + 6, x + 15, y + 6, x + 7, y + 14, c);
+  tft.fillTriangle(x, y + 6, x + 15, y + 6, x + 8, y + 14, c);
+}
+
+// One cooldown ring. `frac` 0..255 is the remaining fraction (0 = ready); the inner disc shows the
+// remaining wedge clockwise from 12 o'clock, so it drains like a clock as the spell recharges.
+void draw_ring(int slot, uint8_t frac, uint8_t secs, bool dim) {
+  const bool ready = frac == 0;
+  const uint32_t key = ((uint32_t)(frac >> 1) << 16) | ((uint32_t)secs << 8) | (ready ? 2u : 0u) | (dim ? 1u : 0u);
+  if (g_ring_key[slot] == key) return;
+  g_ring_key[slot] = key;
+  const int16_t cx = RING_X0 + (int16_t)(slot - 1) * RING_PITCH;
+  const uint16_t color = spell_color((uint8_t)slot);
+  const uint16_t ring = ready && !dim ? color : scale565(color, dim ? 0.30f : 0.45f);
+  const uint16_t disc = ready ? scale565(color, dim ? 0.12f : 0.28f) : GREY;
+  if (!g_ring) {
+    // No RAM for the canvas: draw a plain circle and the label directly (slow path, rare).
+    tft.fillCircle(cx, RING_Y + RING_W / 2, RING_R_OUT, BG);
+    tft.drawCircle(cx, RING_Y + RING_W / 2, RING_R_OUT, ring);
+    return;
+  }
+  g_ring->fillScreen(BG);
+  uint16_t *px = g_ring->getBuffer();
+  const float c = (RING_W - 1) * 0.5f;
+  for (int y = 0; y < RING_W; y++) {
+    const float dy = (float)y - c;
+    for (int x = 0; x < RING_W; x++) {
+      const float dx = (float)x - c;
+      const float d2 = dx * dx + dy * dy;
+      if (d2 > (float)((RING_R_OUT + 0.5f) * (RING_R_OUT + 0.5f))) continue;
+      uint16_t v;
+      if (d2 >= (float)((RING_R_IN + 0.5f) * (RING_R_IN + 0.5f))) v = ring;
+      else if (ready) v = disc;
+      else v = g_angle[y * RING_W + x] < frac ? disc : BG;
+      px[y * RING_W + x] = v;
+    }
+  }
+  // Centre glyph: the button while ready, the seconds left while recharging.
+  char t[4];
+  if (ready) snprintf(t, sizeof(t), "%s", kSpellButton[slot]);
+  else if (secs >= 1) snprintf(t, sizeof(t), "%u", (unsigned)(secs > 99 ? 99 : secs));
+  else t[0] = 0;
+  const int len = (int)strlen(t);
+  if (len) {
+    g_ring->setTextWrap(false);
+    g_ring->setTextSize(2);
+    g_ring->setTextColor(ready ? (dim ? DIM : FG) : FG);
+    g_ring->setCursor((RING_W - len * 12) / 2 + 1, (RING_W - 16) / 2 + 1);
+    g_ring->print(t);
+  }
+  tft.drawRGBBitmap(cx - RING_W / 2, RING_Y, px, RING_W, RING_W);
+}
+
+void draw_labels() {
+  if (g_labels_drawn) return;
+  g_labels_drawn = true;
+  tft.setTextSize(1);
+  tft.setTextWrap(false);
+  for (int slot = 1; slot < SPELL_SLOTS; slot++) {
+    const int16_t cx = RING_X0 + (int16_t)(slot - 1) * RING_PITCH;
+    tft.setTextColor(scale565(spell_color((uint8_t)slot), 0.8f), BG);
+    tft.setCursor(cx - 9, RING_Y + RING_W + 2);
+    tft.print(kSpellLabel[slot]);
+  }
+}
 }  // namespace
+
+uint16_t spell_color(uint8_t spell) {
+  switch (spell) {
+    case proto::SP_STUPEFY: return 0xF80A;             // crimson bolt
+    case proto::SP_PROTEGO: return 0x07FF;             // cyan shield
+    case proto::SP_EXPELLIARMUS: return 0xFD20;        // red-gold ribbon
+    case proto::SP_INCENDIO: return 0xFBC3;            // fire orange
+    case proto::SP_SECTUMSEMPRA: return 0xE73F;        // steel white
+    case proto::SP_PETRIFICUS_TOTALUS: return 0x9DBF;  // pale binding blue
+    case proto::SP_EXPECTO_PATRONUM: return 0xDFBF;    // silver-blue patronus
+    default: return FG;
+  }
+}
+
+const char *spell_button(uint8_t spell) { return spell < SPELL_SLOTS ? kSpellButton[spell] : ""; }
 
 bool begin(uint8_t rotation) {
   SPI.begin(PIN_DISP_SCLK, -1, PIN_DISP_MOSI, PIN_DISP_CS);
@@ -116,6 +232,21 @@ bool begin(uint8_t rotation) {
       g_canvas = nullptr;
     }
   }
+  if (!g_ring) {
+    g_ring = new GFXcanvas16(RING_W, RING_W);  // 3.2 KB
+    if (g_ring && !g_ring->getBuffer()) {
+      delete g_ring;
+      g_ring = nullptr;
+    }
+  }
+  const float c = (RING_W - 1) * 0.5f;
+  for (int y = 0; y < RING_W; y++)
+    for (int x = 0; x < RING_W; x++) {
+      float a = atan2f((float)x - c, -((float)y - c));  // 0 at 12 o'clock, clockwise positive
+      if (a < 0) a += 6.2831853f;
+      int v = (int)(a * (256.0f / 6.2831853f));
+      g_angle[y * RING_W + x] = (uint8_t)(v > 255 ? 255 : v);
+    }
   g_ok = true;
   g_screen = Screen::Boot;
   g_boot_y = 4;
@@ -152,10 +283,8 @@ void draw(const View &v) {
   if (!g_ok) return;
   clear_to(Screen::Main);
   char b[44];
-  snprintf(b, sizeof(b), "WAND %s", v.id);
-  f_title.draw(b);
-  snprintf(b, sizeof(b), "%s%s", v.link, v.sensor_ok ? "" : "  SENSOR FAULT");
-  f_link.draw(b, v.sensor_ok ? DIM : RED, true);
+  snprintf(b, sizeof(b), "WAND %s  %s%s", v.id, v.link, v.sensor_ok ? "" : "  SENSOR FAULT");
+  f_title.draw(b, v.sensor_ok ? DIM : RED, true);
 
   if (v.state_valid) {
     f_phase.draw(phase_text(v.phase), phase_color(v.phase), true);
@@ -165,32 +294,37 @@ void draw(const View &v) {
 
   const bool show_hp = v.state_valid && (v.phase == proto::PH_PLAYING || v.phase >= proto::PH_WON);
   if (show_hp) {
-    snprintf(b, sizeof(b), "HP %3u%s%s", v.hp, (v.status & proto::ST_SHIELD) ? "  SHIELD" : "", (v.status & proto::ST_LOCKED) ? "  DISARMED" : "");
-    f_hp.draw(b, (v.status & proto::ST_SHIELD) ? CYAN : FG, true);
+    const bool shield = (v.status & proto::ST_SHIELD) != 0, locked = (v.status & proto::ST_LOCKED) != 0;
+    snprintf(b, sizeof(b), "%3u%s%s", v.hp, shield ? "  SHIELD" : "", locked ? "  DISARMED" : "");
+    f_hp.draw(b, shield ? CYAN : locked ? AMBER : FG, true);
     const int w = (int)v.hp * 3;  // 0..300
     if (w != g_last_hp || !g_last_hp_shown) {
-      tft.fillRect(10, 118, w, 6, v.hp > 30 ? GREEN : RED);
-      tft.fillRect(10 + w, 118, 300 - w, 6, GREY);
+      if (!g_last_hp_shown) draw_heart(10, 52, HEART);
+      tft.fillRect(10, 70, w, 6, v.hp > 50 ? GREEN : v.hp > 25 ? HP_MID : RED);
+      tft.fillRect(10 + w, 70, 300 - w, 6, GREY);
       g_last_hp = w;
       g_last_hp_shown = true;
     }
   } else {
     f_hp.draw("");
     if (g_last_hp_shown) {
-      tft.fillRect(10, 118, 300, 6, BG);
+      tft.fillRect(10, 52, 300, 24, BG);
       g_last_hp_shown = false;
     }
   }
 
+  for (int slot = 1; slot < SPELL_SLOTS; slot++) draw_ring(slot, v.cd_frac[slot], v.cd_secs[slot], v.recovering);
+  draw_labels();
+
   f_cue.draw(v.cue, v.cue_color, true);
-  f_hint.draw(v.state_valid ? "Say the spell, make its move" : "Stupefy jab  Protego raise  +5 more");
+  f_hint.draw(v.state_valid ? "Say the spell + move, or press its button" : "Buttons cast too: A B ^ < v > H (see rings)");
 
   int bar = (int)(v.activity * 300);
   if (bar < 0) bar = 0;
   if (bar > 300) bar = 300;
   if (bar != g_last_bar) {
-    tft.fillRect(10, 196, bar, 12, PURPLE);
-    tft.fillRect(10 + bar, 196, 300 - bar, 12, GREY);
+    tft.fillRect(10, 170, bar, 10, PURPLE);
+    tft.fillRect(10 + bar, 170, 300 - bar, 10, GREY);
     g_last_bar = bar;
   }
   f_foot.draw(v.foot);

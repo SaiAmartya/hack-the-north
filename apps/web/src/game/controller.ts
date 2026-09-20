@@ -1,4 +1,4 @@
-import { WandClient } from "../wand/client";
+import { WandClient, type ButtonPress } from "../wand/client";
 import { BleWandTransport } from "../wand/transport";
 import { VirtualWandTransport } from "../wand/virtual";
 import { PhoneSession } from "../phone/session";
@@ -66,32 +66,7 @@ export class DuelController {
   constructor() {
     this.fusion = new CastFusion((attempt) => {
       if (!this.healthy()) return;
-      if (this.game.snapshot?.phase === "playing")
-        this.game.send({
-          type: "cast",
-          roundId: this.game.snapshot.roundId,
-          attemptId: attempt.id,
-          spell: attempt.spell,
-          gestureId: attempt.gestureId,
-          speechId: attempt.utteranceId,
-          inputGeneration: this.generation,
-        });
-      else if (
-        this.game.snapshot?.phase === "lobby" ||
-        this.game.snapshot?.phase === "result"
-      ) {
-        this.lastSpell = attempt.spell;
-        this.lastSpellAt = performance.now();
-        this.practiced.add(attempt.spell);
-        this.notice = `${nameOf(attempt.spell)}!`;
-        this.wand?.cue({
-          effect: CueEffect.AcceptedCast,
-          spell: cueSpellCode(attempt.spell, this.wand.getSnapshot().info?.firmware),
-          durationMs: 180,
-          presentationEpoch: this.presentationEpoch,
-        });
-      }
-      this.onChange();
+      this.dispatchCast(attempt.spell, attempt.id, attempt.gestureId, attempt.utteranceId);
     });
     this.motion = new MotionRecognizer((evidence) =>
       this.fusion.pushGesture(evidence),
@@ -159,6 +134,46 @@ export class DuelController {
       this.updatePhoneCoaching();
       this.onChange();
     }, 100);
+  }
+  /** A cast the player produced, by voice+motion fusion or by a badge button; routes it by phase. */
+  private dispatchCast(spell: SpellName, attemptId: string, gestureId: string, speechId: string) {
+    const phase = this.game.snapshot?.phase;
+    if (phase === "playing") {
+      this.game.send({
+        type: "cast",
+        roundId: this.game.snapshot!.roundId,
+        attemptId,
+        spell,
+        gestureId,
+        speechId,
+        inputGeneration: this.generation,
+      });
+    } else if (phase === "lobby" || phase === "result") {
+      this.lastSpell = spell;
+      this.lastSpellAt = performance.now();
+      this.practiced.add(spell);
+      this.notice = `${nameOf(spell)}!`;
+      this.wand?.cue({
+        effect: CueEffect.AcceptedCast,
+        spell: cueSpellCode(spell, this.wand.getSnapshot().info?.firmware),
+        durationMs: 180,
+        presentationEpoch: this.presentationEpoch,
+      });
+    }
+    this.onChange();
+  }
+  /**
+   * Badge button fallback (firmware 0.2.3): the press stands in for both the movement and the
+   * incantation, so it only needs a streaming wand and a live referee session, not a calibrated
+   * recognizer or a listening microphone. In the lobby it counts as practice like any other cast.
+   */
+  castFromButton(press: ButtonPress) {
+    if (this.dead || document.hidden || this.game.issue) return;
+    if (this.wand?.getSnapshot().phase !== "streaming") return;
+    const spell = spellFromCode(press.spell);
+    if (!spell) return;
+    const id = `${this.generation}:button:${press.pressCount}`;
+    this.dispatchCast(spell, id, `button-${press.pressCount}`, `button-${press.pressCount}`);
   }
   private visibility = () => {
     if (document.hidden) {
@@ -405,6 +420,9 @@ export class DuelController {
   private bindSamples() {
     const wand = this.wand!;
     this.unsubscribers.push(
+      wand.onButton((press) => {
+        if (this.wand === wand) this.castFromButton(press);
+      }),
       wand.onSample((sample) => {
         if (this.wand !== wand) return;
         this.syncInputState();
@@ -713,6 +731,10 @@ const LEGACY_SPELL_CODES: Record<SpellName, SpellCode> = {
   "petrificus-totalus": SpellCode.Expelliarmus,
   "expecto-patronum": SpellCode.Protego,
 };
+const SPELL_BY_CODE: ReadonlyMap<SpellCode, SpellName> = new Map(
+  (Object.entries(SPELL_CODES) as [SpellName, SpellCode][]).map(([name, code]) => [code, name]),
+);
+export const spellFromCode = (code: SpellCode): SpellName | undefined => SPELL_BY_CODE.get(code);
 export function cueSpellCode(spell: SpellName, firmware?: { major: number; minor: number; patch: number }): SpellCode {
   const modern = !!firmware && (firmware.major > 0 || firmware.minor > 2 || (firmware.minor === 2 && firmware.patch >= 2));
   return (modern ? SPELL_CODES : LEGACY_SPELL_CODES)[spell];

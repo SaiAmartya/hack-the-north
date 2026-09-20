@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
-// 74HC165 shift-register buttons. No gameplay is bound to them; they drive the debug screen only.
+// 74HC165 shift-register buttons. Since 0.2.3 A/B/arrows/HOME cast spells through STATUS kind 2
+// (main.cpp); START recalibrates the activity baseline.
 namespace btn {
 enum Id : uint8_t { UP = 0, DOWN, LEFT, RIGHT, A, B, HOME, SLIDE, START, COUNT };
 void begin();

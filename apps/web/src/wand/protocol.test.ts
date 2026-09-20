@@ -58,6 +58,10 @@ const GOLDEN_GAP_SYNC = hex(
 const GOLDEN_GAP_RESULT = hex(
   "01 01 04 00 dd cc bb aa 34 08 00 00 02 00 00 00 00 00 00 00",
 );
+// Firmware 0.2.3 button cast: kind 2, seq 0, device 5000 ms, spell 7 (Expecto Patronum), press 3
+const GOLDEN_BUTTON = hex(
+  "01 02 00 00 dd cc bb aa 88 13 00 00 07 00 00 00 03 00 00 00",
+);
 
 describe("wand protocol golden vectors", () => {
   it("pins the INFO bytes independently in both directions", () => {
@@ -197,6 +201,19 @@ describe("wand protocol golden vectors", () => {
         resultCode: CommandResultCode.Ok,
       },
     ],
+    [
+      "button cast",
+      GOLDEN_BUTTON,
+      {
+        version: WAND_PROTOCOL_VERSION,
+        kind: StatusKind.ButtonCast,
+        commandSeq: 0,
+        linkNonce: 0xaabb_ccdd,
+        deviceMs: 5_000,
+        spell: SpellCode.ExpectoPatronum,
+        pressCount: 3,
+      },
+    ],
   ])("pins the %s STATUS bytes", (_name, bytes, expected) => {
     expect(decodeStatus(bytes)).toEqual(expected);
     expect(encodeStatus(expected)).toEqual(bytes);
@@ -238,6 +255,17 @@ describe("wand protocol validation", () => {
     expect(decodeMotion(encodeMotion(endpointValues))).toEqual(endpointValues);
   });
 
+  it("rejects button casts with an unknown spell or a command sequence", () => {
+    const spellNone = Uint8Array.from(GOLDEN_BUTTON);
+    spellNone[12] = 0;
+    expect(() => decodeStatus(spellNone)).toThrow(ProtocolError);
+    const spellEight = Uint8Array.from(GOLDEN_BUTTON);
+    spellEight[12] = 8;
+    expect(() => decodeStatus(spellEight)).toThrow(ProtocolError);
+    const withSeq = Uint8Array.from(GOLDEN_BUTTON);
+    withSeq[2] = 1;
+    expect(() => decodeStatus(withSeq)).toThrow(ProtocolError);
+  });
   it("rejects reserved packed bits and invalid semantic command fields", () => {
     const state = GOLDEN_STATE.slice();
     state[11] = 0x80;
