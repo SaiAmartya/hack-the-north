@@ -27,8 +27,9 @@ or technical footer. `id`, `status` and `trace` retain the diagnostic evidence o
 The HP display preserves the teammate's heart and green/amber/red health colors. Historical spell
 IDs 5–7 and STATUS kind 2 remain reserved; this image rejects those spells and emits no button casts.
 Firmware before 0.3.0 rejects Episkey; install this version for full five-spell feedback.
-The [0.3.0 verification record](../docs/qa/firmware-0.3.0.md) separates local checks from the final
-flash and physical QA contract.
+The [0.3.0 verification record](../docs/qa/firmware-0.3.0.md) records WAND-B602's verified app-only
+flash, 48 on-device self-tests and live BLE check. Physical gesture/speech play, battery endurance
+and other badges still need their own QA.
 
 ## 0.2.x — gameplay profile and battery startup
 
@@ -248,8 +249,9 @@ and ST7735/ST7789 **1.11.0**. No stock Lua IDE is needed. Generated `.pio/` and 
 are ignored, not release artifacts to commit. The application is
 `firmware/.pio/build/badge/firmware.bin`; the generated table is `partitions.bin` beside it.
 
-**Never use `pio run -t upload` or `python tools/badge_flash.py flash` on a badge.** Both are
-multi-artifact upload paths that can write the bootloader and partition table as well as the app.
+**Never use `pio run -t upload` on a badge.** Its multi-artifact upload path can write the
+bootloader and partition table as well as the app. The current `badge_flash.py flash` command
+is the guarded app-only installer described below.
 PlatformIO's bundled esptool crashed mid-write on this Mac on September 19, leaving a partially
 written bootloader that had to be restored from the stock backup. The guarded app-only procedure in
 [section 3](#3-guarded-app-only-installation) is the only installation path: it verifies the
