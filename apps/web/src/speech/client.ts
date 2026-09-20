@@ -74,7 +74,7 @@ export type SpeechClientPlatform = {
   ) => Promise<Capture>;
 };
 
-type Draft = SpeechOnset & { suppressed: boolean };
+type Draft = SpeechOnset & { suppressed: boolean; suppression?: "recognition-paused" | "overlapping-speech" };
 type Pending = {
   id: string;
   generation: number;
@@ -157,7 +157,10 @@ export class SpeechClient {
       this.finishInvalidatedWhenIdle();
       return;
     }
-    if (this.draft) this.draft.suppressed = true;
+    if (this.draft) {
+      this.draft.suppressed = true;
+      this.draft.suppression = "recognition-paused";
+    }
     if (this.pending) {
       this.pending.invalidated = true;
     }
@@ -308,7 +311,8 @@ export class SpeechClient {
         };
         this.diagnostic({ type: "discard", utteranceId: this.pending.id, detail: "Overlapping speech invalidated pending utterance" });
       }
-      this.draft = { ...onset, suppressed };
+      this.draft = { ...onset, suppressed,
+        suppression: !recognitionAllowed ? "recognition-paused" : suppressed ? "overlapping-speech" : undefined };
       if (recognitionAllowed)
         for (const listener of this.onsetListeners) listener(onset);
       if (recognitionAllowed) this.diagnostic({ type: "onset", utteranceId: onset.id });
@@ -322,6 +326,8 @@ export class SpeechClient {
     this.draft = undefined;
     if (!draft || draft.generation !== this.generation) return;
     if (draft.suppressed) {
+      this.diagnostic({ type: "discard", utteranceId: draft.id, detail: draft.suppression,
+        voiceStartMs: draft.startMs, voiceEndMs: event.endMs });
       this.notifyDiscard(draft);
       if (this.pending) this.pending.overlapActive = false;
       else this.endpoint?.resolve();

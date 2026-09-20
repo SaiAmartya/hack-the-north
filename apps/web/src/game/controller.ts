@@ -9,7 +9,7 @@ import {
   type HostedPair,
 } from "../phone/relay";
 import { MotionRecognizer } from "../input/motion";
-import { CastFusion } from "../input/fusion";
+import { CastFusion, type CastRejection } from "../input/fusion";
 import { SpeechClient } from "../speech/client";
 import { GameClient, ROOM_CODE_PATTERN, normalizeRoomCode } from "./client";
 import { DuelTelemetry } from "./telemetry";
@@ -48,6 +48,7 @@ export class DuelController {
   generation = 0;
   lastSpell?: Spell;
   lastSpellAt = 0;
+  miscast?: { id: string; spell: Spell; atMs: number; message: string };
   renderingReady = false;
   private timer: ReturnType<typeof setInterval>;
   private unsubscribers: (() => void)[] = [];
@@ -70,6 +71,7 @@ export class DuelController {
     this.fusion = new CastFusion((attempt) => {
       this.telemetry.record("cast.attempt", { ...attempt, input: "speech+motion", healthy: this.healthy() });
       if (!this.healthy()) return;
+      this.miscast = undefined;
       if (this.game.snapshot?.phase === "playing")
         this.game.send({
           type: "cast",
@@ -95,7 +97,7 @@ export class DuelController {
         });
       }
       this.onChange();
-    });
+    }, rejection => this.showMiscast(rejection));
     this.motion = new MotionRecognizer((evidence) => {
       this.telemetry.record("gesture.accepted", evidence);
       if (this.game.snapshot?.tutorial?.paused) return;
@@ -121,7 +123,8 @@ export class DuelController {
         this.recordFusion();
       }),
       this.speech.onDiscard((e) => {
-        this.telemetry.record("speech.discard", e);
+        this.telemetry.record("speech.discard", { ...e, recognitionEnabled: this.recognitionEnabled(),
+          speechPhase: this.speech.getSnapshot().phase, tutorial: this.game.snapshot?.tutorial ?? null });
         // Speech capture and wand input have separate generations, just as at onset.
         if (e.generation === this.speech.getSnapshot().generation)
           this.fusion.cancelUtterance(e.id, this.generation);
@@ -156,6 +159,8 @@ export class DuelController {
     document.addEventListener("visibilitychange", this.visibility);
     this.timer = setInterval(() => {
       this.syncInputState();
+      if (this.miscast && (performance.now() - this.miscast.atMs > 2_200 || !this.healthy()))
+        this.miscast = undefined;
       this.fusion.advance(performance.now());
       this.recordFusion();
       this.syncGame();
@@ -178,11 +183,15 @@ export class DuelController {
       source: this.wand?.getSnapshot().source ?? "unpaired",
       mode: this.mode,
       inputGeneration: this.generation,
-      profile: info ? { sampleHz: info.sampleHz, rangeG: info.rangeG, axisConvention: info.axisConvention } : null,
+      profile: info ? { sampleHz: info.sampleHz, rangeG: info.rangeG, axisConvention: info.axisConvention,
+        firmware: info.firmware, bootId: info.bootId } : null,
       speech: "local microphone; no audio retained",
       developerClicksEnabled: this.devMode,
       rules: this.game.rules ?? null,
-      gestureProfile: "quick-play-jab-raise-v1",
+      gestureProfile: "quick-play-jab-raise-v2",
+      context: { phase: this.game.snapshot?.phase ?? "paired", tutorial: this.game.snapshot?.tutorial ?? null,
+        speech: this.speech.getSnapshot(), recognitionEnabled: this.recognitionEnabled(),
+        gesture: this.motion.getState(), fusion: this.fusion.getState() },
     });
   }
   canCastSpell(spell: Spell): boolean {
@@ -197,6 +206,7 @@ export class DuelController {
   }
   castSpell(spell: Spell): void {
     if (!this.canCastSpell(spell)) return;
+    this.miscast = undefined;
     const id = `dev:${crypto.randomUUID()}`;
     this.telemetry.record("cast.attempt", { id, spell, input: "developer-click", generation: this.generation });
     this.game.send({ type: "cast", roundId: this.game.snapshot!.roundId, attemptId: id,
@@ -223,11 +233,28 @@ export class DuelController {
   private recordFusion(): void {
     this.recordChanged("fusion", this.fusion.getState());
   }
+  private showMiscast(rejection: CastRejection): void {
+    this.telemetry.record("cast.rejected_input", rejection);
+    const state = this.game.snapshot;
+    if (rejection.utterance.generation !== this.generation || !this.healthy() ||
+      state?.phase !== "playing" || state.tutorial?.paused) return;
+    const spell = rejection.utterance.spell;
+    const support = spell === "protego" || spell === "episkey";
+    const action = rejection.reason === "evidence-timing-mismatch"
+      ? "Speak and move together."
+      : rejection.reason === "multiple-gesture-candidates"
+        ? "Make one clear movement."
+        : support ? "Raise your wand and hold briefly." : "Give your wand a clear forward jab.";
+    this.miscast = { id: `${this.generation}:${rejection.utterance.id}`, spell,
+      atMs: performance.now(), message: `${nameOf(spell)} fizzled. ${action}` };
+    this.onChange();
+  }
   private recognitionEnabled(): boolean {
     return this.motion.getState().phase === "ready" && !this.game.snapshot?.tutorial?.paused;
   }
   private visibility = () => {
     if (document.hidden) {
+      this.miscast = undefined;
       this.generation++;
       this.fusion.reset(this.generation);
       this.motion.clearPending();
@@ -329,6 +356,7 @@ export class DuelController {
     }
   }
   leaveRoom() {
+    this.miscast = undefined;
     this.game.disconnect();
     this.game.issue = "";
     this.roomCode = "";
@@ -595,6 +623,7 @@ export class DuelController {
     this.recordChanged("wand.state", { phase: state.phase, generation: state.generation, issue: state.issue,
       lost: state.lost, rejected: state.rejected, deviceDropped: state.deviceDropped, rttMs: state.rttMs });
     if (state.generation !== this.observedWandGeneration) {
+      this.miscast = undefined;
       this.observedWandGeneration = state.generation;
       this.generation++;
       this.fusion.reset(this.generation);
@@ -613,6 +642,7 @@ export class DuelController {
     if (streaming && this.motion.getState().phase !== "ready")
       this.motion.useDefaultProfile(this.generation);
     if (!streaming && this.wasStreaming) {
+      this.miscast = undefined;
       this.fusion.reset(this.generation);
       this.motion.clearPending();
       this.speech.setRecognitionEnabled(false);
@@ -677,6 +707,7 @@ export class DuelController {
   private syncGame() {
     this.recordChanged("game.connection", { issue: this.game.issue, mode: this.mode });
     if (this.game.issue || document.hidden) {
+      this.miscast = undefined;
       // Do not perpetually renew an old battle state after losing its authority.
       this.wand?.stopFeedback();
       this.feedbackKey = "";
@@ -689,6 +720,7 @@ export class DuelController {
     const context =
       state && slot ? `${state.roomId}:${state.roundId}:${state.phase}:${state.tutorial?.step}:${state.tutorial?.stage}` : "paired";
     if (context !== this.context) {
+      this.miscast = undefined;
       this.context = context;
       this.presentationEpoch = (this.presentationEpoch + 1) >>> 0 || 1;
       this.fusion.reset(this.generation);
@@ -768,6 +800,7 @@ export class DuelController {
         event.actor === slot &&
         event.spell
       ) {
+        this.miscast = undefined;
         this.lastSpell = event.spell;
         this.lastSpellAt = performance.now();
         this.notice = "";

@@ -169,6 +169,35 @@ export async function snapshot(page: Page): Promise<Snapshot> {
   return page.evaluate(() => Reflect.get(window, "__duelController").game.snapshot);
 }
 
+/** Script only recognized speech; the deliberately wrong movement still crosses the raw BLE boundary. */
+export async function miscast(page: Page, spell: Spell): Promise<void> {
+  await page.evaluate(async spellName => {
+    const controller = Reflect.get(window, "__duelController");
+    const badge = Reflect.get(window, "__scriptedBadge");
+    if (!controller.healthy()) throw new Error("Scripted laptop input is unhealthy");
+    controller.fusion.reset(controller.generation);
+    controller.motion.clearPending("scripted mismatched gesture");
+    let gesture: { id: string; spell: string; startMs: number; endMs: number } | undefined;
+    const originalGesture = controller.fusion.pushGesture.bind(controller.fusion);
+    controller.fusion.pushGesture = (evidence: typeof gesture) => { gesture = evidence; originalGesture(evidence); };
+    const support = spellName === "protego" || spellName === "episkey";
+    try {
+      await badge.play(support ? "jab" : "guard");
+      if (!gesture || gesture.spell !== (support ? "stupefy" : "protego"))
+        throw new Error(`No mismatched raw gesture: ${JSON.stringify(controller.motion.getDiagnostics())}`);
+      const id = crypto.randomUUID(), startMs = gesture.startMs + 20;
+      const endMs = Math.max(startMs + 20, gesture.endMs);
+      controller.fusion.beginUtterance({ id, generation: controller.generation, startMs });
+      controller.fusion.pushUtterance({ id, generation: controller.generation, spell: spellName,
+        startMs, endMs, finalAtMs: Math.max(endMs, performance.now()) });
+      if (controller.fusion.getState().lastRejection !== "spell-gesture-mismatch")
+        throw new Error(`Expected wrong-gesture rejection: ${JSON.stringify(controller.fusion.getState())}`);
+    } finally {
+      controller.fusion.pushGesture = originalGesture;
+    }
+  }, spell);
+}
+
 export async function cast(page: Page, spell: Spell): Promise<{ accepted: boolean; reason?: string; projectileId?: string }> {
   return page.evaluate(async spellName => {
     const controller = Reflect.get(window, "__duelController");

@@ -1515,3 +1515,101 @@ button.spell-cast-button:disabled {
     scroll-behavior: auto !important;
   }
 }
+
+/* A local spell attempt can fizzle without creating any battle effect. */
+.miscast-effect {
+  --fizzle: #ffb5b2;
+  position: absolute;
+  z-index: 4;
+  top: 68%;
+  left: 27%;
+  width: 27%;
+  height: auto;
+  transform: translate(-50%, -50%);
+  overflow: visible;
+  pointer-events: none;
+  color: var(--fizzle);
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.miscast-protego { --fizzle: #a6d9ec; }
+.miscast-episkey { --fizzle: #b3dda5; }
+.miscast-expelliarmus { --fizzle: #edcc83; }
+.miscast-incendio { --fizzle: #ffa871; }
+.shield-shard {
+  fill: #96cce214;
+  stroke-dasharray: 220;
+  animation: shield-fizzle 1.8s ease-out both;
+}
+.shard-left { --fall-x: -13px; --fall-y: 18px; }
+.shard-right { --fall-x: 15px; --fall-y: 24px; }
+.shard-base { --fall-x: 1px; --fall-y: 33px; }
+.miscast-dust {
+  fill: currentColor;
+  stroke: none;
+  animation: fizzle-dust 1.8s ease-out both;
+}
+.dust-two { animation-delay: 90ms; }
+.healing-wisp {
+  stroke-dasharray: 130;
+  transform-origin: 90px 132px;
+  animation: healing-fizzle 1.8s ease-out both;
+}
+.wisp-right { animation-delay: 60ms; }
+.wisp-middle { animation-delay: 120ms; }
+.miscast-failed-trail {
+  stroke-dasharray: 4 9;
+  opacity: 0.55;
+  animation: trail-fizzle 1.6s ease-out both;
+}
+.miscast-ember {
+  fill: currentColor;
+  animation: ember-fizzle 1.5s ease-out both;
+}
+.ember-one { --drift-x: 41px; --drift-y: 56px; }
+.ember-two { --drift-x: 13px; --drift-y: 72px; animation-delay: 90ms; }
+.ember-three { --drift-x: 28px; --drift-y: 42px; animation-delay: 160ms; }
+.battle-dialogue.miscast-dialogue {
+  background: #292a3a;
+  border-bottom-color: #63583b;
+  color: #f1d783;
+}
+.miscast-dialogue .dialogue-star,
+.miscast-dialogue .dialogue-arrow { color: #dcbf6d; }
+@keyframes shield-fizzle {
+  0% { opacity: 0; stroke-dashoffset: 220; transform: translate(0, 7px); }
+  25% { opacity: 0.85; stroke-dashoffset: 40; transform: translate(0, 0); }
+  45% { opacity: 0.75; stroke-dashoffset: 0; transform: translate(0, 0); }
+  100% { opacity: 0; stroke-dashoffset: 0; transform: translate(var(--fall-x), var(--fall-y)); }
+}
+@keyframes healing-fizzle {
+  0% { opacity: 0; stroke-dashoffset: 130; transform: scale(0.6, 0.5); }
+  30% { opacity: 0.9; stroke-dashoffset: 0; transform: scale(1); }
+  100% { opacity: 0; stroke-dashoffset: -100; transform: scale(0.3, 0.1); }
+}
+@keyframes fizzle-dust {
+  0%, 25% { opacity: 0; transform: translateY(-5px); }
+  40% { opacity: 0.8; }
+  100% { opacity: 0; transform: translateY(26px); }
+}
+@keyframes ember-fizzle {
+  0% { opacity: 0; transform: translate(0, 0); }
+  16% { opacity: 0.95; transform: translate(13px, -9px); }
+  100% { opacity: 0; transform: translate(var(--drift-x), var(--drift-y)); }
+}
+@keyframes trail-fizzle {
+  0% { opacity: 0; stroke-dashoffset: 45; }
+  25% { opacity: 0.6; }
+  100% { opacity: 0; stroke-dashoffset: 0; }
+}
+@media (max-width: 700px) {
+  .miscast-effect { width: 46%; top: 63%; left: 27%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .miscast-effect { opacity: 0.8; }
+  .shield-shard { stroke-dasharray: none; transform: translate(var(--fall-x), var(--fall-y)); }
+  .healing-wisp { stroke-dasharray: 13 8; }
+  .miscast-ember { transform: translate(var(--drift-x), var(--drift-y)); }
+}

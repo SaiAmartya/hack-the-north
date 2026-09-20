@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { scriptedLaptop, connectBadge, snapshot, cast } from "./scripted-laptop";
+import { scriptedLaptop, connectBadge, snapshot, cast, miscast } from "./scripted-laptop";
 
 test("the homepage requires a wand before offering duel creation or a code", async ({ page }) => {
   await page.goto("/");
@@ -501,5 +501,125 @@ test("developer mode teaches all five spells and exports raw motion, speech and 
   await expect(page.getByText("Move your wand or say a spell to capture an event.", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Resume view", exact: true }).click();
   await expect(page.locator(".telemetry-entry").first()).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("wrong raw gestures fizzle locally, explain the correction, and allow the next correct cast", async ({ page }) => {
+  test.setTimeout(40_000);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await scriptedLaptop(page);
+  await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
+  await connectBadge(page);
+  await page.getByRole("button", { name: "Tutorial duel", exact: true }).click();
+  await page.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Try it", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Try it", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("practice");
+  // Lesson one has no bot attack, isolating the absence of any authoritative failure effect.
+  const before = await snapshot(page);
+  const unchangedByFizzle = async () => {
+    const state = await snapshot(page);
+    for (const slot of ["P1", "P2"] as const) {
+      expect(state.players[slot]?.hp).toBe(before.players[slot]?.hp);
+      expect(state.players[slot]?.cooldownUntilMs).toEqual(before.players[slot]?.cooldownUntilMs);
+      expect(state.players[slot]?.shieldUntilMs).toBe(before.players[slot]?.shieldUntilMs);
+      expect(state.players[slot]?.offenseLockedUntilMs).toBe(before.players[slot]?.offenseLockedUntilMs);
+    }
+    expect(state.projectiles).toEqual([]);
+    expect(state.recentEvents.filter(event => event.type === "castAccepted")).toEqual([]);
+    expect(state.tutorial?.stage).toBe("practice");
+  };
+  await miscast(page, "protego");
+  const fizzle = page.getByTestId("local-miscast");
+  await expect(fizzle).toHaveAttribute("data-spell", "protego");
+  await expect(page.getByRole("img", { name: "Protego fizzled near your wand", exact: true })).toBeVisible();
+  await expect(page.getByText("Protego fizzled. Raise your wand and hold briefly.", { exact: true })).toBeVisible();
+  await expect(page.locator(".miscast-dialogue")).toHaveCSS("color", "rgb(241, 215, 131)");
+  await unchangedByFizzle();
+  // Freeze only the decorative SVG at a representative frame; input and referee clocks remain real.
+  await fizzle.evaluate(element => element.getAnimations({ subtree: true }).forEach(animation => { animation.currentTime = 650; animation.pause(); }));
+  await page.locator(".arena").screenshot({ path: "/tmp/wandduel-shield-fizzle-preview.png" });
+  await page.screenshot({ path: "/tmp/wandduel-protego-fizzle.png", fullPage: true });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(page.locator(".shield-shard").first()).toHaveCSS("animation-name", "none");
+  await page.screenshot({ path: "/tmp/wandduel-fizzle-reduced-motion.png", fullPage: true });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
+  await miscast(page, "episkey");
+  await expect(fizzle).toHaveAttribute("data-spell", "episkey");
+  await expect(page.getByText("Episkey fizzled. Raise your wand and hold briefly.", { exact: true })).toBeVisible();
+  await unchangedByFizzle();
+  await fizzle.evaluate(element => element.getAnimations({ subtree: true }).forEach(animation => { animation.currentTime = 650; animation.pause(); }));
+  await page.locator(".arena").screenshot({ path: "/tmp/wandduel-heal-fizzle-preview.png" });
+  await page.screenshot({ path: "/tmp/wandduel-healing-fizzle.png", fullPage: true });
+
+  await miscast(page, "incendio");
+  await expect(fizzle).toHaveAttribute("data-spell", "incendio");
+  await expect(page.getByText("Incendio fizzled. Give your wand a clear forward jab.", { exact: true })).toBeVisible();
+  await unchangedByFizzle();
+  await fizzle.evaluate(element => element.getAnimations({ subtree: true }).forEach(animation => { animation.currentTime = 600; animation.pause(); }));
+  await page.locator(".arena").screenshot({ path: "/tmp/wandduel-attack-fizzle-preview.png" });
+  await page.screenshot({ path: "/tmp/wandduel-attack-fizzle.png", fullPage: true });
+  await page.evaluate(() => Reflect.get(window, "__scriptedBadge").play("lower"));
+  expect(await cast(page, "stupefy")).toMatchObject({ accepted: true });
+  await expect(fizzle).toHaveCount(0);
+  await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(80);
+  await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("complete");
+  expect(errors).toEqual([]);
+});
+
+test("badge trials export a complete raw trial and preserve an interrupted attempt", async ({ page }) => {
+  test.setTimeout(35_000);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await scriptedLaptop(page);
+  await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Gesture trial recorder" })).toHaveCount(0);
+  await connectBadge(page);
+  const recorder = page.getByRole("region", { name: "Gesture trial recorder" });
+  await recorder.getByRole("button", { name: /Record gesture trials/ }).click();
+  await recorder.getByLabel("Trial movement").selectOption("protego");
+  await recorder.getByRole("checkbox", { name: "Say the spell while moving" }).uncheck();
+  await recorder.getByLabel("Grip / environment / observations").fill("Scripted raw badge boundary; synthetic raise, no microphone.");
+  await recorder.getByRole("button", { name: "Start 10 trials", exact: true }).click();
+  await expect(recorder.getByLabel("Trial movement")).toBeDisabled();
+  await expect(recorder.getByText("Raise and hold", { exact: true })).toBeVisible({ timeout: 6_000 });
+  await page.evaluate(() => Reflect.get(window, "__scriptedBadge").play("guard"));
+  await expect(recorder.getByText("Return to your resting grip", { exact: true })).toBeVisible({ timeout: 5_000 });
+  await page.evaluate(() => Reflect.get(window, "__scriptedBadge").play("lower"));
+  await expect(recorder.getByText("Trial 2 of 10", { exact: true })).toBeVisible({ timeout: 5_000 });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => Reflect.get(window, "__setVisibility")(true));
+  await expect(recorder.getByText("Interrupted — your captured trials are kept", { exact: true })).toBeVisible();
+  await expect(recorder.getByRole("button", { name: /Export trial JSON/ })).toBeEnabled();
+  await recorder.getByText("1 completed · add notes for individual trials", { exact: true }).click();
+  await recorder.getByLabel("Trial 1 observation", { exact: true }).fill("Raise was recognized.");
+  await recorder.getByLabel("Trial 2 observation", { exact: true }).fill("Backgrounded during countdown.");
+  await page.screenshot({ path: "/tmp/wandduel-gesture-trial-recorder.png", fullPage: true });
+  const downloading = page.waitForEvent("download");
+  await recorder.getByRole("button", { name: /Export trial JSON/ }).click();
+  const file = await (await downloading).path();
+  const exported = JSON.parse(await readFile(file!, "utf8"));
+  expect(exported).toMatchObject({
+    format: "wandduel-gesture-trials-v1", intendedLabel: "protego", expectedGesture: "raise",
+    speakDuringMovement: false, completed: 1, stoppedReason: "page_hidden",
+    context: { source: "ble", streaming: true },
+    metadata: { source: "REAL BLE", firmware: { major: 0, minor: 2, patch: 0 } },
+  });
+  expect(exported.trials).toHaveLength(10);
+  expect(exported.trials[0]).toMatchObject({ number: 1, intendedLabel: "protego", status: "completed", observation: "Raise was recognized." });
+  expect(exported.trials[0].phases.map((phase: { phase: string }) => phase.phase)).toEqual(["countdown", "move", "settle", "rest"]);
+  expect(exported.trials[0].entries.map((entry: { kind: string }) => entry.kind)).toEqual(expect.arrayContaining(["wand.raw_motion", "wand.sample", "gesture.accepted"]));
+  expect(exported.trials[0].entries.find((entry: { kind: string }) => entry.kind === "wand.raw_motion").data.hex).toMatch(/^[\da-f]{2}( [\da-f]{2})+$/);
+  expect(exported.trials[1]).toMatchObject({ number: 2, status: "interrupted", interruption: { reason: "page_hidden" }, observation: "Backgrounded during countdown." });
+  expect(exported.trials[1].entries.some((entry: { kind: string }) => entry.kind === "wand.sample")).toBe(true);
+  expect(exported.trials.slice(2).every((trial: { status: string }) => trial.status === "pending")).toBe(true);
+  expect(JSON.stringify(exported)).not.toMatch(/"token"|"sessionToken"|"ownerToken"|"samples":\[/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: "/tmp/wandduel-gesture-trial-recorder-mobile.png", fullPage: true });
+  await recorder.getByRole("button", { name: "Reset trials", exact: true }).click();
+  await expect(recorder.getByRole("button", { name: /Export trial JSON/ })).toHaveCount(0);
   expect(errors).toEqual([]);
 });

@@ -99,6 +99,34 @@ it("keeps telemetry opt-in, ordered and bounded, including raw transcription tex
   expect(log.snapshot()).toEqual({ entries: [], total: 0, dropped: 0 });
 });
 
+it("shows a local wrong-gesture fizzle without casting or changing combat state, then accepts a fresh pair", () => {
+  const controller = new DuelController();
+  controller.renderingReady = true;
+  controller.motion.useDefaultProfile(0);
+  controller.wand = { getSnapshot: () => ({ phase: "streaming" }), setState: vi.fn(),
+    cue: vi.fn(), disconnect: vi.fn() } as unknown as WandClient;
+  controller.setDevMode(true);
+  controller.game.rules = parseRules(welcome.rules);
+  controller.game.slot = "P1";
+  controller.game.snapshot = parseSnapshot(structuredClone({ ...welcome.snapshot, phase: "playing" }));
+  controller.game.onChange();
+  const before = structuredClone(controller.game.snapshot);
+  const send = vi.spyOn(controller.game, "send");
+  controller.fusion.beginUtterance({ id: "wrong", generation: 0, startMs: 0 });
+  controller.fusion.pushUtterance({ id: "wrong", generation: 0, spell: "protego", startMs: 0, endMs: 200, finalAtMs: 300 });
+  controller.fusion.pushGesture({ id: "jab", generation: 0, spell: "stupefy", startMs: 100, endMs: 350, quality: 1 });
+  expect(controller.miscast).toMatchObject({ spell: "protego", message: "Protego fizzled. Raise your wand and hold briefly." });
+  expect(send).not.toHaveBeenCalled();
+  expect(controller.game.snapshot).toEqual(before);
+  expect(controller.telemetry.snapshot().entries.some(entry => entry.kind === "cast.rejected_input")).toBe(true);
+  controller.fusion.beginUtterance({ id: "fresh", generation: 0, startMs: 1_000 });
+  controller.fusion.pushUtterance({ id: "fresh", generation: 0, spell: "protego", startMs: 1_000, endMs: 1_200, finalAtMs: 1_300 });
+  controller.fusion.pushGesture({ id: "raise", generation: 0, spell: "protego", startMs: 1_100, endMs: 1_350, quality: 1 });
+  expect(controller.miscast).toBeUndefined();
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "cast", spell: "protego" }));
+  controller.destroy();
+});
+
 it("stops renewing badge feedback and clears evidence when the referee is lost", () => {
   const controller = new DuelController();
   controller.roomCode = "K7X2PD";

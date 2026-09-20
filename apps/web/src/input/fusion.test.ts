@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CastFusion,
   type CastAttempt,
+  type CastRejection,
   type UtteranceEvidence,
 } from "./fusion";
 import type { GestureEvidence, SpellName } from "./motion";
@@ -38,6 +39,29 @@ function finish(fusion: CastFusion, evidence: UtteranceEvidence): void {
 }
 
 describe("speech and gesture fusion", () => {
+  it("reports one fizzle only for a confirmed incantation, never cancellation or silent motion", () => {
+    const attempts: CastAttempt[] = [], rejections: CastRejection[] = [];
+    const fusion = new CastFusion(attempt => attempts.push(attempt), rejection => rejections.push(rejection));
+    finish(fusion, utterance("wrong", "protego", 1_000, 1_500));
+    fusion.pushGesture(gesture("jab", "stupefy", 1_300, 1_700));
+    expect(rejections).toMatchObject([{ reason: "spell-gesture-mismatch", utterance: { id: "wrong", spell: "protego" }, gesture: { id: "jab" } }]);
+    fusion.advance(5_000);
+    expect(rejections).toHaveLength(1);
+    fusion.pushGesture(gesture("silent", "protego", 5_000, 5_400));
+    fusion.advance(8_001);
+    finish(fusion, utterance("cancelled", "protego", 9_000, 9_400));
+    fusion.cancelUtterance("cancelled", 4);
+    fusion.advance(12_001);
+    expect(rejections).toHaveLength(1);
+    finish(fusion, utterance("no-motion", "episkey", 13_000, 13_400));
+    fusion.advance(16_001);
+    expect(rejections.at(-1)).toMatchObject({ reason: "pending-evidence-expired", utterance: { spell: "episkey" } });
+    finish(fusion, utterance("correct", "protego", 17_000, 17_500));
+    fusion.pushGesture(gesture("raise", "protego", 17_300, 17_700));
+    expect(attempts.map(attempt => attempt.spell)).toEqual(["protego"]);
+    expect(rejections).toHaveLength(2);
+  });
+
   it.each([
     ["stupefy", "stupefy"],
     ["expelliarmus", "stupefy"],

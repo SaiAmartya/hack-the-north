@@ -1,0 +1,36 @@
+.gesture-trials {
+  width: 100%;
+  max-width: 1000px;
+  margin: 18px auto 34px;
+  border: 2px solid #b6a681;
+  background: #fff9e8;
+  color: #302b38;
+}
+.gesture-trials .trial-heading { width: 100%; justify-content: flex-start; text-decoration: none; padding: 14px 20px; font-size: 12px; }
+.trial-heading > span:last-child { margin-left: auto; color: #786344; font-size: 10px; }
+.trial-body { padding: 0 22px 20px; font-size: 12px; line-height: 1.65; }
+.trial-body p { max-width: 85ch; }
+.trial-settings { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; margin: 18px 0 8px; }
+.trial-settings > label:first-child { display: grid; gap: 5px; }
+.trial-settings select { min-height: 44px; padding: 9px 32px 9px 10px; border: 1px solid #8a795a; background: #fffdf5; color: inherit; font: inherit; }
+.trial-settings select:focus-visible { outline: 3px solid #bc863b; outline-offset: 3px; }
+.trial-speech { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.trial-speech input { width: 20px; height: 20px; accent-color: #74434b; }
+.trial-notes, .trial-observations label { display: grid; gap: 4px; }
+.gesture-trials input:not([type="checkbox"]) { width: 100%; min-height: 44px; padding: 10px; border: 1px solid #b6a681; background: #fffdf5; color: inherit; font-size: 12px; }
+.gesture-trials .trial-hint { color: #75684e; font-size: 11px; }
+.trial-prompt { display: grid; gap: 8px; min-height: 114px; align-content: center; padding: 18px 22px; margin: 20px 0; border: 2px solid #b6a681; background: #eee5cf; }
+.trial-prompt > span { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+.trial-prompt > strong { font-family: Georgia, serif; font-size: 24px; font-weight: 400; line-height: 1.25; }
+.trial-prompt.trial-moving { background: #e0ebdf; border-color: #496952; }
+.trial-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.trial-observations { margin: 20px 0; }
+.trial-observations summary { min-height: 44px; padding: 10px 0; cursor: pointer; }
+.trial-observations label { margin: 8px 0; }
+@media (max-width: 600px) {
+  .trial-body { padding: 0 14px 15px; }
+  .trial-settings { gap: 10px; }
+  .trial-prompt { padding: 16px; }
+  .trial-prompt > strong { font-size: 21px; }
+  .trial-actions > button { flex: 1 1 auto; }
+}

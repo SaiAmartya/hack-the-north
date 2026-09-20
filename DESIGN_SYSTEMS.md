@@ -14,6 +14,8 @@ Tutorial sits immediately below Duel a bot. Its five lessons pause between confi
 
 Dev mode is an explicit, default-off switch at the homepage's bottom right. It retains wand pairing but permits spell-card clicks without microphone readiness. Those clicks obey the same referee rules and are labeled in a local diagnostic log under the battle. The log includes raw received wand data, classification/fusion outcomes and raw transcription text; no microphone audio or credentials. Keep capture bounded, export on request, and render only a short recent window. Ordinary play has no diagnostic panel or clickable spells. Motion-only casting was explicitly withdrawn.
 
+After pairing in Dev mode, a collapsed gesture-trial recorder can capture ten labelled attempts before entering a duel. Failed recognition is useful data and must still be recorded. Keep recordings local, bounded and explicitly exported; mark interruptions rather than inventing completed trials.
+
 Phone pairing uses a public QR and matching-number confirmation, or the optional trusted LAN code. Bearer capabilities never appear in URLs. The phone remains focused on permission, fresh movement, connection and expiring feedback. Failed direct connection offers an explicit internet fallback. No automatic route switch in a round.
 
 ## Visual direction
@@ -30,6 +32,7 @@ The homepage is a quiet split composition: one title and two wand choices beside
 - Five spell cards show names, damage/healing/effect and each cooldown. Always show the gesture; voice selects the spell in ordinary play. Only Dev mode makes them cast buttons. No global cooldown.
 - A short battle message reflects authoritative casts, blocks, hits, healing and result. Both players see the same server outcome from their own perspective.
 - Shield, disarm, healing and impact feedback target the correct sprite.
+- A recognized incantation with a failed gesture match may fizzle near the local wand, with one short yellow corrective message. The fizzle has no health or cooldown effect and never previews a hit on the opponent. Silence, discarded speech and stale input do not create spell animations.
 - At 0 HP, show clear Victory or Defeat, both final HP values, and Rematch. Aborts and timed draws have distinct wording. Retain pairing while recovering.
 
 The authoritative referee owns all health, shields, projectiles, cooldowns and results. Never preview an unconfirmed hit. Late snapshots restore current state without replaying completed effects.

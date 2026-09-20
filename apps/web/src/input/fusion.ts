@@ -21,6 +21,12 @@ export type CastAttempt = {
   generation: number;
 };
 
+export type CastRejection = {
+  reason: "spell-gesture-mismatch" | "evidence-timing-mismatch" | "pending-evidence-expired" | "multiple-gesture-candidates";
+  utterance: UtteranceEvidence;
+  gesture?: GestureEvidence;
+};
+
 export type CastFusionState = {
   generation?: number;
   activeUtterance?: UtteranceOnset;
@@ -64,7 +70,10 @@ export class CastFusion {
   private readonly gestureIds = new BoundedIds();
   private lastRejection = "";
 
-  constructor(private readonly onAccepted: (attempt: CastAttempt) => void) {}
+  constructor(
+    private readonly onAccepted: (attempt: CastAttempt) => void,
+    private readonly onRejected: (rejection: CastRejection) => void = () => {},
+  ) {}
 
   beginUtterance(onset: UtteranceOnset): void {
     this.assertOnset(onset);
@@ -175,13 +184,6 @@ export class CastFusion {
     const voice = this.pendingUtterance;
     const gesture = this.pendingGesture;
     if (!voice || !gesture || this.generation === undefined) return;
-    const requiredGesture = voice.spell === "protego" || voice.spell === "episkey"
-      ? "protego"
-      : "stupefy";
-    if (gesture.spell !== requiredGesture && gesture.spell !== voice.spell) {
-      this.reject("spell-gesture-mismatch");
-      return;
-    }
     const gap = Math.max(
       0,
       voice.startMs - gesture.endMs,
@@ -192,6 +194,13 @@ export class CastFusion {
       Math.min(voice.startMs, gesture.startMs);
     if (gap > MAX_INTERVAL_GAP_MS || union > MAX_UNION_MS) {
       this.reject("evidence-timing-mismatch");
+      return;
+    }
+    const requiredGesture = voice.spell === "protego" || voice.spell === "episkey"
+      ? "protego"
+      : "stupefy";
+    if (gesture.spell !== requiredGesture && gesture.spell !== voice.spell) {
+      this.reject("spell-gesture-mismatch");
       return;
     }
     const attempt: CastAttempt = {
@@ -222,10 +231,17 @@ export class CastFusion {
   }
 
   private reject(reason: string): void {
+    const voice = this.pendingUtterance;
+    const gesture = this.pendingGesture;
     this.activeUtterance = undefined;
     this.pendingUtterance = undefined;
     this.pendingGesture = undefined;
     this.lastRejection = reason;
+    // Only a confirmed incantation can produce a fizzle; silence, stale input and
+    // ASR cancellation must never look like an attempted spell.
+    if (voice && (reason === "spell-gesture-mismatch" || reason === "evidence-timing-mismatch" ||
+      reason === "pending-evidence-expired" || reason === "multiple-gesture-candidates"))
+      this.onRejected({ reason, utterance: { ...voice }, gesture: gesture ? { ...gesture } : undefined });
   }
 
   private assertOnset(onset: UtteranceOnset): void {

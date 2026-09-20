@@ -118,6 +118,11 @@ classifier decisions, raw transcription text and cast outcomes. **Pause view** k
 **Export JSON** saves the bounded trace. See [trace collection steps](qa/tutorial-dev-release.md#physical-trace-collection).
 Normal play still requires both speech and movement; there is no motion-only option.
 
+For labelled badge diagnosis, stay on room selection in Dev mode and expand **Record gesture trials**.
+Choose a spell, then **Start 10 trials** and follow the cues for 100 seconds. **Export trial JSON**
+keeps successful and missed movements, raw motion and enabled speech diagnostics. Export before
+resetting for another spell. See the [gesture capture contract](qa/gesture-iteration.md#sais-capture-contract).
+
 | Spell | Movement | Result | Cooldown |
 | --- | --- | --- | --- |
 | Stupefy | Firm jab | 20 damage | 2 s |

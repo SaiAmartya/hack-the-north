@@ -3,6 +3,7 @@ import qrcode from "qrcode-generator";
 import { DuelController, nameOf } from "./controller";
 import { DuelEffects } from "./effects";
 import { GestureGuide } from "./GestureGuide";
+import { GestureTrials } from "./GestureTrials";
 import { TelemetryPanel } from "./TelemetryPanel";
 import type { GameEvent, Player, Spell, SpellRule } from "./contracts";
 import "./game.css";
@@ -156,6 +157,46 @@ function PlayOption({
   );
 }
 
+/** Local feedback only: this SVG never represents an accepted spell or a hit. */
+function MiscastVisual({ spell }: { spell: Spell }) {
+  return (
+    <svg
+      className={`miscast-effect miscast-${spell}`}
+      viewBox="0 0 180 180"
+      fill="none"
+      role="img"
+      aria-label={`${nameOf(spell)} fizzled near your wand`}
+      data-testid="local-miscast"
+      data-spell={spell}
+    >
+      {spell === "protego" ? (
+        <g className="miscast-shield">
+          <path className="shield-shard shard-left" d="m90 22-48 20v46l20 21 17-28-9-21 20-13Z" />
+          <path className="shield-shard shard-right" d="m98 24 40 18v46l-24 36-14-32 14-27-18-14Z" />
+          <path className="shield-shard shard-base" d="m87 87-16 30 19 28 16-13-13-28Z" />
+          <path className="miscast-dust dust-one" d="m47 126 4-5 4 5-4 5Z" />
+          <path className="miscast-dust dust-two" d="m131 112 3-4 3 4-3 4Z" />
+        </g>
+      ) : spell === "episkey" ? (
+        <g className="miscast-heal">
+          <path className="healing-wisp wisp-left" d="M72 125c-37-8-43-38-25-46s11-33 23-40" />
+          <path className="healing-wisp wisp-right" d="M101 125c32-16 41-37 24-50s-8-24-12-35" />
+          <path className="healing-wisp wisp-middle" d="M88 129c18-22-13-40 1-59s6-27 0-37" />
+          <path className="miscast-dust dust-one" d="m56 63 4-6 4 6-4 6Z" />
+          <path className="miscast-dust dust-two" d="m110 48 3-5 3 5-3 5Z" />
+        </g>
+      ) : (
+        <g className="miscast-sparks">
+          <path className="miscast-failed-trail" d="M94 57q34-12 44 9t-9 39" />
+          <g className="miscast-ember ember-one"><circle cx="96" cy="56" r="4" /><path d="m89 60-7 4" /></g>
+          <g className="miscast-ember ember-two"><circle cx="96" cy="56" r="3" /><path d="m91 62-3 6" /></g>
+          <g className="miscast-ember ember-three"><circle cx="96" cy="56" r="2" /></g>
+        </g>
+      )}
+    </svg>
+  );
+}
+
 const LESSONS: Record<Spell, { purpose: string; success: string }> = {
   stupefy: { purpose: "A quick strike. Watch your rival's health fall.", success: "A direct hit. Each spell recharges on its own." },
   protego: { purpose: "Block the incoming spell. Misses reset when you try again.", success: "Blocked. A shield stops one hit, then disappears." },
@@ -251,6 +292,7 @@ export function GameApp() {
     effects.current?.update(game, slot);
   }, [game, slot]);
   const live = !c?.game.issue && (game?.phase === "playing" || game?.phase === "countdown");
+  const miscast = game?.phase === "playing" && live ? c?.miscast : undefined;
   const wand = c?.wand?.getSnapshot(),
     wandReady = wand?.phase === "streaming";
   const mic = c?.speech.getSnapshot(),
@@ -302,10 +344,10 @@ export function GameApp() {
           : "is-blocking"
       : "";
   };
-  const status =
+  const status = miscast?.message ?? (
     c?.notice && performance.now() - c.noticeAt < 1400
       ? c.notice
-      : battleMessage(lastEvent, slot);
+      : battleMessage(lastEvent, slot));
   const leaveRoom = () => {
     c?.leaveRoom();
     setCodeInput("");
@@ -574,6 +616,7 @@ export function GameApp() {
               )}
             </div>
             <canvas ref={canvas} className="spell-canvas" aria-hidden="true" />
+            {miscast && <MiscastVisual key={miscast.id} spell={miscast.spell} />}
             {(live || result) && (
               <>
                 <HealthPanel player={opponent} own={false} now={now} />
@@ -687,7 +730,7 @@ export function GameApp() {
         {tutorial && game?.phase === "playing" && c && !c.game.issue && <TutorialLesson controller={c} />}
         {inRoom && (
           <section className="battle-console" aria-label="Spell book">
-            <div className="battle-dialogue" role="status">
+            <div className={`battle-dialogue ${miscast ? "miscast-dialogue" : ""}`} role="status">
               <span className="dialogue-star" aria-hidden="true">
                 ✦
               </span>
@@ -767,6 +810,7 @@ export function GameApp() {
         )}
         {inRoom && c?.devMode && <TelemetryPanel controller={c} />}
       </div>
+      {c?.devMode && c.source && !inRoom && <GestureTrials controller={c} />}
       {!inRoom && (
         <footer className="play-options" aria-label="Play options">
           <PlayOption checked={c?.devMode ?? false} disabled={!c || c.busy} onChange={(value) => c?.setDevMode(value)} />

@@ -303,6 +303,8 @@ describe("speech client lifecycle", () => {
       const client = new SpeechClient(platform);
       const evidence: SpeechEvidence[] = [];
       const onset = vi.fn();
+      const diagnostic = vi.fn();
+      client.onDiagnostic(diagnostic);
       client.onSpeech((item) => evidence.push(item));
       client.onOnset(onset);
       client.setRecognitionEnabled(false);
@@ -311,6 +313,7 @@ describe("speech client lifecycle", () => {
       const calibrated = client.getSnapshot();
       platform.utterance();
       expect(platform.transcriptions).toHaveLength(0);
+      expect(diagnostic).toHaveBeenCalledWith(expect.objectContaining({ type: "discard", detail: "recognition-paused", voiceStartMs: expect.any(Number), voiceEndMs: expect.any(Number) }));
       expect(client.getSnapshot()).toEqual(calibrated);
 
       platform.feed(0.08, beforeResume);
