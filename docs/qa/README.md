@@ -2,6 +2,7 @@
 
 Current evidence, read these first:
 
+- [motion-recognition-debugging.md](motion-recognition-debugging.md) — active investigation of inaccurate spell detection: confirmed classifier/test defects, transport-vs-classifier diagnosis, experiment log, and remaining physical gates.
 - [input-rebuild.md](input-rebuild.md) — phone sessions, recognizer v3, badge auto-reconnect, repeatable checks and the next physical card.
 - [firmware-0.2.0.md](firmware-0.2.0.md) — firmware 0.2.x change record: why the badge was invisible and why every sample was rejected, the flash record, the 0.2.1 brownout soft start, and the physical QA card.
 
