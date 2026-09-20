@@ -72,6 +72,7 @@ class DuelSettings:
     allowed_origins: frozenset[str] = DEFAULT_ALLOWED_ORIGINS
     dev_relay_enabled: bool = False
     allow_replay: bool = False
+    variance: bool = True
     start_background_tick: bool = True
     phone: PhoneSettings = PhoneSettings()
 
@@ -94,6 +95,7 @@ class DuelSettings:
             allowed_origins=origins,
             dev_relay_enabled=_environment_flag("WAND_DEV_RELAY"),
             allow_replay=_environment_flag("WAND_ALLOW_REPLAY"),
+            variance=_environment_flag("WAND_VARIANCE", True),
             phone=PhoneSettings.from_environment(),
         )
 
@@ -111,6 +113,7 @@ def create_app(
         clock_ms=active_clock,
         allow_phone=active_settings.dev_relay_enabled,
         allow_replay=active_settings.allow_replay,
+        variance=active_settings.variance,
     )
     relay = DevWandRelay(
         clock_ms=active_clock,

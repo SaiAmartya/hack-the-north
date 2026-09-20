@@ -1,7 +1,38 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { scriptedLaptop, connectBadge, snapshot, cast, castWithMicrophone, miscast } from "./scripted-laptop";
 import badgeGestures from "../src/input/fixtures/badge-gestures-2026-09-20.json" with { type: "json" };
+
+async function startIdleMultiplayerDuel(page: Page, browser: Browser): Promise<{
+  opponent: Page;
+  opponentContext: BrowserContext;
+}> {
+  await page.getByRole("button", { name: "Start a duel", exact: true }).click();
+  await expect(page.getByLabel("Duel code")).toHaveText(/^[A-Z0-9]{6}$/);
+  const code = (await page.getByLabel("Duel code").textContent())!;
+  const opponentContext = await browser.newContext({
+    baseURL: new URL(page.url()).origin,
+    viewport: { width: 1440, height: 1000 },
+  });
+  try {
+    const opponent = await opponentContext.newPage();
+    const laptop = await scriptedLaptop(opponent);
+    laptop.enableSpeech();
+    await connectBadge(opponent);
+    await opponent.getByLabel("Already have a duel code?").fill(code);
+    await opponent.getByRole("button", { name: "Join with code", exact: true }).click();
+    for (const player of [page, opponent]) {
+      await expect(player.getByRole("button", { name: "Ready", exact: true })).toBeEnabled({ timeout: 10_000 });
+      await player.getByRole("button", { name: "Ready", exact: true }).click();
+    }
+    for (const player of [page, opponent])
+      await expect.poll(async () => (await snapshot(player)).phase).toBe("playing");
+    return { opponent, opponentContext };
+  } catch (error) {
+    await opponentContext.close();
+    throw error;
+  }
+}
 
 test("the homepage requires a wand before offering duel creation or a code", async ({ page }) => {
   await page.goto("/");
@@ -260,15 +291,28 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
   const assertProjectileOutcome = async (projectileId: string | undefined, spell: "expelliarmus" | "incendio", damage: number) => {
     expect(projectileId).toBeTruthy();
     const resolutions = (state: Awaited<ReturnType<typeof snapshot>>) => state.recentEvents.filter(event =>
-      event.projectileId === projectileId && event.type === "damage",
+      event.projectileId === projectileId && ["damage", "impactBlocked", "impactReflected", "shieldBroken"].includes(event.type),
     );
     await expect.poll(async () => resolutions(await snapshot(page)).length, { intervals: [50] }).toBe(1);
     const resolved = await snapshot(page);
     const [impact] = resolutions(resolved);
-    expect(impact).toMatchObject({ actor: "P1", target: "P2", spell, amount: damage });
+    expect(impact).toMatchObject({ actor: "P1", target: "P2", spell });
     expect(resolved.projectiles.some(projectile => projectile.id === projectileId)).toBe(false);
     const disarmed = resolved.recentEvents.filter(event => event.projectileId === projectileId && event.type === "offenseLocked");
-    if (spell === "expelliarmus") {
+    if (impact.type === "damage") {
+      // A critical hit multiplies the published damage by the published factor.
+      expect([damage, Math.floor(damage * 1.5)]).toContain(impact.amount);
+      expect(impact.critical).toBe(impact.amount !== damage);
+      if (spell === "incendio") {
+        // The burn itself lasts four seconds and Episkey cures it, so only its authoritative
+        // start is certain by the time this outcome is checked.
+        expect(resolved.recentEvents.some(event => event.projectileId === projectileId && event.type === "burning")).toBe(true);
+        if (resolved.players.P2!.burnUntilMs > resolved.serverNowMs)
+          await expect(page.getByLabel("Rival wizard").getByText(/BURNING/)).toBeVisible();
+      }
+    }
+    if (spell === "expelliarmus" && impact.type !== "impactBlocked" && impact.type !== "impactReflected") {
+      // Landing or shattering a shield both disarm; only an ordinary block or a reflection do not.
       expect(disarmed).toHaveLength(1);
       expect(resolved.players.P2!.offenseLockedUntilMs).toBeGreaterThan(impact.atMs);
       await expect(page.getByLabel("Rival wizard").getByText(/DISARMED/)).toBeVisible();
@@ -277,45 +321,74 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
 
   // React to the actual first projectile; the bot remains active throughout the match.
   await expect.poll(async () => (await snapshot(page)).projectiles.some(projectile =>
-    projectile.caster === "P2" && projectile.spell === "stupefy",
+    projectile.caster === "P2" && projectile.target === "P1",
   ), { intervals: [50], timeout: 16_000 }).toBe(true);
+  const incoming = (await snapshot(page)).projectiles.find(projectile => projectile.caster === "P2")!;
+  expect(incoming.spell).toMatch(/^(stupefy|expelliarmus|incendio)$/);
   expect((await cast(page, "protego")).accepted).toBe(true);
   await expect(page.getByLabel(/^Protego: recharging/)).toBeVisible();
   await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
-    event.type === "impactBlocked" && event.actor === "P2" && event.target === "P1",
+    event.type === "shieldRaised" && event.actor === "P1",
   ), { intervals: [50] }).toBe(true);
-  await expect(page.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "100");
+  await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
+    event.projectileId === incoming.id && ["damage", "impactBlocked", "impactReflected", "shieldBroken"].includes(event.type),
+  ), { intervals: [50], timeout: 6_000 }).toBe(true);
 
-  const disarmCast = await cast(page, "expelliarmus");
+  const attackReady = async (spell: "stupefy" | "expelliarmus" | "incendio") => {
+    await expect.poll(() => page.evaluate(name => {
+      const controller = Reflect.get(window, "__duelController");
+      const own = controller.game.snapshot.players[controller.game.slot];
+      const now = controller.game.now();
+      return own.cooldownUntilMs[name] <= now && own.offenseLockedUntilMs <= now && own.stunnedUntilMs <= now;
+    }, spell), { timeout: 15_000 }).toBe(true);
+  };
+  // The Duelist rival shatters raised shields and disarms; a raw jab takes over a second to
+  // perform, so a disarm landing mid-gesture is a lawful rejection worth one more attempt.
+  const attackWhenAble = async (spell: "stupefy" | "expelliarmus" | "incendio") => {
+    let ack: Awaited<ReturnType<typeof cast>> | undefined;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await attackReady(spell);
+      ack = await cast(page, spell);
+      if (ack.accepted) return ack;
+      if (!["offense_locked", "stunned"].includes(ack.reason ?? "")) break;
+    }
+    throw new Error(`${spell} was rejected: ${ack?.reason ?? "unknown"}`);
+  };
+  const disarmCast = await attackWhenAble("expelliarmus");
   expect(disarmCast.accepted).toBe(true);
   await expect(page.getByLabel(/^Expelliarmus: recharging/)).toBeVisible();
-  await assertProjectileOutcome(disarmCast.projectileId, "expelliarmus", 10);
+  await assertProjectileOutcome(disarmCast.projectileId, "expelliarmus", 8);
   await page.screenshot({ path: "/tmp/wandduel-solo-battle.png", fullPage: true });
 
-  const fireCast = await cast(page, "incendio");
+  const fireCast = await attackWhenAble("incendio");
   expect(fireCast.accepted).toBe(true);
   await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
-  await expect.poll(async () => (await snapshot(page)).players.P1!.hp, { timeout: 16_000 }).toBe(80);
+  await expect.poll(async () => (await snapshot(page)).players.P1!.hp, { timeout: 20_000 }).toBeLessThan(100);
   expect((await cast(page, "episkey")).accepted).toBe(true);
   await expect(page.getByLabel(/^Episkey: recharging/)).toBeVisible();
-  expect((await snapshot(page)).recentEvents).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "healed", actor: "P1", spell: "episkey", amount: 18 }),
-  ]));
-  expect((await cast(page, "stupefy")).accepted).toBe(true);
+  await expect.poll(async () => (await snapshot(page)).recentEvents.some(event =>
+    event.type === "healed" && event.actor === "P1" && event.spell === "episkey" &&
+    typeof event.amount === "number" && event.amount > 0 && event.amount <= 22,
+  )).toBe(true);
+  expect((await attackWhenAble("stupefy")).accepted).toBe(true);
   await expect(page.getByLabel(/^Stupefy: recharging/)).toBeVisible();
   await expect(page.getByLabel(/^Episkey: recharging/)).toBeVisible();
   expect(await cast(page, "stupefy")).toMatchObject({ accepted: false, reason: "cooldown" });
-  await assertProjectileOutcome(fireCast.projectileId, "incendio", 30);
+  await assertProjectileOutcome(fireCast.projectileId, "incendio", 22);
   const acceptedSpells = (await snapshot(page)).recentEvents
     .filter(event => event.type === "castAccepted" && event.actor === "P1")
     .map(event => event.spell).sort();
   expect(acceptedSpells).toEqual(["episkey", "expelliarmus", "incendio", "protego", "stupefy"]);
   await expect(page.getByRole("progressbar")).toHaveCount(5);
 
-  // The gentle bot gives a learning player time to finish the round and win on remaining health.
-  await expect(page.getByRole("heading", { name: "Victory!", exact: true })).toBeVisible({ timeout: 45_000 });
-  expect((await snapshot(page)).result).toMatchObject({ outcome: "win", winner: "P1", reason: "timeout" });
-  await expect(page.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "58");
+  // Stop casting and let the adaptive Practice Wizard finish: it keeps attacking, blocking and healing
+  // until a real knockout or the 90 second bell.
+  await expect(page.getByRole("heading", { name: /^(Victory|Defeat|An even match)!$/ })).toBeVisible({ timeout: 95_000 });
+  const outcome = (await snapshot(page)).result!;
+  expect(["win", "draw"]).toContain(outcome.outcome);
+  expect(["knockout", "timeout"]).toContain(outcome.reason);
+  const rivalCasts = (await snapshot(page)).recentEvents.filter(event => event.type === "castAccepted" && event.actor === "P2");
+  expect(rivalCasts.length).toBeGreaterThan(0);
   await expect(page.getByLabel("Duel code")).toHaveCount(0);
   await page.screenshot({ path: "/tmp/wandduel-solo-result.png", fullPage: true });
   await page.getByRole("button", { name: "Rematch", exact: true }).click();
@@ -397,39 +470,40 @@ test("a recorded badge raise reaches the solo referee as one Protego", async ({ 
   expect(events).toContainEqual(expect.objectContaining({ type: "shieldRaised", spell: "protego" }));
 });
 
-test("normal mode aligns real microphone timing with batched BLE in both orders and overlap", async ({ page }, testInfo) => {
+test("normal mode aligns real microphone timing with batched BLE in both orders and overlap", async ({ page, browser }, testInfo) => {
   test.setTimeout(70_000);
   const laptop = await scriptedLaptop(page);
   laptop.enableSpeech();
   await expect(page.getByRole("switch", { name: "Dev mode", exact: true })).not.toBeChecked();
   await connectBadge(page);
-  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Ready", exact: true })).toBeEnabled({ timeout: 10_000 });
-  await page.getByRole("button", { name: "Ready", exact: true }).click();
-  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
-  await page.evaluate(() => { Reflect.get(window, "__scriptedBadge").batchMs = 100; });
-  const timing = [];
-  for (const order of ["overlap", "speech-first", "movement-first"] as const) {
-    for (const spell of ["protego", "stupefy"] as const) {
-      await expect.poll(async () => {
-        const state = await snapshot(page);
-        return state.players.P1!.cooldownUntilMs[spell] - state.serverNowMs;
-      }).toBeLessThanOrEqual(0);
-      timing.push({ order, spell, ...await castWithMicrophone(page, spell, order) });
+  const { opponentContext } = await startIdleMultiplayerDuel(page, browser);
+  try {
+    await page.evaluate(() => { Reflect.get(window, "__scriptedBadge").batchMs = 100; });
+    const timing = [];
+    for (const order of ["overlap", "speech-first", "movement-first"] as const) {
+      for (const spell of ["protego", "stupefy"] as const) {
+        await expect.poll(async () => {
+          const state = await snapshot(page);
+          return state.players.P1!.cooldownUntilMs[spell] - state.serverNowMs;
+        }).toBeLessThanOrEqual(0);
+        timing.push({ order, spell, ...await castWithMicrophone(page, spell, order) });
+      }
     }
+    await testInfo.attach("normal-microphone-motion-timing", { body: JSON.stringify(timing, null, 2), contentType: "application/json" });
+    await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(58);
+    const ownCasts = (await snapshot(page)).recentEvents.filter(e => e.actor === "P1" && e.type === "castAccepted");
+    expect(ownCasts.map(e => e.spell)).toEqual(["protego", "stupefy", "protego", "stupefy", "protego", "stupefy"]);
+    expect(await page.evaluate(() => {
+      const c = Reflect.get(window, "__duelController");
+      return { dev: c.devMode, simple: c.simpleMotion, rejected: c.wand.getSnapshot().rejected };
+    })).toEqual({ dev: false, simple: false, rejected: 0 });
+    await page.locator(".arena-frame").screenshot({ path: "/tmp/wandduel-normal-timing.png" });
+  } finally {
+    await opponentContext.close();
   }
-  await testInfo.attach("normal-microphone-motion-timing", { body: JSON.stringify(timing, null, 2), contentType: "application/json" });
-  await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(40);
-  const ownCasts = (await snapshot(page)).recentEvents.filter(e => e.actor === "P1" && e.type === "castAccepted");
-  expect(ownCasts.map(e => e.spell)).toEqual(["protego", "stupefy", "protego", "stupefy", "protego", "stupefy"]);
-  expect(await page.evaluate(() => {
-    const c = Reflect.get(window, "__duelController");
-    return { dev: c.devMode, simple: c.simpleMotion, rejected: c.wand.getSnapshot().rejected };
-  })).toEqual({ dev: false, simple: false, rejected: 0 });
-  await page.locator(".arena-frame").screenshot({ path: "/tmp/wandduel-normal-timing.png" });
 });
 
-test("dev-only simple motion casts all five spoken spells from the same raw spike", async ({ page }) => {
+test("dev-only simple motion casts all five spoken spells from the same raw spike", async ({ page, browser }) => {
   test.setTimeout(55_000);
   await scriptedLaptop(page);
   const toggle = page.getByRole("switch", { name: "Simple motion", exact: true });
@@ -444,76 +518,79 @@ test("dev-only simple motion casts all five spoken spells from the same raw spik
   await page.screenshot({ path: "/tmp/wandduel-simple-mobile.png", fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await connectBadge(page);
-  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
-  await page.getByRole("button", { name: "Ready", exact: true }).click();
-  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
-  await expect(toggle).toHaveCount(0);
-  await expect(page.getByText("MOVE + SPEAK", { exact: true })).toHaveCount(5);
+  const { opponent, opponentContext } = await startIdleMultiplayerDuel(page, browser);
+  try {
+    await expect(toggle).toHaveCount(0);
+    await expect(page.getByText("MOVE + SPEAK", { exact: true })).toHaveCount(5);
 
-  // A correctly recognized word on its own never submits a cast.
-  await page.evaluate(() => {
-    const c = Reflect.get(window, "__duelController"), now = performance.now(), id = crypto.randomUUID();
-    c.fusion.beginUtterance({ id, generation: c.generation, startMs: now - 120 });
-    c.fusion.pushUtterance({ id, generation: c.generation, spell: "protego", startMs: now - 120, endMs: now, finalAtMs: now });
-  });
-  await expect.poll(() => page.evaluate(() => Reflect.get(window, "__duelController").fusion.getState().pendingUtterance),
-    { timeout: 4_000 }).toBeUndefined();
-  expect((await snapshot(page)).recentEvents.filter(e => e.type === "castAccepted" && e.actor === "P1")).toEqual([]);
+    // A correctly recognized word on its own never submits a cast.
+    await page.evaluate(() => {
+      const c = Reflect.get(window, "__duelController"), now = performance.now(), id = crypto.randomUUID();
+      c.fusion.beginUtterance({ id, generation: c.generation, startMs: now - 120 });
+      c.fusion.pushUtterance({ id, generation: c.generation, spell: "protego", startMs: now - 120, endMs: now, finalAtMs: now });
+    });
+    await expect.poll(() => page.evaluate(() => Reflect.get(window, "__duelController").fusion.getState().pendingUtterance),
+      { timeout: 4_000 }).toBeUndefined();
+    expect((await snapshot(page)).recentEvents.filter(e => e.type === "castAccepted" && e.actor === "P1")).toEqual([]);
 
-  const spike = async (spell: "stupefy" | "protego" | "expelliarmus" | "incendio" | "episkey" | null) => page.evaluate(async spellName => {
-    const c = Reflect.get(window, "__duelController");
-    const acknowledgements: { accepted: boolean; reason?: string }[] = [];
-    const originalGesture = c.fusion.pushGesture.bind(c.fusion), originalAck = c.game.onAck;
-    let spikes = 0;
-    c.fusion.pushGesture = (evidence: { kind?: string; startMs: number; endMs: number }) => {
-      originalGesture(evidence);
-      if (evidence.kind !== "acceleration-spike") throw new Error("Typed gesture leaked into simple mode");
-      spikes++;
-      if (!spellName || spikes !== 1) return;
-      const id = crypto.randomUUID(), startMs = evidence.startMs - 60;
-      c.fusion.beginUtterance({ id, generation: c.generation, startMs });
-      c.fusion.pushUtterance({ id, generation: c.generation, spell: spellName,
-        // A mapped sensor timestamp may lead now within SYNC uncertainty. A real
-        // transcription final cannot precede its own captured audio interval.
-        startMs, endMs: evidence.endMs, finalAtMs: Math.max(evidence.endMs, performance.now()) });
-    };
-    c.game.onAck = (message: { command: string; accepted: boolean; reason?: string }) => {
-      originalAck(message);
-      if (message.command === "cast") acknowledgements.push({ accepted: message.accepted, reason: message.reason });
-    };
-    // Same short sideways pulse for attacks, shield and healing; no gesture or cast injection.
-    const raw = Array.from({ length: 46 }, (_, i) => ({ captureMs: i * 20,
-      axMg: i >= 15 && i < 19 ? 650 : 0, ayMg: 0, azMg: 1000, flags: 1 }));
-    try {
-      await Reflect.get(window, "__scriptedBadge").play("simple-spike", raw);
-      const until = performance.now() + (spellName ? 1_500 : 200);
-      while (spellName && !acknowledgements.length && performance.now() < until)
-        await new Promise(resolve => setTimeout(resolve, 10));
-      return { spikes, acknowledgements };
-    } finally {
-      c.fusion.pushGesture = originalGesture;
-      c.game.onAck = originalAck;
-    }
-  }, spell);
-  expect(await spike(null)).toMatchObject({ spikes: 1, acknowledgements: [] });
-  // Let the first bot hit supply genuine damage for the healing assertion.
-  await expect.poll(async () => (await snapshot(page)).players.P1?.hp, { timeout: 16_000 }).toBe(80);
-  for (const spell of ["protego", "stupefy", "expelliarmus", "incendio", "episkey"] as const)
-    expect(await spike(spell)).toMatchObject({ spikes: 1, acknowledgements: [{ accepted: true }] });
-  const state = await snapshot(page);
-  expect(state.players.P1?.hp).toBe(98);
-  expect(state.recentEvents.filter(e => e.type === "castAccepted" && e.actor === "P1").map(e => e.spell).sort())
-    .toEqual(["episkey", "expelliarmus", "incendio", "protego", "stupefy"]);
-  const exported = await page.evaluate(() => JSON.parse(Reflect.get(window, "__duelController").exportTelemetry()));
-  expect(exported).toMatchObject({ simpleMotionEnabled: true, gestureProfile: "acceleration-spike-v1" });
-  expect(exported.entries.filter((e: { kind: string }) => e.kind === "cast.attempt").map((e: { data: { input: string } }) => e.data.input))
-    .toEqual(Array(5).fill("speech+acceleration-spike"));
-  await page.locator(".arena-frame").screenshot({ path: "/tmp/wandduel-simple-battle.png" });
-  await page.getByRole("button", { name: "Leave duel", exact: true }).click();
-  await toggle.click();
-  await expect(toggle).not.toBeChecked();
-  await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
-  await expect(toggle).toHaveCount(0);
+    const spike = async (spell: "stupefy" | "protego" | "expelliarmus" | "incendio" | "episkey" | null) => page.evaluate(async spellName => {
+      const c = Reflect.get(window, "__duelController");
+      const acknowledgements: { accepted: boolean; reason?: string }[] = [];
+      const originalGesture = c.fusion.pushGesture.bind(c.fusion), originalAck = c.game.onAck;
+      let spikes = 0;
+      c.fusion.pushGesture = (evidence: { kind?: string; startMs: number; endMs: number }) => {
+        originalGesture(evidence);
+        if (evidence.kind !== "acceleration-spike") throw new Error("Typed gesture leaked into simple mode");
+        spikes++;
+        if (!spellName || spikes !== 1) return;
+        const id = crypto.randomUUID(), startMs = evidence.startMs - 60;
+        c.fusion.beginUtterance({ id, generation: c.generation, startMs });
+        c.fusion.pushUtterance({ id, generation: c.generation, spell: spellName,
+          // A mapped sensor timestamp may lead now within SYNC uncertainty. A real
+          // transcription final cannot precede its own captured audio interval.
+          startMs, endMs: evidence.endMs, finalAtMs: Math.max(evidence.endMs, performance.now()) });
+      };
+      c.game.onAck = (message: { command: string; accepted: boolean; reason?: string }) => {
+        originalAck(message);
+        if (message.command === "cast") acknowledgements.push({ accepted: message.accepted, reason: message.reason });
+      };
+      // Same short sideways pulse for attacks, shield and healing; no gesture or cast injection.
+      const raw = Array.from({ length: 46 }, (_, i) => ({ captureMs: i * 20,
+        axMg: i >= 15 && i < 19 ? 650 : 0, ayMg: 0, azMg: 1000, flags: 1 }));
+      try {
+        await Reflect.get(window, "__scriptedBadge").play("simple-spike", raw);
+        const until = performance.now() + (spellName ? 1_500 : 200);
+        while (spellName && !acknowledgements.length && performance.now() < until)
+          await new Promise(resolve => setTimeout(resolve, 10));
+        return { spikes, acknowledgements };
+      } finally {
+        c.fusion.pushGesture = originalGesture;
+        c.game.onAck = originalAck;
+      }
+    }, spell);
+    expect(await spike(null)).toMatchObject({ spikes: 1, acknowledgements: [] });
+    // One real opponent cast supplies genuine damage for the healing assertion, then stays idle.
+    expect(await cast(opponent, "stupefy")).toMatchObject({ accepted: true });
+    await expect.poll(async () => (await snapshot(page)).players.P1?.hp).toBe(86);
+    for (const spell of ["protego", "stupefy", "expelliarmus", "incendio", "episkey"] as const)
+      expect(await spike(spell)).toMatchObject({ spikes: 1, acknowledgements: [{ accepted: true }] });
+    const state = await snapshot(page);
+    expect(state.players.P1?.hp).toBe(100);
+    expect(state.recentEvents.filter(e => e.type === "castAccepted" && e.actor === "P1").map(e => e.spell).sort())
+      .toEqual(["episkey", "expelliarmus", "incendio", "protego", "stupefy"]);
+    const exported = await page.evaluate(() => JSON.parse(Reflect.get(window, "__duelController").exportTelemetry()));
+    expect(exported).toMatchObject({ simpleMotionEnabled: true, gestureProfile: "acceleration-spike-v1" });
+    expect(exported.entries.filter((e: { kind: string }) => e.kind === "cast.attempt").map((e: { data: { input: string } }) => e.data.input))
+      .toEqual(Array(5).fill("speech+acceleration-spike"));
+    await page.locator(".arena-frame").screenshot({ path: "/tmp/wandduel-simple-battle.png" });
+    await page.getByRole("button", { name: "Leave duel", exact: true }).click();
+    await toggle.click();
+    await expect(toggle).not.toBeChecked();
+    await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
+    await expect(toggle).toHaveCount(0);
+  } finally {
+    await opponentContext.close();
+  }
 });
 
 test("developer mode teaches all five spells and exports raw motion, speech and battle telemetry", async ({ page }) => {
@@ -564,7 +641,7 @@ test("developer mode teaches all five spells and exports raw motion, speech and 
   expect(await cast(page, "stupefy")).toMatchObject({ accepted: true });
   await expect(page.getByRole("button", { name: /^Cast Stupefy: recharging/ })).toBeDisabled();
   await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("complete");
-  expect((await snapshot(page)).players.P2?.hp).toBe(80);
+  expect((await snapshot(page)).players.P2?.hp).toBe(86);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect.poll(async () => (await snapshot(page)).tutorial).toMatchObject({ step: 1, spell: "protego", stage: "instruction" });
   await guide.getByRole("img").screenshot({ path: "/tmp/wandduel-gesture-raise.png" });
@@ -583,7 +660,8 @@ test("developer mode teaches all five spells and exports raw motion, speech and 
   await page.getByRole("button", { name: /^Cast Protego:/ }).click();
   await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("complete");
   expect((await snapshot(page)).players.P1?.hp).toBe(100);
-  expect((await snapshot(page)).recentEvents.some(event => event.type === "impactBlocked" && event.target === "P1")).toBe(true);
+  // A block raised just before impact reflects instead; either real outcome completes the lesson.
+  expect((await snapshot(page)).recentEvents.some(event => ["impactBlocked", "impactReflected"].includes(event.type) && event.target === "P1")).toBe(true);
   const shieldComplete = await snapshot(page);
   await page.waitForTimeout(400);
   const shieldPaused = await snapshot(page);
@@ -594,11 +672,11 @@ test("developer mode teaches all five spells and exports raw motion, speech and 
   await expect.poll(async () => (await snapshot(page)).tutorial?.spell).toBe("episkey");
   await page.getByRole("button", { name: "Try it", exact: true }).click();
   await expect(page.getByRole("button", { name: /^Cast Episkey:/ })).toBeDisabled();
-  await expect.poll(async () => (await snapshot(page)).players.P1?.hp).toBe(80);
+  await expect.poll(async () => (await snapshot(page)).players.P1?.hp, { timeout: 15_000 }).toBe(86);
   await page.getByRole("button", { name: /^Cast Episkey:/ }).click();
   await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("complete");
-  expect((await snapshot(page)).players.P1?.hp).toBe(98);
-  expect((await snapshot(page)).recentEvents.some(event => event.type === "healed" && event.amount === 18)).toBe(true);
+  expect((await snapshot(page)).players.P1?.hp).toBe(100);
+  expect((await snapshot(page)).recentEvents.some(event => event.type === "healed" && event.amount === 14)).toBe(true);
 
   for (const spell of ["expelliarmus", "incendio"] as const) {
     await page.getByRole("button", { name: "Continue", exact: true }).click();
@@ -729,13 +807,13 @@ test("wrong raw gestures fizzle locally, explain the correction, and allow the n
   await page.evaluate(() => Reflect.get(window, "__scriptedBadge").play("lower"));
   expect(await cast(page, "stupefy")).toMatchObject({ accepted: true });
   await expect(fizzle).toHaveCount(0);
-  await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(80);
+  await expect.poll(async () => (await snapshot(page)).players.P2?.hp).toBe(86);
   await expect.poll(async () => (await snapshot(page)).tutorial?.stage).toBe("complete");
   const ownHud = page.getByRole("region", { name: "Your wizard", exact: true });
   const rivalHud = page.getByRole("region", { name: "Rival wizard", exact: true });
   const assertHudOwnership = async () => {
     await expect(ownHud.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", "100");
-    await expect(rivalHud.getByRole("meter", { name: "Opponent health", exact: true })).toHaveAttribute("value", "80");
+    await expect(rivalHud.getByRole("meter", { name: "Opponent health", exact: true })).toHaveAttribute("value", "86");
     await expect(page.locator(".health-panel").getByText("WIZARD", { exact: true })).toHaveCount(0);
     await expect(page.locator(".health-panel").getByText("DUELIST", { exact: true })).toHaveCount(0);
     const ownBounds = (await ownHud.boundingBox())!;

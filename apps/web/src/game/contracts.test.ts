@@ -9,13 +9,19 @@ describe("Python/TypeScript wire fixture", () => {
         .spells.filter((s) => s.enabled)
         .map((s) => s.spell),
     ).toEqual(["stupefy", "protego", "expelliarmus", "incendio", "episkey"]);
-    expect(parseRules(fixture.rules).spells.find((s) => s.spell === "episkey")?.heal).toBe(18);
+    const rules = parseRules(fixture.rules);
+    expect(rules.spells.find((s) => s.spell === "episkey")?.heal).toBe(22);
+    expect(rules.spells.find((s) => s.spell === "incendio")).toMatchObject({ burnDamage: 3, burnMs: 4000 });
+    expect(rules.spells.find((s) => s.spell === "expelliarmus")?.breaksShield).toBe(true);
+    expect(rules).toMatchObject({ roundMs: 90000, perfectBlockMs: 350, critChancePercent: 12, powerupLifetimeMs: 10000 });
     expect(parseSnapshot(fixture.snapshot).players.P1?.bootId).toBeNull();
+    expect(parseSnapshot(fixture.snapshot).players.P1).toMatchObject({ stunnedUntilMs: 0, burnUntilMs: 0, lucky: false });
+    expect(parseSnapshot(fixture.snapshot).powerup).toBeNull();
     expect(
       parseSnapshot(fixture.snapshot).recentEvents[0].stateVersion,
     ).toBeGreaterThan(0);
   });
-  it("rejects malformed clocks, players, projectiles and missing event versions", () => {
+  it("rejects malformed clocks, players, projectiles, relics and missing event versions", () => {
     expect(() =>
       parseSnapshot({ ...fixture.snapshot, serverNowMs: "100" }),
     ).toThrow();
@@ -30,10 +36,21 @@ describe("Python/TypeScript wire fixture", () => {
         ],
       }),
     ).toThrow();
+    expect(() => parseSnapshot({ ...fixture.snapshot, powerup: { id: "u", kind: "elder-wand", spawnedAtMs: 0, expiresAtMs: 1 } })).toThrow();
+    expect(parseSnapshot({ ...fixture.snapshot, powerup: { id: "u", kind: "phoenix", spawnedAtMs: 0, expiresAtMs: 1 } }).powerup?.kind).toBe("phoenix");
+    expect(() => parseSnapshot({
+      ...fixture.snapshot,
+      players: { ...fixture.snapshot.players, P1: { ...fixture.snapshot.players.P1, lucky: "yes" } },
+    })).toThrow();
+    expect(() => parseSnapshot({
+      ...fixture.snapshot,
+      recentEvents: [{ ...fixture.snapshot.recentEvents[0], powerup: "elder-wand" }],
+    })).toThrow();
   });
   it("requires all five distinct moves and their cooldown state", () => {
     expect(() => parseRules({ ...fixture.rules, spells: fixture.rules.spells.slice(0, 3) })).toThrow();
     expect(() => parseRules({ ...fixture.rules, spells: Array(5).fill(fixture.rules.spells[0]) })).toThrow();
+    expect(() => parseRules({ ...fixture.rules, perfectBlockMs: undefined })).toThrow();
     expect(() => parseSnapshot({
       ...fixture.snapshot,
       players: {

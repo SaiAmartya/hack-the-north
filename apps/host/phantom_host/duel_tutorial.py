@@ -1,26 +1,29 @@
 """Server-owned, effect-confirmed lessons around the ordinary combat engine."""
 
 from phantom_host.duel_bot import BOT_FIRST_ACTION_MS, PracticeBot
-from phantom_host.duel_engine import MAX_HP, DuelEngine
+from phantom_host.duel_engine import MAX_HP, SPELL_RULES, DuelEngine
 from phantom_host.duel_models import Phase, Slot, Spell, TutorialSnapshot
 
 LESSONS = (
     Spell.STUPEFY, Spell.PROTEGO, Spell.EPISKEY,
     Spell.EXPELLIARMUS, Spell.INCENDIO,
 )
-FREE_DUEL_MS = 30_000
+FREE_DUEL_MS = 45_000
 
 
 class TutorialDuel:
-    def __init__(self, now_ms: int) -> None:
+    def __init__(self, now_ms: int, *, seed: int = 0, variance: bool = True) -> None:
+        self.seed = seed
+        self.variance = variance
         self.round_id = 0
         self.step = 0
         self.stage = "instruction"
         self.last_tick_ms = now_ms
         self.next_attack_ms = 0
         self.checkpoint_hp = MAX_HP
+        self.protego_misses = 0
         self._seen_events: set[str] = set()
-        self._free_bot = PracticeBot()
+        self._free_bot = self._new_free_bot()
 
     @property
     def paused(self) -> bool:
@@ -38,6 +41,8 @@ class TutorialDuel:
     def before_advance(self, engine: DuelEngine, now_ms: int) -> None:
         if self.round_id != engine.round_id:
             self._new_round(engine, now_ms)
+        # Lessons are deterministic; only the closing duel rolls crits, stuns and powerups.
+        engine.variance = self.stage == "free" and self.variance
         if engine.phase is Phase.PLAYING and self.stage != "free":
             if self.paused:
                 engine.pause_timeline(
@@ -59,7 +64,8 @@ class TutorialDuel:
                 and event.type == "damage" and event.actor is Slot.P1
                 and event.spell is self.spell
             ) or (
-                self.spell is Spell.PROTEGO and event.type == "impactBlocked"
+                self.spell is Spell.PROTEGO
+                and event.type in ("impactBlocked", "impactReflected")
                 and event.target is Slot.P1
             ) or (
                 self.spell is Spell.EPISKEY and event.type == "healed"
@@ -75,6 +81,7 @@ class TutorialDuel:
             if self.spell is Spell.PROTEGO and event.type == "damage" and event.target is Slot.P1:
                 # A miss pauses at the visible real damage. Continue retries from
                 # the checkpoint instead of letting repeated attempts kill the learner.
+                self.protego_misses += 1
                 self.stage = "instruction"
                 engine.state_version += 1
                 return
@@ -87,11 +94,13 @@ class TutorialDuel:
         elif self.stage == "instruction":
             if self.step == len(LESSONS):
                 self.stage = "free"
+                engine.variance = self.variance
                 engine.restore_training_checkpoint(
                     health={Slot.P1: MAX_HP, Slot.P2: MAX_HP}, clear_effects=True,
                 )
                 engine.round_ends_at_ms = now_ms + FREE_DUEL_MS
-                self._free_bot = PracticeBot()
+                engine.schedule_powerups(now_ms=now_ms)
+                self._free_bot = self._new_free_bot()
                 self._free_bot.round_id = engine.round_id
                 self._free_bot.next_action_ms = now_ms + BOT_FIRST_ACTION_MS
             else:
@@ -123,14 +132,35 @@ class TutorialDuel:
             return self._free_bot.choose(engine, now_ms)
         if self.stage != "practice" or self.spell not in (Spell.PROTEGO, Spell.EPISKEY):
             return None
-        if now_ms < self.next_attack_ms or any(p.caster is Slot.P2 for p in engine.projectiles):
+        if any(p.caster is Slot.P2 for p in engine.projectiles):
             return None
-        if self.spell is Spell.EPISKEY and engine.players[Slot.P1].hp < MAX_HP:
+        rival = engine.players[Slot.P2]
+        learner = engine.players[Slot.P1]
+
+        def ready(spell: Spell) -> bool:
+            return now_ms >= rival.cooldown_until_ms.get(spell, 0)
+
+        if self.spell is Spell.PROTEGO:
+            if self.protego_misses:
+                # After a miss, the rival waits for a raised shield and fires into it,
+                # so the retry teaches the cast itself rather than raw reaction time.
+                if learner.shield_until_ms - now_ms < SPELL_RULES[Spell.STUPEFY].flight_ms + 100:
+                    return None
+                return Spell.STUPEFY if ready(Spell.STUPEFY) else None
+            # First attempt: a slow, visible fireball to block on reaction.
+            if now_ms < self.next_attack_ms or not ready(Spell.INCENDIO):
+                return None
+            self.next_attack_ms = now_ms + 6_000
+            return Spell.INCENDIO
+        if learner.hp < MAX_HP:
             return None
-        if now_ms < engine.players[Slot.P2].cooldown_until_ms.get(Spell.STUPEFY, 0):
+        if now_ms < self.next_attack_ms or not ready(Spell.STUPEFY):
             return None
         self.next_attack_ms = now_ms + 5_000
         return Spell.STUPEFY
+
+    def _new_free_bot(self) -> PracticeBot:
+        return PracticeBot(level=1, seed=self.seed, adaptive=False)
 
     def _new_round(self, engine: DuelEngine, now_ms: int) -> None:
         self.round_id = engine.round_id
@@ -139,5 +169,6 @@ class TutorialDuel:
         self.last_tick_ms = now_ms
         self.next_attack_ms = 0
         self.checkpoint_hp = MAX_HP
+        self.protego_misses = 0
         self._seen_events = {event.id for event in engine.recent_events}
-        self._free_bot = PracticeBot()
+        self._free_bot = self._new_free_bot()

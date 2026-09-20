@@ -1,6 +1,8 @@
 export type Slot = "P1" | "P2";
 export const SPELLS = ["stupefy", "protego", "expelliarmus", "incendio", "episkey"] as const;
 export type Spell = (typeof SPELLS)[number];
+export const POWERUPS = ["phoenix", "bezoar", "felix", "mirror", "haste"] as const;
+export type PowerupKind = (typeof POWERUPS)[number];
 export type Source = "phone" | "ble" | "replay";
 export type GameMode = "duel" | "solo" | "tutorial";
 export type Tutorial = {
@@ -18,11 +20,20 @@ export type SpellRule = {
   flightMs: number;
   shieldMs: number;
   offenseLockMs: number;
+  stunMs: number;
+  stunChancePercent: number;
+  burnDamage: number;
+  burnMs: number;
+  breaksShield: boolean;
 };
 export type Rules = {
   version: number;
   roundMs: number;
   maxHp: number;
+  critChancePercent: number;
+  critMultiplierPercent: number;
+  perfectBlockMs: number;
+  powerupLifetimeMs: number;
   spells: SpellRule[];
 };
 export type Player = {
@@ -39,6 +50,11 @@ export type Player = {
   maxHp: number;
   shieldUntilMs: number;
   offenseLockedUntilMs: number;
+  stunnedUntilMs: number;
+  burnUntilMs: number;
+  hasteUntilMs: number;
+  mirrorUntilMs: number;
+  lucky: boolean;
   cooldownUntilMs: Record<Spell, number>;
 };
 export type Projectile = {
@@ -51,6 +67,13 @@ export type Projectile = {
   impactAtMs: number;
   damage: number;
   offenseLockMs: number;
+  reflected: boolean;
+};
+export type Powerup = {
+  id: string;
+  kind: PowerupKind;
+  spawnedAtMs: number;
+  expiresAtMs: number;
 };
 export type GameEvent = {
   id: string;
@@ -66,6 +89,8 @@ export type GameEvent = {
   effectId?: string | null;
   amount?: number | null;
   reason?: string | null;
+  critical?: boolean;
+  powerup?: PowerupKind | null;
 };
 export type Snapshot = {
   roomId: string;
@@ -86,6 +111,7 @@ export type Snapshot = {
   };
   players: Record<Slot, Player | null>;
   projectiles: Projectile[];
+  powerup: Powerup | null;
   recentEvents: GameEvent[];
 };
 const object = (v: unknown): v is Record<string, unknown> =>
@@ -95,13 +121,22 @@ const finite = (v: unknown): v is number =>
 const slot = (v: unknown): v is Slot => v === "P1" || v === "P2";
 const spell = (v: unknown): v is Spell =>
   SPELLS.some((name) => v === name);
+const powerupKind = (v: unknown): v is PowerupKind =>
+  POWERUPS.some((name) => v === name);
 const deadline = (v: unknown) => v === null || finite(v);
+const SPELL_NUMBERS = [
+  "damage", "heal", "cooldownMs", "flightMs", "shieldMs", "offenseLockMs",
+  "stunMs", "stunChancePercent", "burnDamage", "burnMs",
+] as const;
 export function parseRules(value: unknown): Rules {
   if (
     !object(value) ||
     value.version !== 1 ||
     !finite(value.roundMs) ||
     !finite(value.maxHp) ||
+    !["critChancePercent", "critMultiplierPercent", "perfectBlockMs", "powerupLifetimeMs"].every(
+      (k) => finite(value[k]) && (value[k] as number) >= 0,
+    ) ||
     !Array.isArray(value.spells) ||
     value.spells.length !== SPELLS.length ||
     new Set(value.spells.map((r) => object(r) ? r.spell : null)).size !== SPELLS.length ||
@@ -110,9 +145,8 @@ export function parseRules(value: unknown): Rules {
         object(r) &&
         spell(r.spell) &&
         typeof r.enabled === "boolean" &&
-        ["damage", "heal", "cooldownMs", "flightMs", "shieldMs", "offenseLockMs"].every(
-          (k) => finite(r[k]) && (r[k] as number) >= 0,
-        ),
+        typeof r.breaksShield === "boolean" &&
+        SPELL_NUMBERS.every((k) => finite(r[k]) && (r[k] as number) >= 0),
     )
   )
     throw new Error("Unsupported game rules");
@@ -143,7 +177,7 @@ export function parseSnapshot(value: unknown): Snapshot {
       typeof p.name !== "string" ||
       !["phone", "ble", "replay", "bot"].includes(String(p.source)) ||
       (p.source === "bot" && (value.mode === "duel" || key !== "P2")) ||
-      !["connected", "ready", "inputHealthy"].every(
+      !["connected", "ready", "inputHealthy", "lucky"].every(
         (k) => typeof p[k] === "boolean",
       ) ||
       !["inputGeneration", "bootId"].every((k) => deadline(p[k])) ||
@@ -153,6 +187,10 @@ export function parseSnapshot(value: unknown): Snapshot {
         "maxHp",
         "shieldUntilMs",
         "offenseLockedUntilMs",
+        "stunnedUntilMs",
+        "burnUntilMs",
+        "hasteUntilMs",
+        "mirrorUntilMs",
       ].every((k) => finite(p[k])) ||
       !object(p.cooldownUntilMs) ||
       !SPELLS.every((name) => object(p.cooldownUntilMs) && finite(p.cooldownUntilMs[name]))
@@ -170,12 +208,24 @@ export function parseSnapshot(value: unknown): Snapshot {
         ["stupefy", "expelliarmus", "incendio"].includes(String(p.spell)) &&
         slot(p.caster) &&
         slot(p.target) &&
+        typeof p.reflected === "boolean" &&
         ["launchAtMs", "impactAtMs", "damage", "offenseLockMs"].every((k) =>
           finite(p[k]),
         ),
     )
   )
     throw new Error("Invalid projectile state");
+  const powerup = value.powerup;
+  if (
+    !(powerup === null || (
+      object(powerup) &&
+      typeof powerup.id === "string" &&
+      powerupKind(powerup.kind) &&
+      finite(powerup.spawnedAtMs) &&
+      finite(powerup.expiresAtMs)
+    ))
+  )
+    throw new Error("Invalid powerup state");
   if (
     !Array.isArray(value.recentEvents) ||
     value.recentEvents.length > 256 ||
@@ -189,7 +239,9 @@ export function parseSnapshot(value: unknown): Snapshot {
         finite(e.stateVersion) &&
         (e.actor == null || slot(e.actor)) &&
         (e.target == null || slot(e.target)) &&
-        (e.spell == null || spell(e.spell)),
+        (e.spell == null || spell(e.spell)) &&
+        (e.critical === undefined || typeof e.critical === "boolean") &&
+        (e.powerup == null || powerupKind(e.powerup)),
     )
   )
     throw new Error("Invalid game event");

@@ -59,6 +59,15 @@ test("wand pairing precedes room creation and opens the lobby without calibratio
   await page.screenshot({ path: "test-results/multiplayer-lobby-narrow.png", fullPage: true });
 });
 
+/** Wait until the caster's own cooldown for a spell has ended on the referee clock. */
+async function readyFor(player: Page, spell: string) {
+  await expect.poll(() => player.evaluate(name => {
+    const controller = Reflect.get(window, "__duelController");
+    const own = controller.game.snapshot.players[controller.game.slot];
+    return own.cooldownUntilMs[name] <= controller.game.now();
+  }, spell), { timeout: 15_000 }).toBe(true);
+}
+
 async function sharedHealth(first: Page, second: Page, hp: number) {
   await expect(first.getByRole("meter", { name: "Opponent health" })).toHaveAttribute("value", String(hp));
   await expect(second.getByRole("meter", { name: "Your health", exact: true })).toHaveAttribute("value", String(hp));
@@ -125,13 +134,13 @@ test("two normal players align microphone and wand in every order despite delaye
       expect(proof.acknowledgements[0].atMs).toBeGreaterThanOrEqual(proof.sends[0].sentAtMs!);
     }
     evidence.push({ ...scenario, casts });
-    if (spell === "stupefy") hp -= 20;
+    if (spell === "stupefy") hp -= 14;
     for (const player of [page, opponent]) await expect.poll(async () => {
       const state = await snapshot(player);
       return [state.players.P1?.hp, state.players.P2?.hp];
     }).toEqual([hp, hp]);
     if (spell === "protego") {
-      // The helper lowers the wand after ACK; the 1.2 s shield may have expired
+      // The helper lowers the wand after ACK; the 1.5 s shield may have expired
       // by now, but both clients must retain the same authoritative effect.
       const views = await Promise.all([page, opponent].map(snapshot));
       expect(views[0].players.P1!.shieldUntilMs).toBe(views[1].players.P1!.shieldUntilMs);
@@ -197,7 +206,7 @@ test("two ordinary player views sync five spells, cooldowns, victory, rematch an
   await expect.poll(async () => (await snapshot(opponent)).phase).toBe("playing");
   const firstRound = (await snapshot(page)).roundId;
   const rules = await page.evaluate(() => Reflect.get(window, "__duelController").game.rules.spells);
-  expect(rules.map((rule: { cooldownMs: number }) => rule.cooldownMs)).toEqual([2000, 3000, 6000, 8000, 12000]);
+  expect(rules.map((rule: { cooldownMs: number }) => rule.cooldownMs)).toEqual([2500, 4000, 6000, 9000, 12000]);
   await expect(page.getByRole("progressbar")).toHaveCount(5);
   expect(await page.locator(".spell-slot").evaluateAll(cards =>
     cards.every(card => card.scrollWidth <= card.clientWidth + 1),
@@ -205,9 +214,15 @@ test("two ordinary player views sync five spells, cooldowns, victory, rematch an
   await page.screenshot({ path: "/tmp/wandduel-battle.png", fullPage: true });
   await page.getByRole("region", { name: "Spell book" }).screenshot({ path: "/tmp/wandduel-hud.png" });
 
-  expect((await cast(page, "stupefy")).accepted).toBe(true);
+  // A Stupefy bolt lands 0.8 s after launch, faster than a raw guard replay can react, so the
+  // defender starts raising while the attacker's jab is still being performed: the 1.5 s shield
+  // is up before the bolt arrives and is old enough at impact to be an ordinary block.
+  const attackPromise = cast(page, "stupefy");
+  await page.waitForTimeout(300);
+  const guardPromise = cast(opponent, "protego");
+  expect((await attackPromise).accepted).toBe(true);
   await expect(page.getByLabel(/^Stupefy: recharging/)).toBeVisible();
-  expect((await cast(opponent, "protego")).accepted).toBe(true);
+  expect((await guardPromise).accepted).toBe(true);
   await expect(opponent.getByLabel(/^Protego: recharging/)).toBeVisible();
   for (const player of [page, opponent])
     await expect.poll(async () => (await snapshot(player)).recentEvents.some(event => event.type === "impactBlocked")).toBe(true);
@@ -216,21 +231,25 @@ test("two ordinary player views sync five spells, cooldowns, victory, rematch an
   expect((await cast(page, "incendio")).accepted).toBe(true);
   await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
   // The other attack can cast while Incendio is still cooling down: no shared cooldown.
+  await readyFor(page, "stupefy");
   expect((await cast(page, "stupefy")).accepted).toBe(true);
   await expect(page.getByLabel(/^Incendio: recharging/)).toBeVisible();
-  await sharedHealth(page, opponent, 50);
+  // 22 + 14 on impact, then the fireball's burn ticks 3 per second for four seconds.
+  await expect.poll(async () => (await snapshot(page)).players.P2?.hp, { timeout: 12_000 }).toBe(52);
+  await sharedHealth(page, opponent, 52);
+  expect((await snapshot(page)).recentEvents.filter(event => event.type === "burned")).toHaveLength(4);
   expect(await cast(page, "incendio")).toMatchObject({ accepted: false, reason: "cooldown" });
-  await sharedHealth(page, opponent, 50);
+  await sharedHealth(page, opponent, 52);
 
   expect((await cast(opponent, "episkey")).accepted).toBe(true);
-  await sharedHealth(page, opponent, 68);
+  await sharedHealth(page, opponent, 74);
   await expect(opponent.getByLabel(/^Episkey: recharging/)).toBeVisible();
   expect(await cast(opponent, "episkey")).toMatchObject({ accepted: false, reason: "cooldown" });
-  await sharedHealth(page, opponent, 68);
+  await sharedHealth(page, opponent, 74);
 
   expect((await cast(page, "expelliarmus")).accepted).toBe(true);
   await expect(page.getByLabel(/^Expelliarmus: recharging/)).toBeVisible();
-  await sharedHealth(page, opponent, 58);
+  await sharedHealth(page, opponent, 66);
   await expect(page.getByLabel("Rival wizard").getByText(/DISARMED/)).toBeVisible();
   await expect(opponent.getByLabel("Your wizard", { exact: true }).getByText(/DISARMED/)).toBeVisible();
   await page.screenshot({ path: "/tmp/wandduel-disarm.png", fullPage: true });
@@ -255,7 +274,8 @@ test("two ordinary player views sync five spells, cooldowns, victory, rematch an
   await page.screenshot({ path: "/tmp/wandduel-battle-zoom-reduced.png", fullPage: true });
   await page.evaluate(() => { document.documentElement.style.zoom = ""; });
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  for (const hp of [38, 18, 0]) {
+  for (const hp of [52, 38, 24, 10, 0]) {
+    await readyFor(page, "stupefy");
     expect((await cast(page, "stupefy")).accepted).toBe(true);
     await sharedHealth(page, opponent, hp);
   }

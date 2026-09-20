@@ -157,7 +157,8 @@ async def test_two_players_ready_play_duplicate_cast_and_exact_heartbeat_timeout
 
 @pytest.mark.asyncio
 async def test_both_players_receive_the_same_damage_healing_lock_and_cooldown_state():
-    room = DuelRoom(clock_ms=FakeClock(), allow_replay=True)
+    room = DuelRoom(clock_ms=FakeClock(), allow_replay=True, seed=1)
+    room.engine.variance = False
     sessions = [await room.create_session(name=name, source=Source.REPLAY) for name in ("One", "Two")]
     peers = [GamePeer(), GamePeer()]
     for index, (session, peer) in enumerate(zip(sessions, peers, strict=True)):
@@ -202,20 +203,27 @@ async def test_both_players_receive_the_same_damage_healing_lock_and_cooldown_st
     await advance(3_200)
     flight = await both_snapshots()
     assert len(flight["projectiles"]) == 3
+    assert flight["powerup"] is None
+    assert all(projectile["reflected"] is False for projectile in flight["projectiles"])
     await advance(5_600)
     hit = await both_snapshots()
-    assert hit["players"]["P2"]["hp"] == 40
-    assert hit["players"]["P2"]["offenseLockedUntilMs"] == 6_400
+    assert hit["players"]["P2"]["hp"] == 56  # 14 + 8 + 22 before the first burn tick
+    assert hit["players"]["P2"]["offenseLockedUntilMs"] == 6_800
+    assert hit["players"]["P2"]["burnUntilMs"] == 9_000
+    assert hit["players"]["P2"]["stunnedUntilMs"] == 0 and hit["players"]["P2"]["lucky"] is False
+    assert any(event["type"] == "burning" for event in hit["recentEvents"])
     await cast(peers[1], Spell.EPISKEY, 5_601, "heal")
     await cast(peers[1], Spell.PROTEGO, 5_601, "guard")
     await advance(5_601)
     restored = await both_snapshots()
     defender = restored["players"]["P2"]
-    assert defender["hp"] == 58
-    assert defender["shieldUntilMs"] == 6_801
+    assert defender["hp"] == 78
+    assert defender["burnUntilMs"] == 0
+    assert defender["shieldUntilMs"] == 7_101
     assert defender["cooldownUntilMs"]["episkey"] == 17_601
-    assert defender["cooldownUntilMs"]["protego"] == 8_601
-    assert any(event["type"] == "healed" and event["amount"] == 18 for event in restored["recentEvents"])
+    assert defender["cooldownUntilMs"]["protego"] == 9_601
+    healed = [event for event in restored["recentEvents"] if event["type"] == "healed"]
+    assert healed and healed[-1]["amount"] == 22 and healed[-1]["reason"] == "cured"
 
 
 @pytest.mark.asyncio
@@ -474,7 +482,7 @@ async def test_mailbox_bounds_reliable_messages_and_coalesces_snapshots():
 
 async def _solo_playing():
     clock = FakeClock()
-    room = DuelRoom(clock_ms=clock, mode=Mode.SOLO)
+    room = DuelRoom(clock_ms=clock, mode=Mode.SOLO, seed=7)
     session = await room.create_session(name="Human", source=Source.BLE)
     peer = GamePeer()
     await room.attach(token=session.token, peer=peer, now_ms=0)
@@ -500,15 +508,16 @@ async def _solo_tick(room, peer, clock, now):
 
 
 @pytest.mark.asyncio
-async def test_solo_gentle_bot_leaves_room_to_practice_all_five_normal_spells():
+async def test_solo_duelist_bot_fights_back_while_the_human_uses_all_five_spells():
     clock, room, _session, peer = await _solo_playing()
     schedule = {
-        16_500: [Spell.PROTEGO, Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO],
-        25_500: [Spell.STUPEFY],
-        29_200: [Spell.EPISKEY],
+        7_900: [Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO],
+        12_000: [Spell.PROTEGO],
+        13_500: [Spell.STUPEFY],
+        16_000: [Spell.EPISKEY],
     }
     events = {}
-    for now in range(3_050, 31_001, 50):
+    for now in range(3_050, 40_001, 50):
         for spell in schedule.get(now, []):
             evidence = f"human-{now}-{spell.value}"
             await room.submit_cast(peer=peer, receipt_ms=now, message=CastMessage(
@@ -518,10 +527,10 @@ async def test_solo_gentle_bot_leaves_room_to_practice_all_five_normal_spells():
             ))
         await _solo_tick(room, peer, clock, now)
         events.update((event.id, event) for event in room.engine.recent_events)
+        if room.engine.phase is Phase.RESULT:
+            break
     snapshot = await room.current_snapshot()
     assert snapshot.mode is Mode.SOLO
-    assert snapshot.players[Slot.P1].hp == 98  # blocked 20, took 20, healed 18
-    assert snapshot.players[Slot.P2].hp == 20  # all four attacks landed, with no bot heal/shield
     casts = [event for event in events.values() if event.type == "castAccepted"]
     own_casts = [event for event in casts if event.actor is Slot.P1]
     assert {event.spell for event in own_casts} == set(Spell)
@@ -529,45 +538,57 @@ async def test_solo_gentle_bot_leaves_room_to_practice_all_five_normal_spells():
         times = [event.at_ms for event in own_casts if event.spell is spell]
         assert all(b - a >= SPELL_RULES[spell].cooldown_ms for a, b in zip(times, times[1:]))
     bot_casts = [event for event in casts if event.actor is Slot.P2]
-    assert [(event.at_ms, event.spell) for event in bot_casts] == [
-        (15_000, Spell.STUPEFY), (27_000, Spell.STUPEFY),
-    ]
-    assert {event.target for event in events.values() if event.type == "impactBlocked"} == {Slot.P1}
-    assert {event.target for event in events.values() if event.type == "healed"} == {Slot.P1}
-    assert any(event.type == "offenseLocked" for event in events.values())
+    assert bot_casts and bot_casts[0].at_ms >= 6_000, "three seconds of play before the first bot action"
+    attacks = [event for event in bot_casts if event.spell in (Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO)]
+    assert len(attacks) >= 4
+    assert all(b.at_ms - a.at_ms >= 1_600 for a, b in zip(attacks, attacks[1:]))
+    assert any(event.type == "damage" and event.target is Slot.P1 for event in events.values())
+    assert any(event.type == "offenseLocked" and event.target is Slot.P2 for event in events.values())
+    assert snapshot.players[Slot.P2].hp < 100
 
 
 @pytest.mark.asyncio
-async def test_solo_bot_skips_a_disarmed_turn_without_a_catch_up_attack():
+async def test_solo_bot_never_attacks_while_disarmed():
     clock, room, _session, peer = await _solo_playing()
-    await _solo_tick(room, peer, clock, 12_300)
-    await room.submit_cast(peer=peer, receipt_ms=12_300, message=CastMessage(
+    await _solo_tick(room, peer, clock, 7_000)
+    await room.submit_cast(peer=peer, receipt_ms=7_000, message=CastMessage(
         round_id=1, attempt_id="disarm", spell=Spell.EXPELLIARMUS,
         gesture_id="disarm-motion", speech_id="disarm-voice", input_generation=1,
     ))
-    await _solo_tick(room, peer, clock, 12_300)
-    await _solo_tick(room, peer, clock, 14_500)
-    assert room.engine.players[Slot.P2].offense_locked_until_ms == 15_500
-    for now in (15_000, 15_500, 26_999):
+    await _solo_tick(room, peer, clock, 7_000)
+    landed = None
+    for now in range(7_050, 8_200, 50):
         await _solo_tick(room, peer, clock, now)
-        assert not room.engine.projectiles
-    await _solo_tick(room, peer, clock, 27_000)
-    assert len(room.engine.projectiles) == 1
-    assert room.engine.projectiles[0].caster is Slot.P2
-    assert room.engine.projectiles[0].spell is Spell.STUPEFY
+        if room.engine.players[Slot.P2].offense_locked_until_ms:
+            landed = now
+            break
+    assert landed is not None, "disarm should land (a broken shield still disarms)"
+    lock_until = room.engine.players[Slot.P2].offense_locked_until_ms
+    assert lock_until == 8_100 + 2_500
+    for now in range(landed + 50, lock_until + 1, 50):
+        await _solo_tick(room, peer, clock, now)
+        # A bolt already in the air when the disarm landed may still finish its flight.
+        assert not any(
+            p.caster is Slot.P2 and p.launch_at_ms > landed for p in room.engine.projectiles
+        ), now
+    for now in range(lock_until + 50, lock_until + 8_001, 50):
+        await _solo_tick(room, peer, clock, now)
+        if any(p.caster is Slot.P2 for p in room.engine.projectiles):
+            break
+    assert any(p.caster is Slot.P2 for p in room.engine.projectiles), "attacks resume after the lock"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("human_attacks", [False, True])
 async def test_solo_normal_result_stops_bot_and_rematch_restores_full_opening_grace(human_attacks):
     clock, room, _session, peer = await _solo_playing()
-    schedule = {
-        3_500: [Spell.STUPEFY, Spell.EXPELLIARMUS, Spell.INCENDIO],
-        5_500: [Spell.STUPEFY],
-        7_500: [Spell.STUPEFY],
-    } if human_attacks else {}
+    if human_attacks:
+        room.engine.players[Slot.P2].hp = 10
+        # Keep the finishing bolt unblockable so the knockout path itself is what is checked.
+        room.engine.players[Slot.P2].cooldown_until_ms[Spell.PROTEGO] = 999_999
+    schedule = {3_500: [Spell.STUPEFY], 6_100: [Spell.STUPEFY], 8_700: [Spell.STUPEFY]} if human_attacks else {}
     bot_casts = {}
-    for now in range(3_050, 63_001, 50):
+    for now in range(3_050, 96_001, 50):
         for spell in schedule.get(now, []):
             evidence = f"human-{now}-{spell.value}"
             await room.submit_cast(peer=peer, receipt_ms=now, message=CastMessage(
@@ -584,12 +605,10 @@ async def test_solo_normal_result_stops_bot_and_rematch_restores_full_opening_gr
     if human_attacks:
         assert room.engine.result.reason == "knockout" and room.engine.result.winner is Slot.P1
         assert room.engine.players[Slot.P2].hp == 0
-        assert not bot_casts
     else:
-        assert room.engine.result.reason == "timeout" and room.engine.result.winner is Slot.P2
-        assert room.engine.players[Slot.P1].hp == 20
-        assert [event.at_ms for event in bot_casts.values()] == [15_000, 27_000, 39_000, 51_000]
-        assert {event.spell for event in bot_casts.values()} == {Spell.STUPEFY}
+        assert room.engine.result.winner is Slot.P2
+        assert room.engine.players[Slot.P1].hp < 100
+        assert bot_casts and {event.spell for event in bot_casts.values()} & {Spell.STUPEFY, Spell.INCENDIO, Spell.EXPELLIARMUS}
     ended = clock.now_ms
     event_count = len(room.engine.recent_events)
     await _solo_tick(room, peer, clock, ended + 500)
@@ -599,18 +618,26 @@ async def test_solo_normal_result_stops_bot_and_rematch_restores_full_opening_gr
     assert room.engine.phase is Phase.COUNTDOWN and room.engine.round_id == 2
     assert room.engine.result is None
     assert all(player.hp == 100 and not player.cooldown_until_ms for player in room.engine.players.values())
-    await _solo_tick(room, peer, clock, ended + 3_600)
-    await _solo_tick(room, peer, clock, ended + 15_599)
-    assert not room.engine.projectiles
-    await _solo_tick(room, peer, clock, ended + 15_600)
-    assert len(room.engine.projectiles) == 1
-    assert room.engine.projectiles[0].caster is Slot.P2
+    assert room.engine.powerup is None
+    # Full opening grace: no bot spell for three seconds after the new round begins.
+    for now in range(ended + 650, ended + 3_600 + 3_000, 50):
+        await _solo_tick(room, peer, clock, now)
+        assert not any(event.actor is Slot.P2 and event.type == "castAccepted"
+                       for event in room.engine.recent_events), now
+    for now in range(ended + 6_650, ended + 16_000, 50):
+        await _solo_tick(room, peer, clock, now)
+        if any(p.caster is Slot.P2 for p in room.engine.projectiles):
+            break
+    assert any(p.caster is Slot.P2 for p in room.engine.projectiles)
 
 
 @pytest.mark.asyncio
 async def test_solo_disconnect_reconnect_and_leave_keep_bot_owned_by_the_human_session():
     clock, room, session, peer = await _solo_playing()
-    await _solo_tick(room, peer, clock, 15_000)
+    for now in range(3_050, 15_001, 50):
+        await _solo_tick(room, peer, clock, now)
+        if room.engine.projectiles:
+            break
     assert room.engine.projectiles
     await room.detach(peer=peer, now_ms=15_100)
     await room.tick(15_100)
@@ -650,7 +677,7 @@ async def test_unused_solo_reservation_release_or_expiry_removes_bot(release):
 async def test_tutorial_requires_real_effects_and_pauses_then_runs_short_free_duel():
     from phantom_host.duel_models import TutorialContinueMessage
 
-    room = DuelRoom(clock_ms=FakeClock(), mode=Mode.TUTORIAL)
+    room = DuelRoom(clock_ms=FakeClock(), mode=Mode.TUTORIAL, seed=7)
     session = await room.create_session(name="Learner", source=Source.BLE)
     peer = GamePeer()
     await room.attach(token=session.token, peer=peer, now_ms=0)
@@ -704,10 +731,11 @@ async def test_tutorial_requires_real_effects_and_pauses_then_runs_short_free_du
     assert (await proceed(0, accepted=False)).reason == "tutorial_not_paused"
     assert (await cast(Spell.STUPEFY)).reason == "tutorial_wait_for_effect"
     hit = await tick(now + 2_000)
-    assert hit.players["P2"].hp == 80 and hit.tutorial.stage == "complete"
+    assert hit.players["P2"].hp == 86 and hit.tutorial.stage == "complete"
+    assert hit.players["P2"].stunned_until_ms == 0, "lessons roll no variance"
     remaining = hit.players["P1"].cooldown_until_ms["stupefy"] - now
     paused = await tick(now + 120_000)
-    assert paused.tutorial.stage == "complete" and paused.players["P2"].hp == 80
+    assert paused.tutorial.stage == "complete" and paused.players["P2"].hp == 86
     assert max(0, paused.players["P1"].cooldown_until_ms["stupefy"] - now) == max(0, remaining)
 
     # Protego only succeeds on a real block. A miss pauses and offers a checkpoint retry.
@@ -716,15 +744,20 @@ async def test_tutorial_requires_real_effects_and_pauses_then_runs_short_free_du
     await proceed(1)
     await tick(now + 1_500)
     assert room.engine.projectiles[0].caster is Slot.P2
-    miss = await tick(now + 2_000)
-    assert miss.players["P1"].hp == 80 and miss.tutorial.stage == "instruction"
+    assert room.engine.projectiles[0].spell is Spell.INCENDIO, "a slow, visible first fireball"
+    miss = await tick(now + 1_800)
+    assert miss.players["P1"].hp == 78 and miss.tutorial.stage == "instruction"
+    assert miss.players["P1"].burn_until_ms > 0
     await tick(now + 120_000)
     await proceed(1)
     assert room.engine.players[Slot.P1].hp == 100
+    assert room.engine.players[Slot.P1].burn_until_ms == 0, "the retry clears the burn"
     await tick(now + 1_500)
     await tick(now + 1_300)
+    assert not room.engine.projectiles, "after a miss the rival waits for the raised shield"
     assert await cast(Spell.PROTEGO) is None
-    blocked = await tick(now + 700)
+    assert room.engine.projectiles and room.engine.projectiles[0].spell is Spell.STUPEFY
+    blocked = await tick(now + 800)
     assert blocked.players["P1"].hp == 100 and blocked.tutorial.stage == "complete"
     assert any(e.type == "impactBlocked" and e.target is Slot.P1 for e in blocked.recent_events)
     guard_cd = blocked.players["P1"].cooldown_until_ms["protego"] - now
@@ -737,44 +770,50 @@ async def test_tutorial_requires_real_effects_and_pauses_then_runs_short_free_du
     await cast(Spell.EPISKEY)
     assert room._tutorial.stage == "practice" and room.engine.players[Slot.P1].hp == 100
     await tick(now + 1_500)
-    hurt = await tick(now + 2_000)
-    assert hurt.players["P1"].hp == 80
+    for _ in range(8):
+        # The rival's own Stupefy cooldown from the shield lesson may still be recovering.
+        if any(p.caster is Slot.P2 for p in room.engine.projectiles):
+            break
+        await tick(now + 250)
+    assert room.engine.projectiles and room.engine.projectiles[0].caster is Slot.P2
+    hurt = await tick(room.engine.projectiles[0].impact_at_ms)
+    assert hurt.players["P1"].hp == 86
     assert await cast(Spell.EPISKEY) is None
     healed = await room.current_snapshot(now)
-    assert healed.players["P1"].hp == 98 and healed.tutorial.stage == "complete"
-    assert any(e.type == "healed" and e.amount == 18 for e in healed.recent_events)
+    assert healed.players["P1"].hp == 100 and healed.tutorial.stage == "complete"
+    assert any(e.type == "healed" and e.amount == 14 for e in healed.recent_events)
 
-    # Disarm is completed by its real offense lock, and Incendio by 30 damage.
+    # Disarm is completed by its real offense lock, and Incendio by its 22 damage.
     await proceed(2)
     await proceed(3)
     await cast(Spell.EXPELLIARMUS)
-    disarmed = await tick(now + 2_200)
-    assert disarmed.players["P2"].hp == 70 and disarmed.tutorial.stage == "complete"
-    assert disarmed.players["P2"].offense_locked_until_ms == now + 1_000
+    disarmed = await tick(now + 1_100)
+    assert disarmed.players["P2"].hp == 78 and disarmed.tutorial.stage == "complete"
+    assert disarmed.players["P2"].offense_locked_until_ms == now + 2_500
     await proceed(3)
     await proceed(4)
     await cast(Spell.INCENDIO)
-    burned = await tick(now + 2_400)
-    assert burned.players["P2"].hp == 40 and burned.tutorial.stage == "complete"
+    burned = await tick(now + 1_800)
+    assert burned.players["P2"].hp == 56 and burned.tutorial.stage == "complete"
+    assert burned.players["P2"].burn_until_ms == now + 4_000
     await proceed(4)
     briefing = await tick(now + 70_000)
     assert briefing.tutorial.step == 5 and briefing.tutorial.spell is None
     assert briefing.phase is Phase.PLAYING and briefing.tutorial.paused
+    assert briefing.players["P2"].hp == 56, "a paused lesson never burns"
+    assert briefing.powerup is None
     await proceed(5)
     free = await room.current_snapshot(now)
-    free_started_ms = now
-    assert free.tutorial.stage == "free" and free.round_ends_at_ms == now + 30_000
+    assert free.tutorial.stage == "free" and free.round_ends_at_ms == now + 45_000
     assert free.players["P1"].hp == free.players["P2"].hp == 100
+    assert free.players["P2"].burn_until_ms == 0
     assert all(value == 0 for player in free.players.values() for value in player.cooldown_until_ms.values())
+    assert room.engine.variance and room.engine.powerup_spawn_at_ms is not None
     assert await cast(Spell.INCENDIO) is None
-    await tick(now + 11_999)
-    assert not any(e.actor is Slot.P2 and e.type == "castAccepted" and e.at_ms >= free_started_ms
-                   for e in room.engine.recent_events)
-    await tick(now + 1)
-    assert any(e.actor is Slot.P2 and e.type == "castAccepted" and e.at_ms == free_started_ms + 12_000
-               for e in room.engine.recent_events)
+    await tick(now + 12_000)
+    assert any(e.actor is Slot.P2 and e.type == "castAccepted" for e in room.engine.recent_events)
     finished = await tick(free.round_ends_at_ms)
-    assert finished.phase is Phase.RESULT and finished.result.reason == "timeout"
+    assert finished.phase is Phase.RESULT and finished.result.reason in ("timeout", "knockout")
 
     # Rematch restarts instruction zero with normal 100 HP countdown.
     await room.submit_ready(peer=peer, message=_ready("tutorial-wand"), receipt_ms=now)

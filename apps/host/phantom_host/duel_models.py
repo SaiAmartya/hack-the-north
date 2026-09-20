@@ -120,16 +120,33 @@ class SpellRuleWire(WireModel):
     flight_ms: int = Field(ge=0)
     shield_ms: int = Field(ge=0)
     offense_lock_ms: int = Field(ge=0)
+    stun_ms: int = Field(ge=0)
+    stun_chance_percent: int = Field(ge=0, le=100)
+    burn_damage: int = Field(ge=0, le=100)
+    burn_ms: int = Field(ge=0)
+    breaks_shield: bool
+
+
+class PowerupKind(str, Enum):
+    PHOENIX = "phoenix"
+    BEZOAR = "bezoar"
+    FELIX = "felix"
+    MIRROR = "mirror"
+    HASTE = "haste"
 
 
 class RulesetWire(WireModel):
     version: Literal[1] = 1
     tick_ms: Literal[50] = 50
     countdown_ms: Literal[3000] = 3000
-    round_ms: Literal[60000] = 60_000
+    round_ms: Literal[90000] = 90_000
     heartbeat_ms: Literal[500] = 500
     heartbeat_timeout_ms: Literal[1500] = 1500
     max_hp: Literal[100] = 100
+    crit_chance_percent: int = Field(ge=0, le=100)
+    crit_multiplier_percent: int = Field(ge=100, le=300)
+    perfect_block_ms: int = Field(ge=0)
+    powerup_lifetime_ms: int = Field(ge=0)
     spells: tuple[SpellRuleWire, ...]
 
 
@@ -215,6 +232,11 @@ class PlayerSnapshot(WireModel):
     max_hp: Literal[100] = 100
     shield_until_ms: int
     offense_locked_until_ms: int
+    stunned_until_ms: int
+    burn_until_ms: int
+    haste_until_ms: int
+    mirror_until_ms: int
+    lucky: bool
     cooldown_until_ms: dict[str, int]
 
 
@@ -228,6 +250,14 @@ class ProjectileSnapshot(WireModel):
     impact_at_ms: int
     damage: int
     offense_lock_ms: int
+    reflected: bool
+
+
+class PowerupSnapshot(WireModel):
+    id: str
+    kind: PowerupKind
+    spawned_at_ms: int
+    expires_at_ms: int
 
 
 EventType = Literal[
@@ -240,9 +270,17 @@ EventType = Literal[
     "shieldRaised",
     "projectileLaunched",
     "impactBlocked",
+    "impactReflected",
+    "shieldBroken",
     "damage",
+    "burning",
+    "burned",
+    "stunned",
     "healed",
     "offenseLocked",
+    "powerupAppeared",
+    "powerupClaimed",
+    "powerupExpired",
     "roundEnded",
     "roundAborted",
 ]
@@ -262,6 +300,8 @@ class DuelEvent(WireModel):
     effect_id: str | None = None
     amount: int | None = None
     reason: str | None = None
+    critical: bool = False
+    powerup: PowerupKind | None = None
 
 
 class TutorialSnapshot(WireModel):
@@ -284,6 +324,7 @@ class Snapshot(WireModel):
     result: ResultSnapshot | None
     players: dict[str, PlayerSnapshot | None]
     projectiles: tuple[ProjectileSnapshot, ...]
+    powerup: PowerupSnapshot | None = None
     recent_events: tuple[DuelEvent, ...]
     tutorial: TutorialSnapshot | None = None
 

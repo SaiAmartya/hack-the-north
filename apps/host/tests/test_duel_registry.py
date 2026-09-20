@@ -80,3 +80,13 @@ def test_room_cap_and_code_shape():
     with pytest.raises(RoomError) as caught:
         registry.create_room()
     assert caught.value.code == "too_many_rooms" and caught.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_registry_can_switch_off_arena_variance_for_scripted_checks():
+    clock = FakeClock()
+    exact = RoomRegistry(clock_ms=clock, variance=False)
+    room = exact.room_for_code(exact.create_room())
+    assert room is not None and room.engine.variance is False
+    lively = RoomRegistry(clock_ms=clock)
+    assert lively.room_for_code(lively.create_room()).engine.variance is True

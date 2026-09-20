@@ -149,6 +149,7 @@ const GUARD_MIN_PEAK_MG = 200;
 const DIRECTION_TOLERANCE_DEG = 40;
 const GUARD_TOLERANCE_DEG = 45;
 const LOWERING_DEG = 120;           // a tilt this far from the guard template is the guard being lowered
+const GUARD_RETURN_MS = 2_000;      // lowering follows a raise within this long; later tilted strokes are jabs
 const REORIENTATION_SLACK = 1.3;    // a stroke no stronger than its own gravity change is a re-orientation, not a jab
 const GUARD_PREFER_PEAK_MG = 1_500; // below this a matching guard beats a matching impulse
 const AWAY_FROM_GRIP_DEG = 8;       // guard examples must move the hand away from the resting grip on average
@@ -206,6 +207,7 @@ export class MotionRecognizer {
   private burst?: Burst;
   private rejectedGuardReturn?: Vector;  // after a rejected raise, the lowering that undoes it is expected next
   private lastGuardDirection?: Vector;   // quick play: the raise just accepted, so its lowering is not a second guard
+  private lastGuardConfirmedMs?: number; // when that raise finished settling; its lowering is expected soon after
   private evidenceSequence = 0;
   private lastIssue = "";
   private reason?: MotionRejectionReason;
@@ -325,6 +327,7 @@ export class MotionRecognizer {
     this.templates.clear();
     this.enabledSpells = new Set(CORE_SPELLS);
     this.lastGuardDirection = undefined;
+    this.lastGuardConfirmedMs = undefined;
     this.evidenceSequence = 0;
     this.lastIssue = reason;
     this.reason = undefined;
@@ -704,8 +707,10 @@ export class MotionRecognizer {
     this.reason = undefined;
     // A translation can finish in almost the same pose; its tiny residual tilt is not a reliable
     // reference for rejecting the next raise as a lowering.
-    if (match.spell === "protego" && features.tiltDeg >= QUICK_GUARD_MIN_TILT_DEG)
+    if (match.spell === "protego" && features.tiltDeg >= QUICK_GUARD_MIN_TILT_DEG) {
       this.lastGuardDirection = features.tiltDirection;
+      this.lastGuardConfirmedMs = features.endMs + (features.endQuiet ? QUIET_WINDOW_MS : 0);
+    }
     this.recordCandidate(features, stopEvidence(how), "accepted");
     this.setProgress("ready", ARM_MS, ARM_MS);
     this.onGesture({
@@ -844,6 +849,11 @@ export class MotionRecognizer {
     if (features.endQuiet && features.lowering && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
       genericGuard?.kind === "guard" && !genericGuard.direction &&
       this.enabledSpells.has("protego")) return { quality: 0, message: "" };
+    // Lowering the wand undoes a raise made moments ago. A tilted stroke long after any raise is
+    // not that lowering, whichever way its wrist tilt points: recorded badge jabs ending 25 degrees
+    // "opposite" a raise from three seconds earlier were being vetoed here for a whole round.
+    const recentGuard = this.lastGuardConfirmedMs !== undefined &&
+      features.startMs - this.lastGuardConfirmedMs <= GUARD_RETURN_MS;
     let lowering = false;
     for (const spell of this.enabledSpells) {
       const template = this.templates.get(spell);
@@ -867,7 +877,8 @@ export class MotionRecognizer {
         const verticalStroke = !template.direction && (features.upwardLaunch ||
           Math.abs(dot(features.direction, normalized(features.startPose))) >= VERTICAL_STROKE_ALIGNMENT);
         const lift = !template.direction && features.upwardLaunch && features.liftBrake && features.lobeMs >= IMPULSE_MIN_LOBE_MS;
-        if (features.tiltDeg >= minimumTilt && angle >= LOWERING_DEG) lowering = true;
+        if (features.tiltDeg >= minimumTilt && angle >= LOWERING_DEG && (template.direction ? true : recentGuard))
+          lowering = true;
         if ((template.direction || features.durationMs >= IMPULSE_MIN_LOBE_MS) &&
           (lift || (features.tiltDeg >= minimumTilt && angle <= GUARD_TOLERANCE_DEG)) &&
           features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) &&

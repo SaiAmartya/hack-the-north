@@ -33,7 +33,7 @@ def test_bootstrap_exposes_isolated_game_authority_and_no_legacy_reset():
         }
         assert client.post("/match/reset").status_code == 404
         rules = client.get("/api/game/rules").json()
-        assert (rules["roundMs"], rules["maxHp"]) == (60000, 100)
+        assert (rules["roundMs"], rules["maxHp"]) == (90000, 100)
         assert "offensiveRecoveryMs" not in rules
         assert [spell["spell"] for spell in rules["spells"] if spell["enabled"]] == [
             "stupefy", "protego", "expelliarmus", "incendio", "episkey"

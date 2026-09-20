@@ -26,10 +26,13 @@ class RoomRegistry:
         clock_ms: Callable[[], int],
         allow_phone: bool = False,
         allow_replay: bool = False,
+        variance: bool = True,
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
         self.allow_replay = allow_replay
+        # Scripted QA can switch off critical hits, stuns and relics for exact expectations.
+        self.variance = variance
         self._rooms: dict[str, DuelRoom] = {}
         self._empty_since_ms: dict[str, int] = {}
 
@@ -49,6 +52,7 @@ class RoomRegistry:
             allow_replay=self.allow_replay,
             room_id=code,
             mode=mode,
+            variance=self.variance,
         )
         self._empty_since_ms[code] = self.clock_ms()
         return code

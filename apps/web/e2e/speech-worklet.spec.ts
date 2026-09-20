@@ -136,7 +136,7 @@ test("battle microphone ignores unrelated device changes and recovers a suspende
   // Real PCM/worklet + raw BLE + referee; only speech decoding is scripted.
   const proof = await castWithMicrophone(page, "stupefy", "speech-first", { speechFirst: "immediate" });
   expect(proof.voices[0].startMs).toBeGreaterThan(interruptedAt);
-  await expect(page.getByRole("meter", { name: "Opponent health" })).toHaveAttribute("value", "80");
+  await expect(page.getByRole("meter", { name: "Opponent health" })).toHaveAttribute("value", "86");
   await expect(page.getByRole("button", { name: "Enable microphone", exact: true })).toHaveCount(0);
 });
 
