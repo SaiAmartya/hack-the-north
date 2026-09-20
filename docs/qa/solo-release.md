@@ -28,6 +28,14 @@ Sai authorized pushing main, deploying the existing Render referee, adding a rea
 
 Implementation reuses `DuelRoom` and `DuelEngine`; the small `PracticeBot` policy only chooses a spell for a normal cast command. `POST /api/game/session` accepts optional `mode: "solo"` (default `"duel"`), and session/welcome/snapshots carry the mode. `source: "bot"` is reserved for server-owned P2 and rejected from client reservations. The bot has no authentication token or socket. Human disconnect/unhealthy input follows the existing abort path; expiry or leave removes both participants, and empty rooms use the existing bounded cleanup. Browser QA shares the existing raw-input helper rather than maintaining another harness.
 
+## Hosted release evidence
+
+- Pushed `d4bf0d2` (verified firmware installation record) and `9d2bdeb` (solo duels, camera removal and recovery fixes) to `origin/main`. Fetch immediately before publishing found no new teammate commits.
+- Render deployed runtime revision **`9d2bdeb`** in **52.7 seconds**: [deployment dep-dann50jm8hqs73bsf99g](https://dashboard.render.com/web/srv-danjisjtqb8s73c4t430/deploys/dep-dann50jm8hqs73bsf99g), explicitly observed **Deploy succeeded / Live**. Later documentation-only commits carry the same runtime source; the service dashboard identifies the current deployed head.
+- A fresh HTTPS/WebSocket check against the public referee passed health, all five enabled spells with distinct cooldowns, a private solo reservation, rejection of an outside join and forged bot source, camera-free welcome, the bot's first Stupefy, an actual zero-HP bot victory and rematch resetting both players to 100 HP. The test session was released afterward. This used a labeled scripted input proxy, not physical wand or microphone evidence.
+- Restarted the entire launcher-owned local stack with `python3 tools/run_game.py --referee https://wandduel-referee.onrender.com`. The new production frontend and warm local speech helper reached **Game ready: http://127.0.0.1:5173**. Reloaded that page through browser automation and inspected the minimal title/two-button homepage. Render hosts the referee; teammates must pull and restart their own local frontend and speech helper.
+- Final independent review found one stale tunnel instruction; it now explicitly starts `--local-referee` before exposing port 8000. No unresolved implementation findings remain. The physical checks below remain pending; the previously reported intermittent phone Internet-relay freshness failure requires a fresh device/network reproduction, so use Direct for the next physical baseline.
+
 ## Physical QA contract
 
 Use the latest main checkout and restart the launcher after pulling. The final release section below records which referee revision was deployed. On this Mac WAND-B602 is already flashed; teammates must follow the guarded [firmware instructions](firmware-0.3.0.md) for their own devices.

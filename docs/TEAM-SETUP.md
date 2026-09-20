@@ -313,8 +313,14 @@ repository and branch, and wait for the health check `/api/game/health`. Point l
 
 ### No account at all: tunnel laptop A
 
-For a rehearsal without deploying anything, laptop A runs the normal local stack and exposes
-its referee with a Cloudflare quick tunnel (no account, no uptime guarantee, development use):
+For a rehearsal without deploying anything, laptop A starts a local referee:
+
+```sh
+python3 tools/run_game.py --local-referee
+```
+
+In a second terminal on laptop A, expose that referee with a Cloudflare quick tunnel
+(no account, no uptime guarantee, development use):
 
 ```sh
 cloudflared tunnel --url http://127.0.0.1:8000

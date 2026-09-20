@@ -1,5 +1,10 @@
 # Final build sprint — September 20, 2026
 
+Historical checkpoint: the subsequent [solo release and current QA contract](solo-release.md)
+records the authorized push/deployment, completed WAND-B602 flash, bot mode and complete
+camera removal. Use that contract for current testing; the no-push/no-flash and optional-camera
+statements below describe this earlier checkpoint.
+
 ## Requested outcome and decisions
 
 Work directly on `main` with atomic local commits; do not push or flash. The initial checkout was clean at `dd0e2ff`. The first fetch found no new teammate commits on `origin/main`.
