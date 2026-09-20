@@ -369,7 +369,7 @@ def main() -> int:
         if not origin.startswith("https://") or "*" in origin or not origin.endswith(":5173"): parser.error("Use exact HTTPS origins on port 5173")
     python = ROOT / "apps/host/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-    if not python.exists() or not npm: parser.error("Install the documented Python 3.11 environment and web dependencies first")
+    if not python.exists() or not npm: parser.error("Install the documented Python 3.12.3 environment and web dependencies first")
     env = os.environ.copy()
     for name in ("WAND_HOST", "WAND_FRONTEND_HOST", "WAND_REFEREE_URL", "WAND_TLS_CERT", "WAND_TLS_KEY", "WAND_ALLOWED_ORIGINS", "WAND_ALLOW_REPLAY", "WAND_DEV_RELAY", "WAND_ENABLE_EXPELLIARMUS", "WAND_SPEECH_SECRET", "WAND_SPEECH_MODEL_DIR", "VITE_WAND_QA", "WAND_PHONE_SERVICE", "WAND_PHONE_CREATE_SECRET", "WAND_QA_PORTS", "WAND_GAME_BUILD_DIR"):
         env.pop(name, None)

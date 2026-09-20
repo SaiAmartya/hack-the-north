@@ -54,7 +54,7 @@ QA traces/results name their motion and speech sources. Player screens use only 
 
 - Frontend: React 18, TypeScript 5.7, Vite 6.4.3, DOM/CSS HUD and plain Three.js.
 - Browser checks: Vitest with fake clocks and Playwright/Chromium with isolated player contexts.
-- Services: Python 3.11, FastAPI, Pydantic and pytest.
+- Services: Python 3.12.3, FastAPI, Pydantic and pytest.
 - Speech: `faster-whisper` `base.en`, English, CPU `int8`, one warmed inference worker per laptop.
 - Production browser: qualified Windows x64 desktop Chrome build. “Chromium-compatible” is not accepted as a substitute for the tested Chrome build.
 

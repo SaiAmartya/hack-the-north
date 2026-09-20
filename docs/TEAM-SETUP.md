@@ -7,7 +7,7 @@ change certificate trust, open firewall rules or flash a badge automatically.
 
 ## 1. Checkpoint and prerequisites
 
-- Install **Git, Python 3.11 and Node 26.5.0 with npm** on each laptop. Use desktop Chrome;
+- Install **Git, Python 3.12.3 and Node 26.5.0 with npm** on each laptop. Use desktop Chrome;
   physical phones use iPhone Safari. Windows x64 is the target, but full Windows qualification
   is still pending. Do not substitute a newer Python for the documented environment.
 - Each player needs their own laptop microphone, camera and one phone or qualified BLE badge.
@@ -43,8 +43,8 @@ artifacts out of commits.
 
 ```sh
 node --version
-python3.11 --version
-python3.11 -m venv apps/host/.venv
+python3.12 --version
+python3.12 -m venv apps/host/.venv
 apps/host/.venv/bin/python -m pip install -e './apps/host[dev,speech]'
 cd apps/web
 npm ci
@@ -56,8 +56,8 @@ apps/host/.venv/bin/python tools/run_game.py
 
 ```powershell
 node --version
-py -3.11 --version
-py -3.11 -m venv apps/host/.venv
+py -3.12 --version
+py -3.12 -m venv apps/host/.venv
 .\apps\host\.venv\Scripts\python.exe -m pip install -e './apps/host[dev,speech]'
 Set-Location apps/web
 npm.cmd ci
@@ -220,7 +220,7 @@ in [the input rebuild report](qa/input-rebuild.md).
 
 | Symptom | Next check |
 | --- | --- |
-| No `Game ready` / speech unavailable | Keep the first startup error. Verify Python 3.11 environment, speech extra, pinned model path (internet is needed for its one-time download) and free ports. Do not start a second partial stack. |
+| No `Game ready` / speech unavailable | Keep the first startup error. Verify Python 3.12.3 environment, speech extra, pinned model path (internet is needed for its one-time download) and free ports. Do not start a second partial stack. |
 | `DLL load failed` / native dependency error on Windows | Capture only the package/error and Python/architecture versions. Windows runtime setup needs qualification; do not substitute cloud speech or remove health gates. |
 | Phone hosting unavailable | Use both hosted-service flags (or saved defaults), the existing approved credential, private file permissions and working internet. A failed or cancelled pairing attempt can be retried at once; the page shows the broker's own reason, and only a successful pair starts a two-second cooldown (`Wait a moment, then reconnect`). Never print the credential. |
 | Laptop shows `Connection interrupted. Reconnecting…` after Connect iPhone and never recovers | Check the address bar: the game must be open at `http://127.0.0.1:5173`. The hosted phone service refuses the laptop's connection from any other origin, `localhost:5173` included; the frontend now redirects such a tab to the exact origin, so close or reload an older tab. If the origin is already correct, report route and last failure from Connection details. |

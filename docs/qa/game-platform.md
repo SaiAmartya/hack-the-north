@@ -72,12 +72,16 @@ are not represented as complete.
 
 ## Run and stop
 
-From the repository root, with the documented Python 3.11 environment, web dependencies
-and local speech model installed:
+From the repository root, with the documented Python 3.12.3 environment and web dependencies
+installed, run:
 
 ```sh
 python3 tools/run_game.py
 ```
+
+On its first run, the launcher automatically downloads the pinned local
+`faster-whisper base.en` speech model when it is missing; internet access is required
+only for that initial download.
 
 By default the launcher creates a temporary production-build snapshot and serves it
 with Vite preview. A running demo therefore does not change when the source tree does.

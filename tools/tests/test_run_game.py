@@ -222,6 +222,22 @@ def test_preflight_failure_starts_no_build_or_process(
     assert "Startup blocked: frontend occupied" in capsys.readouterr().err
 
 
+def test_missing_runtime_reports_the_documented_python_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(run_game, "ROOT", tmp_path)
+    monkeypatch.setattr(run_game.shutil, "which", lambda _name: "/fake/npm")
+    monkeypatch.setattr(run_game.sys, "argv", ["run_game.py"])
+
+    with pytest.raises(SystemExit) as caught:
+        run_game.main()
+
+    assert caught.value.code == 2
+    assert "Python 3.12.3" in capsys.readouterr().err
+
+
 def test_readiness_failure_never_prints_game_ready(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
