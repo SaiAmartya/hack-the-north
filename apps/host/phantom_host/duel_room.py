@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from phantom_host.duel_bot import PracticeBot
+from phantom_host.duel_bot import STORY_LEVEL_COUNT, PracticeBot, StoryBot
 from phantom_host.duel_tutorial import TutorialDuel
 from phantom_host.duel_engine import (
     HEARTBEAT_TIMEOUT_MS,
@@ -33,6 +33,7 @@ from phantom_host.duel_models import (
     PongMessage,
     ReadyMessage,
     SessionResponse,
+    StorySnapshot,
     Slot,
     Snapshot,
     SnapshotMessage,
@@ -150,6 +151,7 @@ class DuelRoom:
         mode: Mode = Mode.DUEL,
         seed: int | None = None,
         variance: bool = True,
+        level: int | None = None,
     ) -> None:
         self.clock_ms = clock_ms
         self.allow_phone = allow_phone
@@ -162,7 +164,16 @@ class DuelRoom:
             TutorialDuel(clock_ms(), seed=self.seed, variance=variance)
             if mode is Mode.TUTORIAL else None
         )
-        self._bot = self._tutorial or (
+        self._story: StoryBot | None = None
+        if mode is Mode.STORY:
+            if level is None:
+                raise RoomError("story_requires_level")
+            if not 1 <= level <= STORY_LEVEL_COUNT:
+                raise RoomError("story_level_unknown")
+            self._story = StoryBot(level, seed=self.seed)
+        elif level is not None:
+            raise RoomError(f"{mode.value}_has_no_levels")
+        self._bot = self._tutorial or self._story or (
             PracticeBot(seed=self.seed) if mode is Mode.SOLO else None
         )
         self.engine = DuelEngine(
@@ -225,7 +236,8 @@ class DuelRoom:
                 # Bots occupy a combat slot, but have no bearer token or browser session.
                 self._slots[Slot.P2] = PlayerSession(
                     token="", slot=Slot.P2,
-                    name="Tutorial Wizard" if self._tutorial else "Practice Wizard",
+                    name=self._story.name if self._story else
+                    "Tutorial Wizard" if self._tutorial else "Practice Wizard",
                     source=Source.BOT,
                     lease_started_at_ms=None, connected=True, input_healthy=True,
                 )
@@ -775,6 +787,10 @@ class DuelRoom:
             powerup=self.engine.powerup.snapshot() if self.engine.powerup is not None else None,
             recent_events=tuple(self.engine.recent_events),
             tutorial=self._tutorial.snapshot() if self._tutorial is not None else None,
+            story=StorySnapshot(
+                level=self._story.rung.level, name=self._story.name,
+                total=STORY_LEVEL_COUNT,
+            ) if self._story is not None else None,
         )
 
     @staticmethod

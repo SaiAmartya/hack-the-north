@@ -59,7 +59,21 @@ describe("Python/TypeScript wire fixture", () => {
       },
     })).toThrow();
   });
-  it("accepts a bot only in the opponent slot of a solo room", () => {
+  it("accepts a story room only with a bot rival and a valid level card", () => {
+  const story = { ...fixture.snapshot, mode: "story", story: { level: 3, name: "Pixie Wrangler", total: 24 }, players: {
+    ...fixture.snapshot.players,
+    P2: { ...fixture.snapshot.players.P1, slot: "P2", name: "Pixie Wrangler", source: "bot" },
+  } };
+  expect(parseSnapshot(story).story).toEqual({ level: 3, name: "Pixie Wrangler", total: 24 });
+  expect(parseSnapshot(story).players.P2?.source).toBe("bot");
+  expect(() => parseSnapshot({ ...story, story: null })).toThrow();
+  expect(() => parseSnapshot({ ...story, story: { ...story.story, level: 25 } })).toThrow();
+  expect(() => parseSnapshot({ ...story, story: { ...story.story, level: 0 } })).toThrow();
+  expect(() => parseSnapshot({ ...story, story: { ...story.story, name: "" } })).toThrow();
+  expect(() => parseSnapshot({ ...fixture.snapshot, story: story.story })).toThrow();
+});
+
+it("accepts a bot only in the opponent slot of a solo room", () => {
     const solo = { ...fixture.snapshot, mode: "solo", players: {
       ...fixture.snapshot.players,
       P2: { ...fixture.snapshot.players.P1, slot: "P2", source: "bot" },

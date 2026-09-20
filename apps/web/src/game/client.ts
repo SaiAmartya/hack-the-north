@@ -66,13 +66,20 @@ export class GameClient {
       this.requests.delete(abort);
     }
   }
-  async connect(source: Source, code?: string, mode: GameMode = "duel"): Promise<void> {
+  async connect(
+    source: Source,
+    code?: string,
+    mode: GameMode = "duel",
+    level?: number,
+  ): Promise<void> {
     this.disconnect();
     const lifecycle = this.lifecycle;
     this.issue = "";
     this.mode = mode;
     if (mode !== "duel" && code !== undefined)
       throw new Error("Start a new practice duel.");
+    if ((mode === "story") !== (level !== undefined))
+      throw new Error("Pick a story level.");
     if (code !== undefined && !ROOM_CODE_PATTERN.test(code))
       throw new Error("Enter the six-character duel code.");
     const abort = new AbortController();
@@ -82,7 +89,13 @@ export class GameClient {
       const response = await fetch("/api/game/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Wizard", source, code, ...(mode !== "duel" ? { mode } : {}) }),
+        body: JSON.stringify({
+          name: "Wizard",
+          source,
+          code,
+          ...(mode !== "duel" ? { mode } : {}),
+          ...(level !== undefined ? { level } : {}),
+        }),
         signal: abort.signal,
       });
       if (!response.ok)
@@ -93,7 +106,9 @@ export class GameClient {
               ? "No duel with that code."
               : response.status === 429
                 ? "Too many duels right now. Try again soon."
-                : "Start the game server to connect.",
+                : response.status === 422
+                  ? "The game server does not know story mode yet."
+                  : "Start the game server to connect.",
         );
       session = await response.json();
     } finally {

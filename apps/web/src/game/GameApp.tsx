@@ -1,4 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  STORY_LEVELS,
+  STORY_LEVEL_COUNT,
+  isUnlocked,
+  loadProgress,
+  storyLevel,
+  type StoryLevel,
+  type StoryProgress,
+} from "./campaign";
 import qrcode from "qrcode-generator";
 import { DuelController, nameOf } from "./controller";
 import { DuelEffects } from "./effects";
@@ -119,10 +128,12 @@ function HealthPanel({
   player,
   own,
   now,
+  label,
 }: {
   player?: Player | null;
   own: boolean;
   now: number;
+  label?: string;
 }) {
   const health = player?.hp ?? 100,
     max = player?.maxHp ?? 100;
@@ -134,7 +145,7 @@ function HealthPanel({
       aria-label={own ? "Your wizard" : "Rival wizard"}
     >
       <div className="health-name">
-        <strong>{own ? "YOU" : player?.source === "bot" ? "PRACTICE" : "RIVAL"}</strong>
+        <strong>{own ? "YOU" : label ?? (player?.source === "bot" ? "PRACTICE" : "RIVAL")}</strong>
         <span className="status-row">
           {statuses.map((status) => (
             <span key={status.kind} className={`status-chip status-${status.kind}`}>
@@ -357,12 +368,72 @@ function TutorialLesson({ controller }: { controller: DuelController }) {
 
 type Pop = { id: string; text: string; kind: string; at: "me" | "rival" };
 
+function StoryMap({
+  controller,
+  progress,
+  onBack,
+}: {
+  controller: DuelController;
+  progress: StoryProgress;
+  onBack: () => void;
+}) {
+  const everything = controller.devMode;
+  let chapter = "";
+  return (
+    <div className="story-map">
+      <div className="story-head">
+        <button className="quiet" onClick={onBack}>
+          <span aria-hidden="true">←</span> Back
+        </button>
+        <h1>Story mode</h1>
+        <p>
+          {progress.cleared >= STORY_LEVEL_COUNT
+            ? "Every rival defeated."
+            : `${progress.cleared} of ${STORY_LEVEL_COUNT} rivals defeated.`}
+          {everything && " Dev mode: all levels open."}
+        </p>
+      </div>
+      <ol className="story-levels">
+        {STORY_LEVELS.map((rung) => {
+          const unlocked = everything || isUnlocked(rung.level, progress);
+          const cleared = rung.level <= progress.cleared;
+          const next = rung.level === progress.cleared + 1;
+          const heading = rung.chapter !== chapter ? (chapter = rung.chapter) : "";
+          return (
+            <li
+              key={rung.level}
+              className={`story-level ${cleared ? "is-cleared" : ""} ${next ? "is-next" : ""} ${unlocked ? "" : "is-locked"}`}
+            >
+              {heading && <span className="story-chapter">{heading}</span>}
+              <button
+                disabled={!unlocked || controller.busy}
+                onClick={() => void controller.startDuel("story", rung.level)}
+                aria-label={`Level ${rung.level}: ${rung.name}${unlocked ? "" : " (locked)"}`}
+              >
+                <span className="story-portrait" aria-hidden="true">
+                  <img src={rung.sprite} alt="" style={{ filter: `hue-rotate(${rung.hue}deg)` }} />
+                </span>
+                <span className="story-index" aria-hidden="true">
+                  {cleared ? "✦" : unlocked ? rung.level : "🔒"}
+                </span>
+                <strong>{rung.name}</strong>
+                <em>{unlocked ? rung.intro : "Defeat the rival before to unlock."}</em>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 export function GameApp() {
   const [controller, setController] = useState<DuelController>();
   const [, redraw] = useState(0);
   const low = false;
   const [revision, setRevision] = useState(0);
   const [codeInput, setCodeInput] = useState("");
+  const [storyOpen, setStoryOpen] = useState(false);
   const canvas = useRef<HTMLCanvasElement>(null),
     effects = useRef<DuelEffects>();
   const [renderIssue, setRenderIssue] = useState("");
@@ -412,8 +483,16 @@ export function GameApp() {
   const pairingPhone = c?.source === "phone" && c.busy && !wandReady;
   const inRoom = !!c?.roomCode;
   const tutorial = c?.mode === "tutorial";
-  const solo = c?.mode === "solo" || tutorial;
+  const story = c?.mode === "story";
+  const solo = c?.mode === "solo" || tutorial || story;
   const result = game?.result;
+  const rung: StoryLevel | undefined = story ? storyLevel(c.storyLevel) : undefined;
+  const nextRung = rung ? storyLevel(rung.level + 1) : undefined;
+  const progress = useMemo(
+    () => loadProgress(),
+    // Re-read after a story win lands or the map opens; both are cheap localStorage reads.
+    [c?.storyCleared, storyOpen],
+  );
   const now = c?.game.now() ?? 0;
   const issue =
     c?.issue ||
@@ -526,6 +605,7 @@ export function GameApp() {
             : "Defeat!"
           : me?.ready
             ? solo ? "Wands up…" : "Waiting for your rival…"
+            : rung ? `Level ${rung.level} · ${rung.name}`
             : tutorial ? "Tutorial duel" : solo ? "Solo duel" : "Battle lobby";
   const secondsLeft = Math.max(0, Math.ceil(((game?.roundEndsAtMs ?? now) - now) / 1000));
   return (
@@ -637,6 +717,8 @@ export function GameApp() {
                   Cancel
                 </button>
               </>
+            ) : wandReady && storyOpen ? (
+              <StoryMap controller={c} progress={progress} onBack={() => setStoryOpen(false)} />
             ) : wandReady ? (
               <>
                 <h1>
@@ -647,6 +729,11 @@ export function GameApp() {
                 <div className="connection-choices">
                   <button onClick={() => void c.startDuel()} disabled={c.busy}>
                     Start a duel <span aria-hidden="true">→</span>
+                  </button>
+                  <button className="story-entry" onClick={() => setStoryOpen(true)} disabled={c.busy}>
+                    <span aria-hidden="true">✦</span> Story mode{" "}
+                    <small>{progress.cleared}/{STORY_LEVEL_COUNT}</small>
+                    <span aria-hidden="true">→</span>
                   </button>
                   <button className="secondary" onClick={() => void c.startDuel("solo")} disabled={c.busy}>
                     Duel a bot <span aria-hidden="true">→</span>
@@ -733,7 +820,7 @@ export function GameApp() {
           {inRoom && (
             <div className="arena-title">
               <span>
-                <i /> {tutorial ? "TUTORIAL DUEL" : solo ? "SOLO DUEL" : "THE MOONLIT COURTYARD"}
+                <i /> {rung ? `STORY · LEVEL ${rung.level} OF ${STORY_LEVEL_COUNT}` : tutorial ? "TUTORIAL DUEL" : solo ? "SOLO DUEL" : "THE MOONLIT COURTYARD"}
               </span>
               <span>ROUND {game?.roundId || 1}</span>
               {live && game?.phase === "playing" && (!tutorial || game.tutorial?.stage === "free") && (
@@ -752,8 +839,9 @@ export function GameApp() {
             <div className="duel-platform player-platform" />
             <div className={`wizard rival-wizard ${spriteClasses(otherSlot)}`}>
               <img
-                src="/art/wizard-rival-front.png"
-                alt="Rival wizard facing you"
+                src={rung?.sprite ?? "/art/wizard-rival-front.png"}
+                alt={rung ? `${rung.name}, your rival` : "Rival wizard facing you"}
+                style={rung ? { filter: `hue-rotate(${rung.hue}deg)` } : undefined}
               />
               <span className="wizard-flames" aria-hidden="true"><i /><i /><i /></span>
               <span className="stun-stars" aria-hidden="true"><i>✦</i><i>✦</i><i>✦</i></span>
@@ -813,7 +901,7 @@ export function GameApp() {
             {miscast && <MiscastVisual key={miscast.id} spell={miscast.spell} />}
             {(live || result) && (
               <>
-                <HealthPanel player={opponent} own={false} now={now} />
+                <HealthPanel player={opponent} own={false} now={now} label={rung?.name.toUpperCase()} />
                 <HealthPanel player={me} own now={now} />
               </>
             )}
@@ -874,6 +962,8 @@ export function GameApp() {
                           ? "Battle connection interrupted."
                           : result?.outcome === "aborted"
                             ? "Reconnect, then ready up for a fresh round."
+                            : rung
+                              ? rung.intro
                             : tutorial
                               ? "Learn one spell at a time."
                               : solo
@@ -916,18 +1006,43 @@ export function GameApp() {
                     </button>
                   ) : null}
                   <div className="ready-actions">
-                    <button
-                      disabled={!c?.canReady()}
-                      onClick={() => c?.ready()}
-                    >
-                      {!solo && !opponent?.connected
-                        ? "Waiting for rival…"
-                        : me?.ready
-                        ? solo ? "Wands up…" : "Waiting for opponent…"
-                        : result
-                          ? "Rematch"
-                          : "Ready"}
-                    </button>
+                    {rung && result?.outcome === "win" && result.winner === slot && !c?.game.issue ? (
+                      nextRung ? (
+                        <button
+                          disabled={c?.busy}
+                          onClick={() => void c?.startStoryLevel(nextRung.level)}
+                        >
+                          Next: {nextRung.name} <span aria-hidden="true">→</span>
+                        </button>
+                      ) : (
+                        <p className="story-finale" role="status">Story complete. Every rival has fallen.</p>
+                      )
+                    ) : (
+                      <button
+                        disabled={!c?.canReady()}
+                        onClick={() => c?.ready()}
+                      >
+                        {!solo && !opponent?.connected
+                          ? "Waiting for rival…"
+                          : me?.ready
+                          ? solo ? "Wands up…" : "Waiting for opponent…"
+                          : result
+                            ? rung ? "Try again" : "Rematch"
+                            : "Ready"}
+                      </button>
+                    )}
+                    {rung && (
+                      <button
+                        className="quiet"
+                        disabled={c?.busy}
+                        onClick={() => {
+                          leaveRoom();
+                          setStoryOpen(true);
+                        }}
+                      >
+                        Level select
+                      </button>
+                    )}
                   </div>
                 </section>
               </div>
@@ -947,12 +1062,20 @@ export function GameApp() {
                   : result
                     ? result.outcome === "win"
                       ? result.winner === slot
-                        ? "Well cast, wizard. The courtyard is yours."
-                        : "A worthy rival. A new strategy. One more duel?"
+                        ? rung
+                          ? nextRung
+                            ? `${rung.name} is beaten. ${nextRung.name} waits ahead.`
+                            : "The last rival falls. The story is yours."
+                          : "Well cast, wizard. The courtyard is yours."
+                        : rung
+                          ? `${rung.name} wins this one. Try again?`
+                          : "A worthy rival. A new strategy. One more duel?"
                       : result.outcome === "draw"
                         ? "Equal magic. A rematch will settle it."
                         : "Your wand stays paired. Ready when you are."
-                    : "Five spells. Relics mid-court. Choose your moment."}
+                    : rung
+                      ? `Level ${rung.level} of ${STORY_LEVEL_COUNT}. ${rung.intro}`
+                      : "Five spells. Relics mid-court. Choose your moment."}
               </p>
               <span className="dialogue-arrow" aria-hidden="true">
                 ▼

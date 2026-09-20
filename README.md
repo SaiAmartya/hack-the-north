@@ -88,6 +88,13 @@ numbers, status chips (SHIELD, MIRROR, DISARMED, STUNNED, BURNING, LUCKY, HASTE)
 yanked away on a disarm, embers on a burning wizard and screen shake on heavy hits. Motion
 preferences are respected: reduced motion keeps the text callouts and drops the animation.
 
+**Story mode** is a 24-level ladder of named bot rivals (`STORY_NAMES` in
+`apps/host/phantom_host/duel_bot.py`, portraits and blurbs in `apps/web/src/game/campaign.ts`).
+Level 1 is the gentle practice rival; each rung attacks sooner and more often, later rungs add
+Incendio and Expelliarmus, raise Protego against incoming bolts, and heal when hurt. Beating a
+level unlocks the next one (progress lives in the browser's `localStorage`; Dev mode opens every
+level for demos). A win offers **Next** straight into the following rival's room.
+
 Switching laptop tabs aborts an active round while retaining the wand where available;
 returning validates fresh input before a new Ready. The stable build does not hot-reload;
 restart after source changes. **Ctrl+C** stops the stack.

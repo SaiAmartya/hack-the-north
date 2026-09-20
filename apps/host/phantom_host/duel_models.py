@@ -35,6 +35,7 @@ class Mode(str, Enum):
     DUEL = "duel"
     SOLO = "solo"
     TUTORIAL = "tutorial"
+    STORY = "story"
 
 
 class Spell(str, Enum):
@@ -80,6 +81,7 @@ class SessionRequest(WireModel):
     source: Source
     code: RoomCode | None = None
     mode: Mode = Mode.DUEL
+    level: int | None = Field(default=None, ge=1, le=99)
 
     @field_validator("name")
     @classmethod
@@ -311,6 +313,12 @@ class TutorialSnapshot(WireModel):
     paused: bool
 
 
+class StorySnapshot(WireModel):
+    level: int = Field(ge=1, le=99)
+    name: str = Field(min_length=1, max_length=40)
+    total: int = Field(ge=1, le=99)
+
+
 class Snapshot(WireModel):
     room_id: RoomId = "main"
     mode: Mode = Mode.DUEL
@@ -327,6 +335,7 @@ class Snapshot(WireModel):
     powerup: PowerupSnapshot | None = None
     recent_events: tuple[DuelEvent, ...]
     tutorial: TutorialSnapshot | None = None
+    story: StorySnapshot | None = None
 
 
 class SnapshotMessage(WireModel):

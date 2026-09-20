@@ -47,7 +47,7 @@ class FakeWebSocket {
   }
 }
 
-async function connectedClient(create = false, mode: "duel" | "solo" = "duel") {
+async function connectedClient(create = false, mode: "duel" | "solo" | "story" = "duel", level?: number) {
   vi.useFakeTimers();
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -57,11 +57,12 @@ async function connectedClient(create = false, mode: "duel" | "solo" = "duel") {
   );
   vi.stubGlobal("fetch", request);
   const client = new GameClient();
-  const connecting = client.connect("ble", create ? undefined : "K7X2PD", mode);
+  const connecting = client.connect("ble", create ? undefined : "K7X2PD", mode, level);
   await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
   const socket = FakeWebSocket.instances[0];
   socket.open();
-  socket.message({ ...welcome, mode, snapshot: { ...welcome.snapshot, mode } });
+  const story = mode === "story" ? { level: level ?? 1, name: "Rival", total: 24 } : null;
+  socket.message({ ...welcome, mode, snapshot: { ...welcome.snapshot, mode, story } });
   await connecting;
   return { client, socket, request };
 }
@@ -83,6 +84,15 @@ it("reserves solo mode and rejects a snapshot that changes its room mode", async
   expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
   expect(client.snapshot?.mode).toBe("solo");
   client.disconnect();
+});
+
+it("sends the chosen story level and refuses story mode without one", async () => {
+  const { client, request } = await connectedClient(true, "story", 4);
+  expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ name: "Wizard", source: "ble", mode: "story", level: 4 });
+  expect(client.snapshot?.story?.level).toBe(4);
+  client.disconnect();
+  await expect(new GameClient().connect("ble", undefined, "story")).rejects.toThrow("Pick a story level.");
+  await expect(new GameClient().connect("ble", undefined, "solo", 2)).rejects.toThrow("Pick a story level.");
 });
 
 it.each([undefined, "main", "ZZZZZZ"])("rejects an invalid or wrong session room %s before connecting", async (roomId) => {
