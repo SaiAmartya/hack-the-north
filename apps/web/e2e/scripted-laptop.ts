@@ -42,20 +42,20 @@ const emit = sample => {
   // Ending replay and resuming idle can share one millisecond; one acquisition is enough.
   if (captureMs === previousCapture) return true;
   previousCapture = captureMs;
-  return endpoint.emitMotion({ ...sample, version: 1, flags: 1,
+  return endpoint.emitMotion({ ...sample, version: 1, flags: sample.flags ?? 1,
     seq: sequence++ & 65535, captureMs, bootId: 1 });
 };
-probe.play = async (movement) => {
+probe.play = async (movement, recording) => {
   if (replaying) throw new Error("Concurrent scripted movement");
-  const samples = movement === "guard" ? traces.guard(32)
-    : movement === "lower" ? traces.lower(32) : traces.jab(850, 0, undefined, 1, 0);
+  const samples = recording ?? (movement === "guard" ? traces.guard(32, 320, 320, 500)
+    : movement === "lower" ? traces.lower(32) : traces.jab(850, 0, undefined, 1, 0));
   replaying = true;
   const startedAt = Math.ceil(performance.now()) + 20;
   const delivery = { movement, maxLateMs: 0 };
   probe.deliveries.push(delivery);
   try {
     for (const sample of samples) {
-      const captureAt = startedAt + sample.browserMs - samples[0].browserMs;
+      const captureAt = startedAt + sample.captureMs - samples[0].captureMs;
       await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.ceil(captureAt - performance.now()))));
       delivery.maxLateMs = Math.max(delivery.maxLateMs, performance.now() - captureAt);
       if (performance.now() - captureAt > 100) throw new Error("Scripted motion stalled: " + JSON.stringify({
@@ -63,11 +63,17 @@ probe.play = async (movement) => {
         nativeVisibility: Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState").get.call(document),
         focused: document.hasFocus(), longTasks: probe.longTasks,
       }));
-      // Like the existing QA harness, preserve the device's 50 Hz acquisition clock.
+      // Rebase the device clock into a fresh boot while preserving acquisition intervals.
       // Browser delivery jitter must not change the recorded stroke's duration.
       if (!emit({ ...sample, captureMs: Math.floor(captureAt) >>> 0 })) throw new Error("Scripted badge is not streaming");
     }
-  } finally { replaying = false; }
+  } finally {
+    if (recording) {
+      const last = recording.at(-1);
+      probe.pose = [last.axMg, last.ayMg, last.azMg];
+    }
+    replaying = false;
+  }
 };
 class Characteristic extends EventTarget {
   constructor(kind) { super(); this.kind = kind; }
@@ -94,7 +100,7 @@ device.gatt = {
     clearInterval(timer);
     timer = setInterval(() => {
       endpoint.tick();
-      const [axMg, ayMg, azMg] = traces.currentPose().map(Math.round);
+      const [axMg, ayMg, azMg] = (probe.pose ?? traces.currentPose()).map(Math.round);
       if (!replaying) emit({ axMg, ayMg, azMg });
       const wand = window.__duelController?.wand?.getSnapshot();
       if (wand) {

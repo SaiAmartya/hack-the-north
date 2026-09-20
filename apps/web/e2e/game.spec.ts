@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { scriptedLaptop, connectBadge, snapshot, cast, miscast } from "./scripted-laptop";
+import badgeGestures from "../src/input/fixtures/badge-gestures-2026-09-20.json" with { type: "json" };
 
 test("the homepage requires a wand before offering duel creation or a code", async ({ page }) => {
   await page.goto("/");
@@ -349,6 +350,62 @@ test("a paired wand plays five spells against the real solo bot, rematches, and 
   expect(await page.evaluate(() => Reflect.get(window, "__scriptedBadge").chooser)).toBe(1);
   expect(context.pages()).toHaveLength(1);
   expect(errors).toEqual([]);
+});
+
+test("a recorded badge raise reaches the solo referee as one Protego", async ({ page }) => {
+  const recording = badgeGestures.cases.find(entry => entry.name === "protego-strong-training-4")!;
+  const samples = recording.samples.map(row => ({
+    captureMs: Number(row[1]), axMg: Number(row[3]), ayMg: Number(row[4]),
+    azMg: Number(row[5]), flags: Number(row[7]),
+  }));
+  await scriptedLaptop(page);
+  await page.getByRole("switch", { name: "Dev mode", exact: true }).click();
+  await page.evaluate(first => {
+    Reflect.get(window, "__scriptedBadge").pose = [first.axMg, first.ayMg, first.azMg];
+  }, samples[0]);
+  await connectBadge(page);
+  await page.getByRole("button", { name: "Duel a bot", exact: true }).click();
+  await page.getByRole("button", { name: "Ready", exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).phase).toBe("playing");
+
+  const result = await page.evaluate(async rawSamples => {
+    const controller = Reflect.get(window, "__duelController");
+    const gestures: string[] = [];
+    const acknowledgements: boolean[] = [];
+    const originalGesture = controller.fusion.pushGesture.bind(controller.fusion);
+    const originalAck = controller.game.onAck;
+    controller.fusion.pushGesture = (evidence: { spell: string; startMs: number; endMs: number }) => {
+      gestures.push(evidence.spell);
+      originalGesture(evidence);
+      if (gestures.length !== 1) return;
+      // Only recognized speech is scripted. The recorded axes and acquisition intervals
+      // traverse the BLE protocol and live recognizer before this overlapping utterance.
+      const id = crypto.randomUUID(), startMs = evidence.startMs + 20;
+      controller.fusion.beginUtterance({ id, generation: controller.generation, startMs });
+      controller.fusion.pushUtterance({ id, generation: controller.generation, spell: "protego",
+        startMs, endMs: evidence.endMs, finalAtMs: performance.now() });
+    };
+    controller.game.onAck = (message: { command: string; accepted: boolean }) => {
+      originalAck(message);
+      if (message.command === "cast") acknowledgements.push(message.accepted);
+    };
+    try {
+      await Reflect.get(window, "__scriptedBadge").play("recorded-protego", rawSamples);
+      const deadline = performance.now() + 2_000;
+      while (!acknowledgements.length && performance.now() < deadline)
+        await new Promise(resolve => setTimeout(resolve, 10));
+      return { gestures, acknowledgements };
+    } finally {
+      controller.fusion.pushGesture = originalGesture;
+      controller.game.onAck = originalAck;
+    }
+  }, samples);
+  expect(result).toEqual({ gestures: ["protego"], acknowledgements: [true] });
+  const events = (await snapshot(page)).recentEvents.filter(event => event.actor === "P1");
+  expect(events.filter(event => event.type === "castAccepted")).toEqual([
+    expect.objectContaining({ spell: "protego" }),
+  ]);
+  expect(events).toContainEqual(expect.objectContaining({ type: "shieldRaised", spell: "protego" }));
 });
 
 test("developer mode teaches all five spells and exports raw motion, speech and battle telemetry", async ({ page }) => {

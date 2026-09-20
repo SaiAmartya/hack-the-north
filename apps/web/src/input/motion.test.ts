@@ -5,6 +5,7 @@ import { MotionRecognizer, type GestureEvidence, type SpellName } from "./motion
 import { RawMotionTraceBuilder, createCoreMotionFixtures, type CoreMotionFixtures } from "./traceFixtures";
 import phoneJabs from "./fixtures/phone-jabs-2026-09-19.json";
 import phoneTurn from "./fixtures/phone-turn-2026-09-20.json";
+import badgeGestures from "./fixtures/badge-gestures-2026-09-20.json";
 
 type Pose = readonly [number, number, number];
 type Rotation = readonly [Pose, Pose, Pose];
@@ -495,7 +496,7 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
 
   it("quick play waits for brisk raises instead of consuming them as direction-free jabs", () => {
     for (const degrees of [20, 35, 45, 60]) {
-      for (const pushMg of [220, 500, 900, 1_400]) {
+      for (const pushMg of [500, 900, 1_400]) {
         const h = new MotionHarness();
         h.recognizer.useDefaultProfile(h.generation);
         h.feed(h.builder.stillness(600));
@@ -532,7 +533,7 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
     h.feed(h.builder.stillness(600));
     h.feed(h.builder.jab(450));
     expect(h.spells()).toEqual(["stupefy"]);
-    h.feed(h.builder.guard(18));
+    h.feed(h.builder.guard(18, 320, 320, 500));
     expect(h.spells()).toEqual(["stupefy", "protego"]);
     h.feed(h.builder.lower(18));
     h.feed(h.builder.jab(300));
@@ -568,6 +569,88 @@ describe("accelerometer-only motion recognition (v3 segmenter)", () => {
         flags: fault === "saturated" ? MotionFlag.Valid | MotionFlag.Saturated : sample.flags,
       })));
       expect(h.evidence, fault).toHaveLength(0);
+    }
+  });
+
+  it.each(badgeGestures.cases.filter((recording) => recording.expected !== "none-during-move"))(
+    "recognizes labelled real badge regression $name with original sample timing and validity",
+    (recording) => {
+      const h = new MotionHarness();
+      h.recognizer.useDefaultProfile(h.generation);
+      h.feed(recording.samples.map((row) => {
+        const [browserMs, captureMs, seq, axMg, ayMg, azMg, ageUpperMs, flags] = row as number[];
+        return { version: 1, bootId: 5, seq, browserMs, captureMs, axMg, ayMg, azMg, ageUpperMs, flags, breaksGesture: row[8] === true };
+      }));
+      expect(h.spells()).toEqual([recording.expected]);
+      expect(h.evidence[0].quality).toBeGreaterThan(0);
+    },
+  );
+
+  it("does not classify movement during the five recorded badge still windows", () => {
+    const recording = badgeGestures.cases.find((recording) => recording.expected === "none-during-move")!;
+    const decode = (rows: (number | boolean)[][]): CapturedMotion[] => rows.map((row) => {
+      const [browserMs, captureMs, seq, axMg, ayMg, azMg, ageUpperMs, flags] = row as number[];
+      return { version: 1, bootId: 5, seq, browserMs, captureMs, axMg, ayMg, azMg, ageUpperMs, flags, breaksGesture: row[8] === true };
+    });
+    // The recording contains movement outside Move. It is not a claim that all fifty
+    // seconds were motionless, nor that accelerometer-only recognition can infer player intent.
+    // Retain a preceding accepted raise too: its lowering direction exposed the short reorientation
+    // in Still trial5 as a false guard, whereas a fresh profile happened to suppress it.
+    for (const keepPriorRaise of [false, true]) {
+      const h = new MotionHarness();
+      h.recognizer.useDefaultProfile(h.generation);
+      if (keepPriorRaise)
+        h.feed(decode(badgeGestures.cases.find((candidate) => candidate.name === "protego-preparation-validation-1")!.samples));
+      h.feed(decode(recording.samples));
+      const stillEvents = h.evidence.filter((event) => event.startMs >= Number(recording.samples[0][0]));
+      // Preserve the full-session negative evidence: the two larger rest/settle movements
+      // remain unresolved, but neither brief 41ms candidate should survive outside Move either.
+      expect(stillEvents).toHaveLength(2);
+      expect(stillEvents.every((event) => event.endMs - event.startMs >= 60)).toBe(true);
+      for (const [start, end] of recording.moveWindows!)
+        expect(h.evidence.filter((event) => event.endMs > start && event.startMs < end)).toEqual([]);
+    }
+  });
+
+  it("ignores a tiny quick-play wrist reorientation whose detected movement spans less than 60 ms", () => {
+    const h = new MotionHarness();
+    h.recognizer.useDefaultProfile(h.generation);
+    h.feed(h.builder.stillness(600));
+    h.feed(h.builder.guard(18, 320, 320, 220));
+    expect(h.evidence).toHaveLength(0);
+    expect(h.recognizer.getDiagnostics().candidate!.durationMs).toBeLessThan(60);
+  });
+
+  it("recognizes a lift without rotating and ignores its straight lowering in rotated grips", () => {
+    for (const rotation of [
+      [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+      [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+      [[0.7071, 0, 0.7071], [0, 1, 0], [-0.7071, 0, 0.7071]],
+    ] as Rotation[]) {
+      const h = new MotionHarness();
+      h.recognizer.useDefaultProfile(h.generation);
+      h.feed(rotateTrace(h.builder.stillness(600), rotation));
+      h.feed(rotateTrace(h.builder.jab(1_200, 0, [0, 0, 1], 1, 0), rotation));
+      expect(h.spells()).toEqual(["protego"]);
+      h.feed(rotateTrace(h.builder.jab(1_200, 0, [0, 0, -1], 1, 0), rotation));
+      expect(h.spells()).toEqual(["protego"]);
+    }
+  });
+
+  it("ignores a downward stroke ending in a held wrist tilt without needing a previous guard", () => {
+    for (const rotation of [
+      [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+      [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+      [[0.7071, 0, 0.7071], [0, 1, 0], [-0.7071, 0, 0.7071]],
+    ] as Rotation[]) {
+      for (const [amplitude, residualTilt] of [[1_200, 60], [4_000, 45]]) {
+        const h = new MotionHarness();
+        h.recognizer.useDefaultProfile(h.generation);
+        h.feed(rotateTrace(h.builder.stillness(600), rotation));
+        h.feed(rotateTrace(h.builder.jab(amplitude, 0, [0, 0, -1], 1, residualTilt), rotation));
+        expect(h.evidence).toHaveLength(0);
+        expect(h.recognizer.getDiagnostics().candidate!.finalAngleDeg).toBeGreaterThan(18);
+      }
     }
   });
 });

@@ -188,7 +188,7 @@ export class DuelController {
       speech: "local microphone; no audio retained",
       developerClicksEnabled: this.devMode,
       rules: this.game.rules ?? null,
-      gestureProfile: "quick-play-jab-raise-v2",
+      gestureProfile: "quick-play-jab-raise-v3",
       context: { phase: this.game.snapshot?.phase ?? "paired", tutorial: this.game.snapshot?.tutorial ?? null,
         speech: this.speech.getSnapshot(), recognitionEnabled: this.recognitionEnabled(),
         gesture: this.motion.getState(), fusion: this.fusion.getState() },

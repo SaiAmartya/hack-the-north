@@ -89,6 +89,9 @@ type Features = {
   startPose: Vector;       // resting pose the movement started from
   endPose: Vector;         // pose held (or reached) at the end
   endQuiet: boolean;       // the movement ended in a still hold (guards need this)
+  upwardLaunch: boolean;   // first firm stroke follows gravity upward, independently of grip axes
+  liftBrake: boolean;      // sustained opposite acceleration follows that upward launch
+  lowering: boolean;      // the reverse translation: downward launch, upward braking, then a hold
   impulseTrace: PreparedImpulseTrace;
 };
 // A template without a direction (and, for impulses, without traces) is the quick-play generic
@@ -137,6 +140,8 @@ const CANDIDATE_MIN_PEAK_MG = 150;  // below this a "movement" is just the hand 
 const COACH_MIN_MS = 150;           // shorter, weaker movements get no coaching at all
 const GUARD_MIN_TILT_DEG = 22;
 const QUICK_GUARD_MIN_TILT_DEG = 18;
+const VERTICAL_STROKE_ALIGNMENT = 0.7;
+const LIFT_LAUNCH_ALIGNMENT = 0.8;
 const GUARD_MIN_PEAK_MG = 200;
 const DIRECTION_TOLERANCE_DEG = 40;
 const GUARD_TOLERANCE_DEG = 45;
@@ -511,7 +516,8 @@ export class MotionRecognizer {
       // have observed its hold, including a brisk raise with a large initial acceleration peak.
       // Keep looking: a jab's braking acceleration may temporarily tilt the apparent gravity too.
       const possibleGuard = !this.calibratingSpell && guard?.kind === "guard" && !guard.direction &&
-        this.enabledSpells.has("protego") && features.tiltDeg >= ONSET_TILT_DEG;
+        this.enabledSpells.has("protego") && (features.tiltDeg >= ONSET_TILT_DEG || features.upwardLaunch ||
+          Math.abs(dot(features.direction, normalized(features.startPose))) >= VERTICAL_STROKE_ALIGNMENT);
       if (!possibleGuard) {
         burst.earlyEvaluated = true;
         if (this.complete(features, "early")) burst.settled = true;
@@ -590,6 +596,34 @@ export class MotionRecognizer {
     const tailStart = endMs - 100;
     const tail = burst.samples.filter((sample) => sample.t >= tailStart && sample.t <= endMs + QUIET_WINDOW_MS);
     const endPose = tail.length ? mean(tail.map((sample) => sample.a)) : movement[movement.length - 1].a;
+    // Raising the whole badge need not rotate it. Measure the launch against the resting gravity
+    // vector, then require a distinct braking lobe and a quiet finish before calling it a lift.
+    // A forward jab is largely perpendicular to gravity; a lowering starts in the opposite sense.
+    const up = normalized(burst.rest);
+    const launchIndex = linear.findIndex((value) => magnitude(value) >= PLAY_MIN_PEAK_MG);
+    const launchStart = movement[launchIndex]?.t ?? Infinity;
+    const launch = movement.filter((sample) => sample.t >= launchStart && sample.t <= launchStart + 100);
+    const launchVector = mean(launch.map((sample) => subtract(sample.a, burst.rest)));
+    const clearLaunch = launch.length >= 4 && launch[launch.length - 1].t - launchStart >= 60 &&
+      magnitude(launchVector) >= PLAY_MIN_PEAK_MG;
+    const launchAlignment = dot(normalized(launchVector), up);
+    const upwardLaunch = clearLaunch && launchAlignment >= LIFT_LAUNCH_ALIGNMENT;
+    const downwardLaunch = clearLaunch && launchAlignment <= -LIFT_LAUNCH_ALIGNMENT;
+    let brakeStart: number | undefined;
+    let liftBrake = false;
+    let lowerBrakeStart: number | undefined;
+    let lowerBrake = false;
+    for (const sample of movement) {
+      if (sample.t < launchStart + 100) continue;
+      if (dot(subtract(sample.a, burst.rest), up) <= -GUARD_MIN_PEAK_MG) {
+        brakeStart ??= sample.t;
+        if (sample.t - brakeStart >= IMPULSE_MIN_LOBE_MS) liftBrake = true;
+      } else brakeStart = undefined;
+      if (dot(subtract(sample.a, burst.rest), up) >= GUARD_MIN_PEAK_MG) {
+        lowerBrakeStart ??= sample.t;
+        if (sample.t - lowerBrakeStart >= IMPULSE_MIN_LOBE_MS) lowerBrake = true;
+      } else lowerBrakeStart = undefined;
+    }
     return {
       startMs: burst.startMs,
       endMs,
@@ -603,6 +637,9 @@ export class MotionRecognizer {
       startPose: burst.rest,
       endPose,
       endQuiet,
+      upwardLaunch,
+      liftBrake,
+      lowering: downwardLaunch && lowerBrake,
       impulseTrace: prepareImpulseTrace(linear),
     };
   }
@@ -636,7 +673,10 @@ export class MotionRecognizer {
     }
     this.lastIssue = "";
     this.reason = undefined;
-    if (match.spell === "protego") this.lastGuardDirection = features.tiltDirection;
+    // A translation can finish in almost the same pose; its tiny residual tilt is not a reliable
+    // reference for rejecting the next raise as a lowering.
+    if (match.spell === "protego" && features.tiltDeg >= QUICK_GUARD_MIN_TILT_DEG)
+      this.lastGuardDirection = features.tiltDirection;
     this.recordCandidate(features, stopEvidence(how), "accepted");
     this.setProgress("ready", ARM_MS, ARM_MS);
     this.onGesture({
@@ -769,13 +809,19 @@ export class MotionRecognizer {
     // re-oriented (raised or lowered), never a jab or sweep, whatever direction it points.
     const gravityChange = 2_000 * Math.sin((features.tiltDeg * Math.PI) / 360);
     const reorientation = features.endQuiet && features.tiltDeg >= GUARD_MIN_TILT_DEG && features.peak <= gravityChange * REORIENTATION_SLACK + 100;
+    const genericGuard = this.templates.get("protego");
+    // Downward launch plus upward braking is a lowering even if the wrist rotates at its end.
+    // Test this before the held-tilt path, including when no earlier guard supplied a direction.
+    if (features.endQuiet && features.lowering && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
+      genericGuard?.kind === "guard" && !genericGuard.direction &&
+      this.enabledSpells.has("protego")) return { quality: 0, message: "" };
     let lowering = false;
     for (const spell of this.enabledSpells) {
       const template = this.templates.get(spell);
       if (!template) continue;
       if (template.kind === "impulse") {
         if (reorientation) continue;
-        if (features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
+        if ((template.traces.length || features.durationMs >= IMPULSE_MIN_LOBE_MS) && features.lobeMs >= IMPULSE_MIN_LOBE_MS &&
           features.peak >= (template.traces.length ? Math.max(PLAY_MIN_PEAK_MG, template.peak * 0.35) : PLAY_MIN_PEAK_MG)) {
           // The quick-play generic template has no traces: any firm stroke scores a perfect match.
           const score = template.traces.length
@@ -789,10 +835,15 @@ export class MotionRecognizer {
         const reference = template.direction ?? this.lastGuardDirection;
         const angle = reference ? angleDegrees(features.tiltDirection, reference) : 0;
         const minimumTilt = template.direction ? Math.max(GUARD_MIN_TILT_DEG, template.tiltDeg * 0.55) : QUICK_GUARD_MIN_TILT_DEG;
+        const verticalStroke = !template.direction && (features.upwardLaunch ||
+          Math.abs(dot(features.direction, normalized(features.startPose))) >= VERTICAL_STROKE_ALIGNMENT);
+        const lift = !template.direction && features.upwardLaunch && features.liftBrake && features.lobeMs >= IMPULSE_MIN_LOBE_MS;
         if (features.tiltDeg >= minimumTilt && angle >= LOWERING_DEG) lowering = true;
-        if (features.tiltDeg >= minimumTilt && angle <= GUARD_TOLERANCE_DEG &&
-          features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) && features.peak <= Math.max(template.peak * 4, 1_500))
-          guard = { spell, template, quality: clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
+        if ((template.direction || features.durationMs >= IMPULSE_MIN_LOBE_MS) &&
+          (lift || (features.tiltDeg >= minimumTilt && angle <= GUARD_TOLERANCE_DEG)) &&
+          features.peak >= Math.max(GUARD_MIN_PEAK_MG, template.peak * 0.3) &&
+          (verticalStroke || features.peak <= Math.max(template.peak * 4, 1_500)))
+          guard = { spell, template, quality: lift ? 0.75 : clamp01(0.5 + (features.tiltDeg - GUARD_MIN_TILT_DEG) / 60 + ((GUARD_TOLERANCE_DEG - angle) / GUARD_TOLERANCE_DEG) * 0.3) };
       }
     }
     if (lowering && !guard) return { quality: 0, message: "" };  // lowering the guard is never a cast
