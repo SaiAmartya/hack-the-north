@@ -1,6 +1,8 @@
 """Golden vectors from BADGE-FIRMWARE-CONTRACT.md section 7, shared with the firmware self-test
 (firmware/src/proto.cpp) and the browser decoder (apps/web/src/wand/protocol.test.ts)."""
 
+import pytest
+
 from phantom_host.wand_protocol import (
     CAP_ALL,
     FX_ACCEPTED_CAST,
@@ -63,18 +65,25 @@ def test_control_and_status_golden_vectors():
     ok = Status(1, 0, 0xAABBCCDD, 1010, OP_OPEN, R_OK)
     assert encode_status(ok) == h("01 01 00 00 dd cc bb aa f2 03 00 00 01 00 00 00 00 00 00 00")
     assert decode_status(encode_status(ok)) == ok
+    assert decode_status(h("01 02 00 00 dd cc bb aa 88 13 00 00 07 00 00 00 03 00 00 00")) is None
 
     state = Control(OP_SET_STATE, 1, 0xAABBCCDD, set_state_args(PH_PLAYING, 100, 0), 0x01020304, 2200)
     assert encode_control(state) == h("01 03 01 00 dd cc bb aa 03 64 64 00 04 03 02 01 98 08 00 00")
     cue = Control(4, 2, 0xAABBCCDD, cue_args(FX_ACCEPTED_CAST, SP_STUPEFY, 300), 0x01020304, 1400)
     assert encode_control(cue) == h("01 04 02 00 dd cc bb aa 01 01 2c 01 04 03 02 01 78 05 00 00")
-    for spell, vector in (
-        (SP_INCENDIO, "01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00"),
-        (SP_EPISKEY, "01 04 04 00 dd cc bb aa 01 05 2c 01 04 03 02 01 78 05 00 00"),
+    for spell, seq, vector in (
+        (SP_INCENDIO, 3, "01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00"),
+        (SP_EPISKEY, 4, "01 04 04 00 dd cc bb aa 01 08 2c 01 04 03 02 01 78 05 00 00"),
     ):
-        cue = Control(4, spell - 1, 0xAABBCCDD, cue_args(FX_ACCEPTED_CAST, spell, 300), 0x01020304, 1400)
+        cue = Control(4, seq, 0xAABBCCDD, cue_args(FX_ACCEPTED_CAST, spell, 300), 0x01020304, 1400)
         assert encode_control(cue) == h(vector)
         assert decode_control(h(vector)) == cue
+    for spell in (5, 6, 7, 9):
+        with pytest.raises(ValueError, match="cue spell"):
+            cue_args(FX_ACCEPTED_CAST, spell, 300)
+        invalid = bytearray(encode_control(cue))
+        invalid[9] = spell
+        assert decode_control(invalid) is None
 
     wrap_sync = Control(OP_SYNC, 0, 0xAABBCCDD)
     assert encode_control(wrap_sync) == h("01 02 00 00 dd cc bb aa 00 00 00 00 00 00 00 00 00 00 00 00")

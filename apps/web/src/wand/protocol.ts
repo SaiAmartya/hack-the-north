@@ -74,7 +74,8 @@ export enum SpellCode {
   Protego = 2,
   Expelliarmus = 3,
   Incendio = 4,
-  Episkey = 5,
+  // 5-7 are reserved for the historical seven-spell firmware.
+  Episkey = 8,
 }
 
 export enum StatusKind {
@@ -601,7 +602,9 @@ function validateCue(command: CueCommand): void {
     CueEffect.AcceptedCast,
     CueEffect.RoundResult,
   );
-  assertEnumValue("spell", command.spell, SpellCode.None, SpellCode.Episkey);
+  if (command.spell !== SpellCode.Episkey) {
+    assertEnumValue("spell", command.spell, SpellCode.None, SpellCode.Incendio);
+  }
   assertInteger("durationMs", command.durationMs, 1, MAX_CUE_DURATION_MS);
   assertNonzeroUint32("presentationEpoch", command.presentationEpoch);
   assertInteger("startBeforeMs", command.startBeforeMs, 0, 0xffff_ffff);

@@ -2,6 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "game",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tools/run_game.py", "--local-referee", "--dev"],
+      "port": 5173,
+      "url": "http://127.0.0.1:5173"
+    },
+    {
       "name": "web",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "apps/web", "run", "dev"],

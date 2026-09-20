@@ -10,7 +10,8 @@
 namespace display {
 namespace {
 Adafruit_ST7789 tft(&SPI, PIN_DISP_CS, PIN_DISP_DC, PIN_DISP_RST);
-const uint16_t BG = 0x0000, FG = 0xFFFF, DIM = 0x8410, PURPLE = 0xA11F, CYAN = 0x07FF, AMBER = 0xFD20, GREEN = 0x07E8, RED = 0xF800, GREY = 0x2104;
+const uint16_t BG = 0x0000, FG = 0xFFFF, DIM = 0x8410, PURPLE = 0xA11F, CYAN = 0x07FF, AMBER = 0xFD20, GREEN = 0x07E8, RED = 0xF800, GREY = 0x2104,
+               HEART = 0xF8A3, HP_MID = 0xFDE0;
 bool g_ok = false;
 int g_boot_y = 4;
 uint8_t g_rot = 1;
@@ -60,7 +61,7 @@ struct Field {
 Field f_title{10, 8, 3, PURPLE, 300, "", 0};
 Field f_link{10, 40, 2, DIM, 300, "", 0};
 Field f_phase{10, 68, 3, FG, 300, "", 0};
-Field f_hp{10, 100, 2, FG, 300, "", 0};
+Field f_hp{32, 100, 2, FG, 300, "", 0};
 Field f_cue{10, 130, 3, CYAN, 300, "", 0};
 Field f_hint{10, 164, 2, DIM, 300, "", 0};
 int g_last_bar = -1, g_last_hp = -1;
@@ -98,6 +99,13 @@ uint16_t phase_color(uint8_t p) {
     case proto::PH_PLAYING: return FG;
     default: return CYAN;
   }
+}
+
+void draw_heart(int16_t x, int16_t y) {
+  tft.fillCircle(x + 4, y + 4, 4, HEART);
+  tft.fillCircle(x + 11, y + 4, 4, HEART);
+  tft.fillTriangle(x, y + 6, x + 15, y + 6, x + 7, y + 14, HEART);
+  tft.fillTriangle(x, y + 6, x + 15, y + 6, x + 8, y + 14, HEART);
 }
 }  // namespace
 
@@ -164,11 +172,12 @@ void draw(const View &v) {
 
   const bool show_hp = v.state_valid && (v.phase == proto::PH_PLAYING || v.phase >= proto::PH_WON);
   if (show_hp) {
-    snprintf(b, sizeof(b), "HP %3u%s%s", v.hp, (v.status & proto::ST_SHIELD) ? "  SHIELD" : "", (v.status & proto::ST_LOCKED) ? "  DISARMED" : "");
+    snprintf(b, sizeof(b), "%3u%s%s", v.hp, (v.status & proto::ST_SHIELD) ? "  SHIELD" : "", (v.status & proto::ST_LOCKED) ? "  DISARMED" : "");
     f_hp.draw(b, (v.status & proto::ST_SHIELD) ? CYAN : FG, true);
     const int w = (int)v.hp * 3;  // 0..300
     if (w != g_last_hp || !g_last_hp_shown) {
-      tft.fillRect(10, 118, w, 6, v.hp > 30 ? GREEN : RED);
+      if (!g_last_hp_shown) draw_heart(10, 100);
+      tft.fillRect(10, 118, w, 6, v.hp > 50 ? GREEN : v.hp > 25 ? HP_MID : RED);
       tft.fillRect(10 + w, 118, 300 - w, 6, GREY);
       g_last_hp = w;
       g_last_hp_shown = true;
@@ -176,7 +185,7 @@ void draw(const View &v) {
   } else {
     f_hp.draw("");
     if (g_last_hp_shown) {
-      tft.fillRect(10, 118, 300, 6, BG);
+      tft.fillRect(10, 100, 300, 24, BG);
       g_last_hp_shown = false;
     }
   }

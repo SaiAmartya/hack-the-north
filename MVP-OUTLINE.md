@@ -1,5 +1,7 @@
 # Harry Potter Battle Simulator — Hackathon MVP
 
+> Historical planning document. The September 20 final sprint supersedes its three-spell/video-first and calibration sections: five active moves, original pixel battles, wand-first entry and automatic grip setup. Current behavior is in [README.md](README.md), [DESIGN_SYSTEMS.md](DESIGN_SYSTEMS.md), and the [final-sprint evidence](docs/qa/final-sprint.md).
+
 **Experience:** hold your hacker badge like a wand, say a spell, and perform its movement to duel a real opponent through a live-video portal.
 
 **Target:** Hack the North 2026 — Best Badge Hack. **Revised:** September 19, 2026, HAL-grounded custom-firmware handoff. **Repository baseline:** `4a34abd`. This is an implementation plan, not a claim that the proposed voice-and-motion multiplayer experience has been validated.

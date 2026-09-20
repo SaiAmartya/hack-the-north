@@ -205,7 +205,7 @@ uint32_t Session::apply(const Control &c, uint32_t now_ms) {
     case OP_CUE: {
       const uint8_t effect = (uint8_t)c.arg0, spell = (uint8_t)(c.arg0 >> 8);
       const uint16_t duration = (uint16_t)(c.arg0 >> 16);
-      if (effect < FX_ACCEPTED_CAST || effect > FX_RESULT || spell > SP_EPISKEY || duration < 1 || duration > 1000) return RC_INVALID_ARG;
+      if (effect < FX_ACCEPTED_CAST || effect > FX_RESULT || (spell > SP_INCENDIO && spell != SP_EPISKEY) || duration < 1 || duration > 1000) return RC_INVALID_ARG;
       if (effect == FX_ACCEPTED_CAST && spell == SP_NONE) return RC_INVALID_ARG;
       if (!state_.valid || diff32(now_ms, state_.valid_until_ms) >= 0 || c.arg1 != state_.epoch) return RC_INVALID_ARG;
       if (effect == FX_RESULT && (spell != SP_NONE || (state_.phase != PH_WON && state_.phase != PH_LOST && state_.phase != PH_DRAW))) return RC_INVALID_ARG;
@@ -365,10 +365,15 @@ int selftest(void (*log)(const char *line)) {
 
   unhex("01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00", raw, REC);
   t.expect(s.handle_control(raw, REC, 1200, r) && r.detail1 == RC_OK && s.take_cue(1200, cue) && cue.spell == SP_INCENDIO, "Incendio cue golden vector");
-  unhex("01 04 04 00 dd cc bb aa 01 05 2c 01 04 03 02 01 78 05 00 00", raw, REC);
+  unhex("01 04 04 00 dd cc bb aa 01 08 2c 01 04 03 02 01 78 05 00 00", raw, REC);
   t.expect(s.handle_control(raw, REC, 1210, r) && r.detail1 == RC_OK && s.take_cue(1210, cue) && cue.spell == SP_EPISKEY, "Episkey cue golden vector");
-  unhex("01 04 05 00 dd cc bb aa 01 06 2c 01 04 03 02 01 78 05 00 00", raw, REC);
-  t.expect(s.handle_control(raw, REC, 1220, r) && r.detail1 == RC_INVALID_ARG && s.pending_cues() == 0, "unknown spell six is rejected");
+  unhex("01 04 05 00 dd cc bb aa 01 05 2c 01 04 03 02 01 78 05 00 00", raw, REC);
+  for (uint8_t spell = 5; spell <= 9; ++spell) {
+    if (spell == SP_EPISKEY) continue;
+    raw[2] = spell;
+    raw[9] = spell;
+    t.expect(s.handle_control(raw, REC, 1220, r) && r.detail1 == RC_INVALID_ARG && s.pending_cues() == 0, "reserved or unknown spell is rejected");
+  }
 
   // independent fixture: same CUE first arriving at 1400 is expired
   Session s2;

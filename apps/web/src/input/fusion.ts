@@ -109,6 +109,13 @@ export class CastFusion {
     this.tryPair();
   }
 
+  cancelUtterance(id: string, generation: number): void {
+    // A late cancellation must never reset or retire a newer input generation.
+    if (generation !== this.generation) return;
+    if (this.activeUtterance?.id !== id && this.pendingUtterance?.id !== id) return;
+    this.reject("utterance-discarded");
+  }
+
   pushGesture(evidence: GestureEvidence): void {
     this.assertGesture(evidence);
     if (!this.acceptGeneration(evidence.generation)) return;

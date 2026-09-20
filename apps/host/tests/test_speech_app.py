@@ -8,7 +8,12 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from phantom_host.speech_app import SpeechRuntime, canonical_spell, create_app
+from phantom_host.speech_app import (
+    SpeechRuntime,
+    canonical_spell,
+    create_app,
+    inference_threads,
+)
 
 SECRET = "test-only-per-launch-secret"
 
@@ -97,6 +102,9 @@ def test_health_requires_the_proxy_secret_and_reports_fixed_settings(
         "issue": "",
         "warmupMs": body["warmupMs"],
         "loadWarmMs": body["loadWarmMs"],
+        "deadlineMisses": 0,
+        "deadlineMissLimit": 3,
+        "lastInferenceMs": None,
     }
     assert isinstance(body["warmupMs"], int)
     assert isinstance(body["loadWarmMs"], int)
@@ -165,14 +173,24 @@ def test_single_worker_rejects_a_second_request_without_queueing() -> None:
             content=b"\x00\x00" * 1600,
         )
         assert second.status_code == 409
+        busy_health = client.get(
+            "/health", headers={"X-Wand-Speech-Secret": SECRET}
+        ).json()
+        assert busy_health["status"] == "ok"
+        assert busy_health["busy"] is True
+        assert busy_health["deadlineMisses"] == 0
         engine.release.set()
         thread.join(timeout=2)
         assert not thread.is_alive()
         assert first_response == [200]
         assert engine.calls == 2
+        assert client.post(
+            "/transcribe", headers=headers(), content=b"\x00\x00" * 1600
+        ).status_code == 200
+        assert engine.calls == 3, "the busy request was never queued"
 
 
-def test_deadline_miss_makes_the_worker_unhealthy() -> None:
+def test_single_deadline_miss_keeps_worker_healthy_and_success_resets_streak() -> None:
     runtime = SpeechRuntime(loader=lambda: SlowEngine(), generation=17)
     request_headers = {**headers(), "X-Wand-Deadline-Budget-Ms": "1"}
     with TestClient(create_app(runtime=runtime, secret=SECRET)) as client:
@@ -183,9 +201,49 @@ def test_deadline_miss_makes_the_worker_unhealthy() -> None:
         health = client.get(
             "/health", headers={"X-Wand-Speech-Secret": SECRET}
         ).json()
+        assert health["status"] == "ok"
+        assert health["workerAvailable"] is True
+        assert health["deadlineMisses"] == 1
+        assert health["lastInferenceMs"] >= 20
+        assert health["issue"] == ""
+        response = client.post(
+            "/transcribe", headers=headers(), content=b"\x00\x00" * 1600
+        )
+        assert response.status_code == 200
+        health = client.get(
+            "/health", headers={"X-Wand-Speech-Secret": SECRET}
+        ).json()
+        assert health["deadlineMisses"] == 0
+        assert health["lastInferenceMs"] == response.json()["inferenceMs"]
+
+
+def test_three_consecutive_deadline_misses_make_worker_unhealthy() -> None:
+    runtime = SpeechRuntime(loader=lambda: SlowEngine(), generation=17)
+    request_headers = {**headers(), "X-Wand-Deadline-Budget-Ms": "1"}
+    with TestClient(create_app(runtime=runtime, secret=SECRET)) as client:
+        for _ in range(3):
+            response = client.post(
+                "/transcribe", headers=request_headers, content=b"\x00\x00" * 1600
+            )
+            assert response.status_code == 504
+        health = client.get(
+            "/health", headers={"X-Wand-Speech-Secret": SECRET}
+        ).json()
         assert health["status"] == "unhealthy"
         assert health["workerAvailable"] is False
+        assert health["deadlineMisses"] == 3
         assert health["issue"] == "Speech inference missed its caller deadline"
+        assert client.post(
+            "/transcribe", headers=headers(), content=b"\x00\x00" * 1600
+        ).status_code == 503
+
+
+@pytest.mark.parametrize("cores, expected", [(1, 2), (4, 4), (128, 8), (None, 4)])
+def test_inference_threads_remain_bounded(
+    monkeypatch: pytest.MonkeyPatch, cores: int | None, expected: int
+) -> None:
+    monkeypatch.setattr("phantom_host.speech_app.os.cpu_count", lambda: cores)
+    assert inference_threads() == expected
 
 
 def test_request_limits_are_enforced_before_inference(client: TestClient) -> None:

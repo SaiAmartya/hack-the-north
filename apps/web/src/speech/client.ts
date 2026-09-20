@@ -37,6 +37,8 @@ export type SpeechOnset = {
   startMs: number;
 };
 
+export type SpeechDiscard = Pick<SpeechOnset, "id" | "generation">;
+
 type Capture = {
   stop: () => void;
 };
@@ -86,6 +88,7 @@ type HelperResult = {
 };
 
 const MAX_RESULT_DELAY_MS = 1000;
+const LATE_RESULT_ISSUE = "Speech result arrived too late; say it again";
 const MAX_PCM_BYTES = SPEECH_SAMPLE_RATE * 3 * 2;
 const FIRST_AUDIO_FRAME_TIMEOUT_MS = 2000;
 
@@ -105,6 +108,7 @@ export class SpeechClient {
   private recognitionFromMs = -Infinity;
   private speechListeners = new Set<(evidence: SpeechEvidence) => void>();
   private onsetListeners = new Set<(onset: SpeechOnset) => void>();
+  private discardListeners = new Set<(utterance: SpeechDiscard) => void>();
 
   constructor(
     private readonly platform: SpeechClientPlatform = browserSpeechPlatform(),
@@ -143,6 +147,11 @@ export class SpeechClient {
   onOnset(listener: (onset: SpeechOnset) => void): () => void {
     this.onsetListeners.add(listener);
     return () => this.onsetListeners.delete(listener);
+  }
+
+  onDiscard(listener: (utterance: SpeechDiscard) => void): () => void {
+    this.discardListeners.add(listener);
+    return () => this.discardListeners.delete(listener);
   }
 
   async start(): Promise<void> {
@@ -265,6 +274,7 @@ export class SpeechClient {
     this.draft = undefined;
     if (!draft || draft.generation !== this.generation) return;
     if (draft.suppressed) {
+      this.notifyDiscard(draft);
       if (this.pending) this.pending.overlapActive = false;
       else this.endpoint?.resolve();
       this.finishInvalidatedWhenIdle();
@@ -278,7 +288,13 @@ export class SpeechClient {
 
     const remaining = event.endMs + MAX_RESULT_DELAY_MS - this.platform.now();
     if (remaining <= 0) {
-      this.fail("Speech result deadline elapsed before transcription started");
+      this.notifyDiscard(draft);
+      this.endpoint?.resolve();
+      this.snapshot = {
+        ...this.snapshot,
+        phase: "listening",
+        issue: LATE_RESULT_ISSUE,
+      };
       return;
     }
     const body = pcm16(event.samples);
@@ -331,6 +347,15 @@ export class SpeechClient {
         body,
         signal: pending.abort.signal,
       });
+      if (response.status === 504 || response.status === 409) {
+        this.discardPending(
+          pending,
+          response.status === 409
+            ? "Wait a moment, then say your spell again"
+            : LATE_RESULT_ISSUE,
+        );
+        return;
+      }
       if (!response.ok) throw new Error("Local speech transcription failed");
       const result = (await response.json()) as HelperResult;
       this.result(pending, result);
@@ -352,7 +377,7 @@ export class SpeechClient {
     if (!this.isPending(pending)) return;
     const arrivedMs = this.platform.now();
     if (arrivedMs > pending.endMs + MAX_RESULT_DELAY_MS) {
-      this.fail("Speech result missed the voice-end plus one-second deadline");
+      this.discardPending(pending, LATE_RESULT_ISSUE);
       return;
     }
     clearTimeout(pending.deadlineTimer);
@@ -387,7 +412,7 @@ export class SpeechClient {
       };
     }
     pending.settled = true;
-    this.completePending(pending);
+    this.completePending(pending, spell !== null);
   }
 
   private deadline(id: string, generation: number): void {
@@ -396,8 +421,17 @@ export class SpeechClient {
       this.pending.generation === generation &&
       generation === this.generation
     ) {
-      this.fail("Speech result missed the voice-end plus one-second deadline");
+      this.discardPending(this.pending, LATE_RESULT_ISSUE);
     }
+  }
+
+  /** A late or busy response consumes its utterance without queuing or stopping capture. */
+  private discardPending(pending: Pending, issue: string): void {
+    if (!this.isPending(pending)) return;
+    pending.abort.abort();
+    pending.settled = true;
+    this.snapshot = { ...this.snapshot, issue };
+    this.completePending(pending);
   }
 
   private finishInvalidatedWhenIdle(): void {
@@ -413,10 +447,16 @@ export class SpeechClient {
     }
   }
 
-  private completePending(pending: Pending): void {
+  private notifyDiscard(utterance: SpeechDiscard): void {
+    for (const listener of this.discardListeners)
+      listener({ id: utterance.id, generation: utterance.generation });
+  }
+
+  private completePending(pending: Pending, emitted = false): void {
     if (!this.isPending(pending)) return;
     clearTimeout(pending.deadlineTimer);
     this.pending = undefined;
+    if (!emitted) this.notifyDiscard(pending);
     this.endpoint?.resolve();
     this.snapshot = {
       ...this.snapshot,

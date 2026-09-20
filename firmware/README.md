@@ -17,14 +17,16 @@ For the laptop game and iPhone setup, start at the [repository README](../README
 
 ## 0.3.0 — five-spell duel (current source)
 
-Adds `Incendio` (cue ID 4, orange) and `Episkey` (cue ID 5, mint) to the badge's accepted-cast
+Adds `Incendio` (cue ID 4, orange) and `Episkey` (cue ID 8, mint) to the badge's accepted-cast
 text and LED ring. Existing spell IDs, 20-byte packets, UUIDs, sensor sampling, power policy and
 session rules are unchanged. Damage, healing, effects and individual cooldowns remain authoritative
 on the laptop/referee; the badge displays the latest HP and status.
 
 The normal wand screen now shows short pairing/game instructions without a clipped spell list
 or technical footer. `id`, `status` and `trace` retain the diagnostic evidence on USB serial.
-Firmware before 0.3.0 rejects the two new cues; install this version for full five-spell feedback.
+The HP display preserves the teammate's heart and green/amber/red health colors. Historical spell
+IDs 5–7 and STATUS kind 2 remain reserved; this image rejects those spells and emits no button casts.
+Firmware before 0.3.0 rejects Episkey; install this version for full five-spell feedback.
 The [0.3.0 verification record](../docs/qa/firmware-0.3.0.md) separates local checks from the final
 flash and physical QA contract.
 

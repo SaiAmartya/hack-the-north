@@ -28,6 +28,7 @@ MAX_PCM_BYTES = SAMPLE_RATE * 3 * 2
 MAX_PROXY_BYTES = 128 * 1024
 MAX_VOICE_MS = 1_800
 MAX_DEADLINE_MS = 1_000
+DEADLINE_MISS_LIMIT = 3
 SECRET_ENV = "WAND_SPEECH_SECRET"
 MODEL_DIR_ENV = "WAND_SPEECH_MODEL_DIR"
 SECRET_HEADER = "x-wand-speech-secret"
@@ -77,6 +78,7 @@ class FasterWhisperEngine:
             compute_type="int8",
             local_files_only=True,
             num_workers=1,
+            cpu_threads=inference_threads(),
         )
 
     def transcribe(self, pcm: np.ndarray) -> str:
@@ -96,6 +98,11 @@ class FasterWhisperEngine:
         return " ".join(
             str(getattr(segment, "text", "")).strip() for segment in list(segments)
         ).strip()
+
+
+def inference_threads() -> int:
+    """Bound CPU use while leaving capacity for capture, rendering and the referee."""
+    return max(2, min(8, (os.cpu_count() or 4) // 2 + 2))
 
 
 class SpeechRuntime:
@@ -120,6 +127,8 @@ class SpeechRuntime:
         self._issue = "Speech model has not been loaded"
         self._warmup_ms: int | None = None
         self._load_warm_ms: int | None = None
+        self._deadline_misses = 0
+        self._last_inference_ms: int | None = None
         self._started = False
 
     @classmethod
@@ -164,6 +173,8 @@ class SpeechRuntime:
             warm = self._warm
             busy = self._busy
             issue = self._issue
+            deadline_misses = self._deadline_misses
+            last_inference_ms = self._last_inference_ms
         return {
             "status": "ok" if ready and warm and not issue else "unhealthy",
             "ready": ready,
@@ -180,6 +191,9 @@ class SpeechRuntime:
             "issue": issue,
             "warmupMs": self._warmup_ms,
             "loadWarmMs": self._load_warm_ms,
+            "deadlineMisses": deadline_misses,
+            "deadlineMissLimit": DEADLINE_MISS_LIMIT,
+            "lastInferenceMs": last_inference_ms,
         }
 
     async def transcribe(
@@ -257,14 +271,25 @@ class SpeechRuntime:
         self, future: Future[InferenceResult], deadline_budget_ms: int
     ) -> None:
         issue = ""
+        missed = False
+        inference_ms: int | None = None
         try:
             result = future.result()
-            if result.inference_ms > deadline_budget_ms:
-                issue = "Speech inference missed its caller deadline"
+            inference_ms = result.inference_ms
+            missed = result.inference_ms > deadline_budget_ms
         except Exception:
             issue = "Speech inference worker failed"
         with self._state:
             self._busy = False
+            self._last_inference_ms = inference_ms
+            if missed:
+                # A single late inference drops only its utterance. Repeated misses
+                # indicate that this worker cannot sustain the caller's deadline.
+                self._deadline_misses += 1
+                if self._deadline_misses >= DEADLINE_MISS_LIMIT:
+                    issue = "Speech inference missed its caller deadline"
+            elif not issue:
+                self._deadline_misses = 0
             if issue:
                 self._ready = False
                 self._issue = issue

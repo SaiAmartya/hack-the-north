@@ -203,14 +203,14 @@ describe("wand protocol golden vectors", () => {
   });
 
   it.each([
-    [SpellCode.Incendio, "01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00"],
-    [SpellCode.Episkey, "01 04 04 00 dd cc bb aa 01 05 2c 01 04 03 02 01 78 05 00 00"],
-  ] as const)("pins spell %i CUE bytes shared with firmware", (spell, vector) => {
+    [SpellCode.Incendio, 3, "01 04 03 00 dd cc bb aa 01 04 2c 01 04 03 02 01 78 05 00 00"],
+    [SpellCode.Episkey, 4, "01 04 04 00 dd cc bb aa 01 08 2c 01 04 03 02 01 78 05 00 00"],
+  ] as const)("pins spell %i CUE bytes shared with firmware", (spell, commandSeq, vector) => {
     const bytes = hex(vector);
     const expected: ControlCommand = {
       version: WAND_PROTOCOL_VERSION,
       opcode: ControlOpcode.Cue,
-      commandSeq: spell - 1,
+      commandSeq,
       linkNonce: 0xaabb_ccdd,
       effect: CueEffect.AcceptedCast,
       spell,
@@ -238,6 +238,9 @@ describe("wand protocol validation", () => {
     const reservedMotionFlag = GOLDEN_MOTION.slice();
     reservedMotionFlag[1] |= 0x80;
     expect(() => decodeMotion(reservedMotionFlag)).toThrow(/reserved/);
+
+    const retiredButtonCast = hex("01 02 00 00 dd cc bb aa 88 13 00 00 07 00 00 00 03 00 00 00");
+    expect(() => decodeStatus(retiredButtonCast)).toThrow(/STATUS kind/);
   });
 
   it("rejects signed MOTION values outside the profile domain", () => {
@@ -267,9 +270,11 @@ describe("wand protocol validation", () => {
     invalidAcceptedCast[9] = SpellCode.None;
     expect(() => decodeControl(invalidAcceptedCast)).toThrow(/requires a spell/);
 
-    const unknownSpell = GOLDEN_CUE.slice();
-    unknownSpell[9] = 6;
-    expect(() => decodeControl(unknownSpell)).toThrow(/spell/);
+    for (const spell of [5, 6, 7, 9]) {
+      const unknownSpell = GOLDEN_CUE.slice();
+      unknownSpell[9] = spell;
+      expect(() => decodeControl(unknownSpell)).toThrow(/spell/);
+    }
 
     const health = encodeStatus({
       version: WAND_PROTOCOL_VERSION,

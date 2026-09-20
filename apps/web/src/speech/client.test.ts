@@ -9,6 +9,8 @@ import {
   SPEECH_SAMPLE_RATE,
   type CapturedAudioFrame,
 } from "./endpoint";
+import { CastFusion, type CastAttempt } from "../input/fusion";
+import type { GestureEvidence } from "../input/motion";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -108,6 +110,26 @@ async function flush(): Promise<void> {
   for (let index = 0; index < 10; index++) await Promise.resolve();
 }
 
+function fuseSpeech(client: SpeechClient) {
+  const casts: CastAttempt[] = [];
+  const fusion = new CastFusion((attempt) => casts.push(attempt));
+  client.onOnset((event) => fusion.beginUtterance(event));
+  client.onSpeech((event) => fusion.pushUtterance({ ...event, finalAtMs: event.arrivedMs }));
+  client.onDiscard((event) => fusion.cancelUtterance(event.id, event.generation));
+  return { fusion, casts };
+}
+
+function matchingGesture(headers: Headers, id: string, spell: "stupefy" | "protego" = "stupefy"): GestureEvidence {
+  return {
+    id,
+    spell,
+    startMs: Number(headers.get("X-Wand-Voice-Start-Ms")),
+    endMs: Number(headers.get("X-Wand-Voice-End-Ms")),
+    generation: Number(headers.get("X-Wand-Generation")),
+    quality: 0.9,
+  };
+}
+
 describe("speech client lifecycle", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
@@ -119,6 +141,7 @@ describe("speech client lifecycle", () => {
     "calibrates, sends bounded raw PCM, and emits exact %s evidence", async (spell) => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
     const evidence: SpeechEvidence[] = [];
     client.onSpeech((item) => evidence.push(item));
     await client.start();
@@ -160,6 +183,10 @@ describe("speech client lifecycle", () => {
     });
     expect(evidence[0].endMs).toBeLessThan(evidence[0].arrivedMs);
     expect(client.getSnapshot().phase).toBe("listening");
+    expect(fusion.getState().pendingUtterance?.id).toBe(utteranceId);
+    fusion.pushGesture(matchingGesture(headers, "later-gesture", spell === "protego" || spell === "episkey" ? "protego" : "stupefy"));
+    expect(casts).toHaveLength(1);
+    expect(casts[0].spell).toBe(spell);
   });
 
   it("invalidates the first result on a second onset and never queues the second", async () => {
@@ -337,18 +364,100 @@ describe("speech client lifecycle", () => {
     expect(platform.stopped).toBe(true);
   });
 
-  it("faults and clears the graph when the helper misses the final deadline", async () => {
+  it("discards a timed-out result even after a fresh utterance starts, then accepts the fresh result", async () => {
     const platform = new FakePlatform();
     const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const evidence: SpeechEvidence[] = [];
+    client.onSpeech((item) => evidence.push(item));
     await client.start();
     platform.calibrate();
     platform.utterance();
+    const firstRequest = platform.requests.at(-1)!;
+    const firstHeaders = new Headers(firstRequest.init?.headers);
+    fusion.pushGesture(matchingGesture(firstHeaders, "old-gesture"));
+    const generation = client.getSnapshot().generation;
     await vi.advanceTimersByTimeAsync(1000);
     expect(client.getSnapshot()).toMatchObject({
-      phase: "fault",
-      issue: "Speech result missed the voice-end plus one-second deadline",
+      phase: "listening",
+      issue: "Speech result arrived too late; say it again",
+      generation,
     });
-    expect(platform.stopped).toBe(true);
+    expect(platform.stopped).toBe(false);
+    expect(firstRequest.init?.signal?.aborted).toBe(true);
+    expect(fusion.getState()).toMatchObject({ activeUtterance: undefined, pendingGesture: undefined });
+    platform.utterance();
+    expect(platform.transcriptions).toHaveLength(2);
+    platform.transcriptions[0].resolve(Response.json({
+      utteranceId: firstHeaders.get("X-Wand-Utterance-Id"),
+      generation,
+      text: "Stupefy",
+      spell: "stupefy",
+    }));
+    await flush();
+    expect(evidence).toEqual([]);
+    expect(client.getSnapshot().phase).toBe("busy");
+    const freshHeaders = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.cancelUtterance(firstHeaders.get("X-Wand-Utterance-Id")!, generation);
+    expect(fusion.getState().activeUtterance?.id).toBe(freshHeaders.get("X-Wand-Utterance-Id"));
+    fusion.pushGesture(matchingGesture(freshHeaders, "fresh-gesture", "protego"));
+    platform.transcriptions[1].resolve(Response.json({
+      utteranceId: freshHeaders.get("X-Wand-Utterance-Id"),
+      generation,
+      text: "Episkey",
+      spell: "episkey",
+    }));
+    await flush();
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]).toMatchObject({ id: freshHeaders.get("X-Wand-Utterance-Id"), spell: "episkey" });
+    expect(casts).toHaveLength(1);
+    expect(casts[0]).toMatchObject({ spell: "episkey", gestureId: "fresh-gesture" });
+    expect(client.getSnapshot()).toMatchObject({ phase: "listening", issue: "", generation });
+    client.stop();
+  });
+
+  it.each([409, 504, "", "ordinary words"])("retires discarded speech (%s), and the next voice plus gesture casts once", async (result) => {
+    const platform = new FakePlatform();
+    const client = new SpeechClient(platform);
+    const { fusion, casts } = fuseSpeech(client);
+    const evidence: SpeechEvidence[] = [];
+    client.onSpeech((item) => evidence.push(item));
+    await client.start();
+    platform.calibrate();
+    platform.utterance();
+    const firstHeaders = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(firstHeaders, "old-gesture"));
+    platform.transcriptions[0].resolve(typeof result === "number"
+      ? new Response(null, { status: result })
+      : Response.json({
+        utteranceId: firstHeaders.get("X-Wand-Utterance-Id"),
+        generation: Number(firstHeaders.get("X-Wand-Generation")),
+        text: result,
+        spell: null,
+      }));
+    await flush();
+    expect(client.getSnapshot().phase).toBe("listening");
+    expect(platform.stopped).toBe(false);
+    expect(platform.transcriptions).toHaveLength(1);
+    expect(evidence).toEqual([]);
+    expect(fusion.getState()).toMatchObject({ activeUtterance: undefined, pendingGesture: undefined });
+    platform.utterance();
+    expect(platform.transcriptions).toHaveLength(2);
+    const headers = new Headers(platform.requests.at(-1)!.init?.headers);
+    fusion.pushGesture(matchingGesture(headers, "fresh-gesture"));
+    platform.transcriptions[1].resolve(Response.json({
+      utteranceId: headers.get("X-Wand-Utterance-Id"),
+      generation: Number(headers.get("X-Wand-Generation")),
+      text: "Incendio",
+      spell: "incendio",
+    }));
+    await flush();
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].spell).toBe("incendio");
+    expect(casts).toHaveLength(1);
+    expect(casts[0]).toMatchObject({ spell: "incendio", gestureId: "fresh-gesture" });
+    expect(client.getSnapshot()).toMatchObject({ phase: "listening", issue: "" });
+    client.stop();
   });
 
   it("rejects stale callbacks after stop and invalidates immediately when hidden", async () => {

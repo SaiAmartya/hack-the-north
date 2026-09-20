@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DuelController } from "./controller";
-import { SpeechClient, type SpeechOnset } from "../speech/client";
+import { SpeechClient, type SpeechDiscard, type SpeechOnset } from "../speech/client";
 import { WandClient } from "../wand/client";
 import { GameClient } from "./client";
 import { PresentationPhase } from "../wand/protocol";
@@ -85,6 +85,36 @@ it("does not admit speech beginning during calibration into fusion", () => {
   });
   onset({ id: "ready", generation: 1, startMs: 10 });
   expect(begin).toHaveBeenCalledOnce();
+  controller.destroy();
+});
+
+it("maps speech discard to the wand input generation without clearing newer utterances", () => {
+  let onset!: (event: SpeechOnset) => void;
+  let discard!: (event: SpeechDiscard) => void;
+  vi.spyOn(SpeechClient.prototype, "onOnset").mockImplementation((callback) => {
+    onset = callback;
+    return () => {};
+  });
+  vi.spyOn(SpeechClient.prototype, "onDiscard").mockImplementation((callback) => {
+    discard = callback;
+    return () => {};
+  });
+  const controller = new DuelController();
+  controller.generation = 7;
+  const speechGeneration = controller.speech.getSnapshot().generation;
+  vi.spyOn(controller.motion, "getState").mockReturnValue({
+    ...controller.motion.getState(),
+    phase: "ready",
+  });
+  onset({ id: "discarded", generation: speechGeneration, startMs: 0 });
+  expect(controller.fusion.getState().activeUtterance?.generation).toBe(7);
+  discard({ id: "discarded", generation: speechGeneration + 1 });
+  expect(controller.fusion.getState().activeUtterance?.id).toBe("discarded");
+  discard({ id: "discarded", generation: speechGeneration });
+  expect(controller.fusion.getState().activeUtterance).toBeUndefined();
+  onset({ id: "fresh", generation: speechGeneration, startMs: 10 });
+  discard({ id: "discarded", generation: speechGeneration });
+  expect(controller.fusion.getState().activeUtterance?.id).toBe("fresh");
   controller.destroy();
 });
 

@@ -171,6 +171,10 @@ async def main() -> int:
         for spell, name in spells:
             st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, spell, 700), epoch, link.device_now() + 300)
             check(st is not None and st.detail1 == wp.R_OK, f"CUE cast {name} accepted", f"{st}")
+        for spell in (5, 6, 7, 9):
+            invalid_cue = wp.FX_ACCEPTED_CAST | (spell << 8) | (300 << 16)
+            st, _ = await link.command(wp.OP_CUE, invalid_cue, epoch, link.device_now() + 300)
+            check(st is not None and st.detail1 == wp.R_INVALID_ARG, f"CUE reserved/unknown spell {spell} rejected (3)", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_ACCEPTED_CAST, wp.SP_STUPEFY, 700), epoch + 1, link.device_now() + 300)
         check(st is not None and st.detail1 == wp.R_INVALID_ARG, "CUE with wrong epoch rejected (3)", f"{st}")
         st, _ = await link.command(wp.OP_CUE, wp.cue_args(wp.FX_DAMAGE, wp.SP_NONE, 500), epoch, link.device_now() - 50)

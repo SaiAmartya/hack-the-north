@@ -25,7 +25,8 @@ R_OK, R_MALFORMED, R_WRONG_SESSION, R_INVALID_ARG, R_EXPIRED, R_UNSUPPORTED, R_S
 PH_IDLE, PH_PRACTICE, PH_COUNTDOWN, PH_PLAYING, PH_WON, PH_LOST, PH_DRAW, PH_ABORTED = range(8)
 # effects / spells
 FX_ACCEPTED_CAST, FX_BLOCKED, FX_DAMAGE, FX_RESULT = 1, 2, 3, 4
-SP_NONE, SP_STUPEFY, SP_PROTEGO, SP_EXPELLIARMUS, SP_INCENDIO, SP_EPISKEY = 0, 1, 2, 3, 4, 5
+SP_NONE, SP_STUPEFY, SP_PROTEGO, SP_EXPELLIARMUS, SP_INCENDIO, SP_EPISKEY = 0, 1, 2, 3, 4, 8
+_CUE_SPELLS = (SP_NONE, SP_STUPEFY, SP_PROTEGO, SP_EXPELLIARMUS, SP_INCENDIO, SP_EPISKEY)
 # flags / bits
 MF_VALID, MF_SATURATED, MF_DISCONTINUITY = 1, 2, 4
 H_SENSOR, H_STREAM, H_PRESENTATION, H_STATE_STALE = 1, 2, 4, 8
@@ -123,6 +124,8 @@ def decode_control(data: bytes) -> Control | None:
     if len(data) != RECORD_LEN or data[0] != VERSION:
         return None
     _, op, seq, nonce, a0, a1, a2 = struct.unpack("<BBHIIII", data)
+    if op == OP_CUE and ((a0 >> 8) & 0xFF) not in _CUE_SPELLS:
+        return None
     return Control(op, seq, nonce, a0, a1, a2)
 
 
@@ -134,6 +137,8 @@ def decode_status(data: bytes) -> Status | None:
     if len(data) != RECORD_LEN or data[0] != VERSION:
         return None
     _, kind, seq, nonce, ms, d0, d1 = struct.unpack("<BBHIIII", data)
+    if kind not in (0, 1):
+        return None
     return Status(kind, seq, nonce, ms, d0, d1)
 
 
@@ -143,6 +148,8 @@ def set_state_args(phase: int, hp: int, status: int = 0, maxhp: int = 100) -> in
 
 
 def cue_args(effect: int, spell: int, duration_ms: int) -> int:
+    if spell not in _CUE_SPELLS:
+        raise ValueError("reserved or unknown cue spell")
     return effect | (spell << 8) | (duration_ms << 16)
 
 

@@ -115,6 +115,11 @@ export class DuelController {
             finalAtMs: e.arrivedMs,
           });
       }),
+      this.speech.onDiscard((e) => {
+        // Speech capture and wand input have separate generations, just as at onset.
+        if (e.generation === this.speech.getSnapshot().generation)
+          this.fusion.cancelUtterance(e.id, this.generation);
+      }),
     );
     this.game.getHealth = () => ({
       healthy: this.healthy(),

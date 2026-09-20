@@ -188,4 +188,33 @@ describe("speech and gesture fusion", () => {
     expect(attempts).toHaveLength(1);
     expect(attempts[0].generation).toBe(5);
   });
+
+  it("cancels only the matching utterance and consumes its old gesture without changing generations", () => {
+    const fusion = new CastFusion(() => undefined);
+    const oldGesture = gesture("old-gesture", "stupefy", 1_000, 1_300);
+    fusion.beginUtterance({ id: "voice", generation: 4, startMs: 1_000 });
+    fusion.pushGesture(oldGesture);
+    const original = fusion.getState();
+    fusion.cancelUtterance("voice", 5);
+    fusion.cancelUtterance("different-voice", 4);
+    expect(fusion.getState()).toEqual(original);
+    fusion.cancelUtterance("voice", 4);
+    expect(fusion.getState()).toMatchObject({
+      generation: 4,
+      activeUtterance: undefined,
+      pendingGesture: undefined,
+      lastRejection: "utterance-discarded",
+    });
+    fusion.pushGesture(oldGesture);
+    expect(fusion.getState().pendingGesture).toBeUndefined();
+    expect(fusion.getState().lastRejection).toBe("duplicate-gesture-id");
+
+    fusion.reset(5);
+    finish(fusion, utterance("voice", "stupefy", 2_000, 2_300, 2_500, 5));
+    const fresh = fusion.getState();
+    fusion.cancelUtterance("voice", 4);
+    expect(fusion.getState()).toEqual(fresh);
+    fusion.cancelUtterance("voice", 5);
+    expect(fusion.getState().pendingUtterance).toBeUndefined();
+  });
 });
