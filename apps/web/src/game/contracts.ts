@@ -4,7 +4,8 @@ export type Spell = (typeof SPELLS)[number];
 export const POWERUPS = ["phoenix", "bezoar", "felix", "mirror", "haste"] as const;
 export type PowerupKind = (typeof POWERUPS)[number];
 export type Source = "phone" | "ble" | "replay";
-export type GameMode = "duel" | "solo" | "tutorial";
+export type GameMode = "duel" | "solo" | "tutorial" | "story";
+export type Story = { level: number; name: string; total: number };
 export type Tutorial = {
   step: number;
   spell: Spell | null;
@@ -96,6 +97,7 @@ export type Snapshot = {
   roomId: string;
   mode: GameMode;
   tutorial?: Tutorial | null;
+  story?: Story | null;
   roomGeneration: number;
   roundId: number;
   stateVersion: number;
@@ -156,7 +158,7 @@ export function parseSnapshot(value: unknown): Snapshot {
   if (
     !object(value) ||
     typeof value.roomId !== "string" ||
-    !["duel", "solo", "tutorial"].includes(String(value.mode)) ||
+    !["duel", "solo", "tutorial", "story"].includes(String(value.mode)) ||
     !["roomGeneration", "roundId", "stateVersion", "serverNowMs"].every((k) =>
       finite(value[k]),
     ) ||
@@ -263,5 +265,18 @@ export function parseSnapshot(value: unknown): Snapshot {
       typeof lesson.paused !== "boolean")
       throw new Error("Invalid tutorial state");
   } else if (lesson != null) throw new Error("Unexpected tutorial state");
+  const story = value.story;
+  if (value.mode === "story") {
+    if (
+      !object(story) ||
+      !Number.isInteger(story.level) ||
+      !Number.isInteger(story.total) ||
+      (story.level as number) < 1 ||
+      (story.level as number) > (story.total as number) ||
+      typeof story.name !== "string" ||
+      !story.name
+    )
+      throw new Error("Invalid story state");
+  } else if (story != null) throw new Error("Unexpected story state");
   return value as Snapshot;
 }

@@ -63,6 +63,7 @@ class PracticeBot:
         self.seed = seed
         self.round_id = 0
         self.next_action_ms = 0
+        self.first_action_ms = BOT_FIRST_ACTION_MS
         self.decisions = 0
         self._rng = random.Random(seed)
         self._threats: dict[str, bool] = {}
@@ -79,7 +80,7 @@ class PracticeBot:
         if self.round_id != engine.round_id:
             self.round_id = engine.round_id
             self._rng = random.Random((self.seed * 31 + engine.round_id) & 0xFFFFFFFF)
-            self.next_action_ms = engine.countdown_ends_at_ms + BOT_FIRST_ACTION_MS
+            self.next_action_ms = engine.countdown_ends_at_ms + self.first_action_ms
             self.decisions = 0
             self._threats.clear()
         own = engine.players[Slot.P2]
@@ -213,4 +214,104 @@ class PracticeBot:
             self.level = max(1, self.level - 1)
 
 
-__all__ = ["ATTACKS", "BOT_FIRST_ACTION_MS", "LEVELS", "BotLevel", "PracticeBot", "SPELL_RULES"]
+# ---------------------------------------------------------------------------
+# Story mode: a ladder of named rivals from gentler-than-Apprentice to beyond-Master.
+
+STORY_NAMES: tuple[str, ...] = (
+    "Hedge Witch",
+    "Apprentice Mage",
+    "Pixie Wrangler",
+    "Potions Prefect",
+    "Quidditch Bruiser",
+    "Ghoul Keeper",
+    "Hex Peddler",
+    "Duelling Club Captain",
+    "Grindylow Tamer",
+    "Runes Scholar",
+    "Auror Cadet",
+    "Curse Breaker",
+    "Boggart Bane",
+    "Veela Envoy",
+    "Dragon Handler",
+    "Shadow Duelist",
+    "Warlock of the Moor",
+    "Dementor Whisperer",
+    "Unspeakable",
+    "Head Auror",
+    "Dark Acolyte",
+    "Lich Sorcerer",
+    "Archmage Emeritus",
+    "The Nameless One",
+)
+STORY_LEVEL_COUNT = len(STORY_NAMES)
+STORY_BOLT_BLOCK_FROM = 12
+STORY_PERFECT_BLOCK_FROM = 16
+STORY_FIRST_ACTION_MS = (10_000, 3_000)
+
+
+def _lerp(low: float, high: float, t: float) -> float:
+    return low + (high - low) * t
+
+
+@dataclass(frozen=True)
+class StoryLevel:
+    level: int
+    name: str
+    first_action_ms: int
+    profile: BotLevel
+
+
+def story_level(level: int) -> StoryLevel:
+    """Profile for one rung; every rung is at least as sharp as the one below it."""
+
+    if not 1 <= level <= STORY_LEVEL_COUNT:
+        raise ValueError(f"story level must be 1..{STORY_LEVEL_COUNT}")
+    t = (level - 1) / (STORY_LEVEL_COUNT - 1)
+    name = STORY_NAMES[level - 1]
+    profile = BotLevel(
+        name=name,
+        interval_ms=(round(_lerp(4_000, 1_500, t)), round(_lerp(9_000, 4_000, t))),
+        tempo=round(_lerp(1.8, 0.7, t), 3),
+        reaction_ms=round(_lerp(900, 250, t)),
+        block_chance=round(_lerp(20, 70, t)),
+        bolt_block_chance=0 if level < STORY_BOLT_BLOCK_FROM else round(_lerp(0, 35, t)),
+        perfect_block=level >= STORY_PERFECT_BLOCK_FROM,
+        race_chance=round(_lerp(20, 90, t)),
+        hesitation=round(_lerp(35, 5, t)),
+        heal_at=round(_lerp(30, 50, t)),
+        attack_weights=(
+            round(_lerp(100, 35, t)),
+            round(_lerp(0, 25, t)),
+            round(_lerp(0, 40, t)),
+        ),
+        relic_notice_ms=round(_lerp(3_000, 900, t)),
+    )
+    return StoryLevel(
+        level=level,
+        name=name,
+        first_action_ms=round(_lerp(*STORY_FIRST_ACTION_MS, t)),
+        profile=profile,
+    )
+
+
+class StoryBot(PracticeBot):
+    """A fixed-rung rival: the Practice Wizard's brain with a per-level profile and no adaptation."""
+
+    def __init__(self, level: int, *, seed: int = 0) -> None:
+        self.rung = story_level(level)
+        super().__init__(level=1, seed=seed, adaptive=False)
+        self.first_action_ms = self.rung.first_action_ms
+
+    @property
+    def name(self) -> str:
+        return self.rung.name
+
+    @property
+    def profile(self) -> BotLevel:
+        return self.rung.profile
+
+
+__all__ = [
+    "ATTACKS", "BOT_FIRST_ACTION_MS", "LEVELS", "BotLevel", "PracticeBot", "SPELL_RULES",
+    "STORY_LEVEL_COUNT", "STORY_NAMES", "StoryBot", "StoryLevel", "story_level",
+]

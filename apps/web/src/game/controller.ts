@@ -22,6 +22,7 @@ import {
   formatDeviceId,
 } from "../wand/protocol";
 import type { GameMode, Source, Spell } from "./contracts";
+import { recordClear } from "./campaign";
 
 export class DuelController {
   readonly game = new GameClient();
@@ -38,6 +39,10 @@ export class DuelController {
   /** The duel this player started or joined; every referee session is created inside it. */
   roomCode = "";
   mode: GameMode = "duel";
+  /** Story-mode rung this room was opened for; 0 outside story mode. */
+  storyLevel = 0;
+  /** Story level cleared by the round that just ended, if any. */
+  storyCleared = 0;
   /** The battle lobby opens as soon as the wand streams; Ready still needs healthy input. */
   battleLobby = false;
   pairingCode = "";
@@ -383,7 +388,7 @@ export class DuelController {
     );
   }
   /** Open a new room on the referee and show its code for the opponent. */
-  async startDuel(mode: GameMode = "duel") {
+  async startDuel(mode: GameMode = "duel", level?: number) {
     if (
       this.busy ||
       this.roomCode ||
@@ -393,10 +398,14 @@ export class DuelController {
       return;
     this.busy = true;
     this.mode = mode;
+    this.storyLevel = mode === "story" ? (level ?? 0) : 0;
+    this.storyCleared = 0;
     this.issue = "";
     this.onChange();
     try {
-      if (mode !== "duel") await this.game.connect(this.source, undefined, mode);
+      if (mode === "story")
+        await this.game.connect(this.source, undefined, mode, this.storyLevel);
+      else if (mode !== "duel") await this.game.connect(this.source, undefined, mode);
       else await this.game.connect(this.source);
       this.roomCode = this.game.snapshot!.roomId;
     } catch (error) {
@@ -447,6 +456,8 @@ export class DuelController {
     this.game.issue = "";
     this.roomCode = "";
     this.mode = "duel";
+    this.storyLevel = 0;
+    this.storyCleared = 0;
     this.context = "";
     this.feedbackKey = "";
     this.seen.clear();
@@ -486,8 +497,17 @@ export class DuelController {
       }
     }
   }
+  /** Leave the current story fight and open another rung in one step. */
+  async startStoryLevel(level: number) {
+    if (this.busy) return;
+    if (this.roomCode) this.leaveRoom();
+    await this.startDuel("story", level);
+  }
   private async reopenRoom(source: Source) {
-    if (this.mode !== "duel") {
+    if (this.mode === "story") {
+      await this.game.connect(source, undefined, this.mode, this.storyLevel);
+      this.roomCode = this.game.snapshot!.roomId;
+    } else if (this.mode !== "duel") {
       await this.game.connect(source, undefined, this.mode);
       this.roomCode = this.game.snapshot!.roomId;
     } else await this.game.connect(source, this.roomCode);
@@ -853,6 +873,17 @@ export class DuelController {
       return;
     }
     const own = state.players[slot];
+    if (
+      this.mode === "story" &&
+      this.storyLevel &&
+      state.phase === "result" &&
+      state.result?.outcome === "win" &&
+      state.result.winner === slot &&
+      this.storyCleared !== this.storyLevel
+    ) {
+      this.storyCleared = this.storyLevel;
+      recordClear(this.storyLevel);
+    }
     this.recordChanged("game.state", { mode: state.mode, phase: state.phase, roundId: state.roundId,
       tutorial: state.tutorial, hp: { P1: state.players.P1?.hp, P2: state.players.P2?.hp }, result: state.result });
     if (own && this.wand?.getSnapshot().phase === "streaming") {

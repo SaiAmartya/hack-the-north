@@ -42,7 +42,7 @@ class RoomRegistry:
     def rooms(self) -> list[DuelRoom]:
         return list(self._rooms.values())
 
-    def create_room(self, *, mode: Mode = Mode.DUEL) -> str:
+    def create_room(self, *, mode: Mode = Mode.DUEL, level: int | None = None) -> str:
         if len(self._rooms) >= MAX_ROOMS:
             raise RoomError("too_many_rooms", status_code=429)
         code = self._new_code()
@@ -53,6 +53,7 @@ class RoomRegistry:
             room_id=code,
             mode=mode,
             variance=self.variance,
+            level=level,
         )
         self._empty_since_ms[code] = self.clock_ms()
         return code
@@ -62,13 +63,15 @@ class RoomRegistry:
 
     async def create_session(
         self, *, name: str, source: Source, code: str | None = None,
-        mode: Mode = Mode.DUEL,
+        mode: Mode = Mode.DUEL, level: int | None = None,
     ) -> SessionResponse:
         if mode is not Mode.DUEL and code is not None:
             raise RoomError(f"{mode.value}_requires_new_room")
         created = code is None
         if code is None:
-            code = self.create_room(mode=mode)
+            code = self.create_room(mode=mode, level=level)
+        elif level is not None:
+            raise RoomError("story_requires_new_room")
         room = self._rooms.get(code)
         if room is None:
             raise RoomError("room_not_found", status_code=404)

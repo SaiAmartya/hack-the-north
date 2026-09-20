@@ -175,7 +175,7 @@ def create_app(
         try:
             return await registry.create_session(
                 name=payload.name, source=payload.source, code=payload.code,
-                mode=payload.mode,
+                mode=payload.mode, level=payload.level,
             )
         except RoomError as error:
             raise HTTPException(
